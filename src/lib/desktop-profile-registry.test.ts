@@ -31,11 +31,8 @@ const registryModule = require("../../electron/profile-registry.js") as {
   writeRegistry: (installRoot: string, registry: Registry, fsImpl?: unknown) => Registry;
   createProfile: (input?: Record<string, unknown>, now?: Date) => Profile;
   addProfile: (registry: Registry, input: Record<string, unknown>, now?: Date) => { ok: boolean; error?: string; profile?: Profile; registry?: Registry };
-  updateProfile: (registry: Registry, id: string, patch?: Record<string, unknown>, now?: Date) => { ok: boolean; error?: string; registry?: Registry };
   removeProfile: (registry: Registry, id: string) => { ok: boolean; removed?: Profile; registry?: Registry };
   selectProfile: (registry: Registry, id: string, now?: Date) => { ok: boolean; registry?: Registry; profile?: Profile };
-  clearActiveProfile: (registry: Registry) => Registry;
-  resumableProfileId: (registry: Registry) => string | null;
   planLegacyImport: (installRoot: string, registry: Registry, fsImpl?: unknown) => { needed: boolean; reason?: string; entries?: Array<{ key: string; name: string; source: string }> };
   importLegacyInstall: (options: Record<string, unknown>) => {
     ok: boolean;
@@ -68,7 +65,6 @@ interface Profile {
 interface Registry {
   format: string;
   schemaVersion: number;
-  activeProfileId: string | null;
   lastUsedProfileId: string | null;
   profiles: Profile[];
 }
@@ -222,12 +218,12 @@ describe("registry persistence", () => {
     expect(registryModule.readRegistry(root).state).toBe("invalid");
   });
 
-  it("heals a dangling active pointer instead of bricking startup", () => {
-    const registry = { ...seeded(1), activeProfileId: UUID_B };
+  it("heals a dangling last-used pointer instead of bricking startup", () => {
+    const registry = { ...seeded(1), lastUsedProfileId: UUID_B };
     fs.writeFileSync(registryModule.registryPath(root), JSON.stringify(registry));
     const read = registryModule.readRegistry(root);
     expect(read.state).toBe("ok");
-    expect(read.registry?.activeProfileId).toBeNull();
+    expect(read.registry?.lastUsedProfileId).toBeNull();
   });
 
   it("refuses to write an invalid registry", () => {
@@ -270,15 +266,6 @@ describe("registry mutations", () => {
     expect(registryModule.addProfile(registry, { displayName: "یکی زیاد" }).error).toBe("profile_limit");
   });
 
-  it("updates non-secret metadata without touching the identity or creation stamp", () => {
-    const registry = seeded(1);
-    const id = registry.profiles[0].id;
-    const renamed = registryModule.updateProfile(registry, id, { displayName: "نام تازه" });
-    expect(renamed.ok).toBe(true);
-    expect(renamed.registry?.profiles[0]).toMatchObject({ id, displayName: "نام تازه" });
-    expect(renamed.registry?.profiles[0].createdAt).toBe(registry.profiles[0].createdAt);
-  });
-
   it("removes a profile from the index and clears pointers at it", () => {
     const registry = seeded(2);
     const [first, second] = registry.profiles;
@@ -286,20 +273,7 @@ describe("registry mutations", () => {
     const removed = registryModule.removeProfile(selected, first.id);
     expect(removed.ok).toBe(true);
     expect(removed.registry?.profiles.map((profile) => profile.id)).toEqual([second.id]);
-    expect(removed.registry?.activeProfileId).toBeNull();
     expect(removed.registry?.lastUsedProfileId).toBeNull();
-  });
-
-  it("resumes to the last used profile, and to the only one that exists", () => {
-    const single = seeded(1);
-    expect(registryModule.resumableProfileId(single)).toBe(single.profiles[0].id);
-
-    const two = seeded(2);
-    // Two profiles and no history: nothing is guessed.
-    expect(registryModule.resumableProfileId(two)).toBeNull();
-
-    const used = registryModule.selectProfile(two, two.profiles[1].id, new Date("2026-11-25T10:00:00Z"));
-    expect(registryModule.resumableProfileId(used.registry as Registry)).toBe(two.profiles[1].id);
   });
 });
 
@@ -337,15 +311,6 @@ describe("legacy single-business install migration", () => {
     const read = registryModule.readRegistry(root);
     expect(read.state).toBe("ok");
     expect(read.registry?.profiles[0].id).toBe(result.profile!.id);
-  });
-
-  it("takes a preflight copy of the configuration before moving anything", () => {
-    seedLegacyInstall();
-    const result = registryModule.importLegacyInstall({ installRoot: root, registry: registryModule.emptyRegistry() });
-    expect(result.ok).toBe(true);
-    const profileRoot = registryModule.profileDataDir(root, result.profile!.id);
-    const evidence = path.join(profileRoot, "Backup", "pre-multi-business-migration");
-    expect(fs.existsSync(evidence)).toBe(true);
   });
 
   it("does nothing when there is no legacy data and no profile", () => {

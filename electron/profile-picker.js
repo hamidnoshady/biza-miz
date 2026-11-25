@@ -33,7 +33,7 @@
  */
 
 const path = require("node:path");
-const { BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 
 const PICKER_CHANNELS = Object.freeze([
   "profiles:list",
@@ -42,6 +42,28 @@ const PICKER_CHANNELS = Object.freeze([
   "profiles:remove",
   "profiles:quit",
 ]);
+
+/**
+ * Whether the *application* is quitting. During selection this window is usually
+ * the only one, so closing it would close the app — but "the owner clicked the
+ * title bar's X" is not a decision to give up the launch, and treating it as one
+ * used to end the process mid-selection. A deliberate quit (the picker's own
+ * «بستن برنامه», the OS, or an update install) emits `before-quit` first, and
+ * only then may the window go without an answer.
+ */
+let appIsQuitting = false;
+app.on("before-quit", () => {
+  appIsQuitting = true;
+});
+
+/**
+ * Handlers live on `ipcMain` globally, so a picker that was torn down without its
+ * cleanup running would make the next one throw on registration. Releasing them
+ * before every registration is what makes the add/remove loop reopen cleanly.
+ */
+function releaseHandlers() {
+  for (const channel of PICKER_CHANNELS) ipcMain.removeHandler(channel);
+}
 
 function removeConfirmationDetail(profile) {
   const lines = [
@@ -97,7 +119,7 @@ function showProfilePicker(options) {
     const fromThisWindow = (event) => event?.sender?.id === senderId;
 
     function cleanup() {
-      for (const channel of PICKER_CHANNELS) ipcMain.removeHandler(channel);
+      releaseHandlers();
       if (!window.isDestroyed()) window.destroy();
     }
 
@@ -114,6 +136,8 @@ function showProfilePicker(options) {
         event.sender.send("profiles:error", { message });
       }
     }
+
+    releaseHandlers();
 
     ipcMain.handle("profiles:list", (event) => {
       if (!fromThisWindow(event)) throw new Error("profiles:list_from_unknown_sender");
@@ -169,8 +193,19 @@ function showProfilePicker(options) {
     });
 
     window.once("ready-to-show", () => window.show());
+    // The title-bar X must not end the launch while a business is still being
+    // chosen: it would destroy the only window and leave `main.js` selecting
+    // nothing. Refuse it, and keep the window in front so the refusal is visible.
+    // A real quit is exempt through `appIsQuitting`.
+    window.on("close", (event) => {
+      if (settled || appIsQuitting) return;
+      event.preventDefault();
+      if (window.isMinimized()) window.restore();
+      window.focus();
+    });
     window.on("closed", () => {
-      // Closing the window with the title bar is "quit", not "hang forever".
+      // Reachable only while the application is quitting, or when the window was
+      // destroyed programmatically. Never leave `main.js` without an answer.
       if (!settled) finish({ action: "quit" });
     });
 

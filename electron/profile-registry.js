@@ -154,7 +154,6 @@ function emptyRegistry() {
   return {
     format: REGISTRY_FORMAT,
     schemaVersion: REGISTRY_SCHEMA_VERSION,
-    activeProfileId: null,
     lastUsedProfileId: null,
     profiles: [],
   };
@@ -273,7 +272,6 @@ function validateRegistry(raw) {
   return {
     format: REGISTRY_FORMAT,
     schemaVersion: REGISTRY_SCHEMA_VERSION,
-    activeProfileId: pointer(raw.activeProfileId),
     lastUsedProfileId: pointer(raw.lastUsedProfileId),
     profiles,
   };
@@ -383,23 +381,6 @@ function addProfile(registry, input, now = new Date()) {
   };
 }
 
-/** Patch the non-secret metadata of a stored profile (rename, learned identity, mode). */
-function updateProfile(registry, profileId, patch = {}, now = new Date()) {
-  const index = registry.profiles.findIndex((profile) => profile.id === profileId);
-  if (index === -1) return { ok: false, error: "profile_not_found" };
-  const current = registry.profiles[index];
-  const next = validateProfile({
-    ...current,
-    ...patch,
-    id: current.id,
-    createdAt: current.createdAt,
-  });
-  if (!next) return { ok: false, error: "invalid_patch" };
-  const profiles = registry.profiles.slice();
-  profiles[index] = next;
-  return { ok: true, profile: next, registry: { ...registry, profiles } };
-}
-
 /**
  * Remove a profile from the *registry only*. Deleting its directory — which holds
  * a business's local sales and unsynced events — is a separate, explicitly
@@ -414,13 +395,12 @@ function removeProfile(registry, profileId) {
     registry: {
       ...registry,
       profiles: registry.profiles.filter((entry) => entry.id !== profileId),
-      activeProfileId: registry.activeProfileId === profileId ? null : registry.activeProfileId,
       lastUsedProfileId: registry.lastUsedProfileId === profileId ? null : registry.lastUsedProfileId,
     },
   };
 }
 
-/** Mark a profile as the one in use. `activeProfileId` is cleared on stop. */
+/** Mark a profile as the last one used, which is what the picker highlights. */
 function selectProfile(registry, profileId, now = new Date()) {
   const index = registry.profiles.findIndex((profile) => profile.id === profileId);
   if (index === -1) return { ok: false, error: "profile_not_found" };
@@ -430,24 +410,8 @@ function selectProfile(registry, profileId, now = new Date()) {
   return {
     ok: true,
     profile: profiles[index],
-    registry: { ...registry, profiles, activeProfileId: profileId, lastUsedProfileId: profileId },
+    registry: { ...registry, profiles, lastUsedProfileId: profileId },
   };
-}
-
-function clearActiveProfile(registry) {
-  return { ...registry, activeProfileId: null };
-}
-
-/**
- * What to open when the app starts without a user choice. The last *used*
- * profile is highlighted, never silently entered into a different tenant — the
- * picker treats this as a default selection, and a caller that skips the picker
- * (single-business installs) only ever opens the one profile that exists.
- */
-function resumableProfileId(registry) {
-  if (registry.activeProfileId) return registry.activeProfileId;
-  if (registry.lastUsedProfileId) return registry.lastUsedProfileId;
-  return registry.profiles.length === 1 ? registry.profiles[0].id : null;
 }
 
 /**
@@ -499,10 +463,8 @@ function moveBackSafely(entry, targetRoot, fsImpl) {
  * write leaves the legacy layout authoritative and the migration is simply
  * retried on the next launch.
  *
- * A small copy of `Configuration/` is taken under `Backup/` first, as preflight
- * evidence that costs kilobytes (the secrets in it are already
- * safeStorage-encrypted). The multi-gigabyte cluster is *moved*, never copied —
- * a same-volume rename is what keeps an upgrade fast enough to be safe.
+ * The multi-gigabyte cluster is *moved*, never copied — a same-volume rename is
+ * what keeps an upgrade fast enough to be safe.
  */
 function importLegacyInstall(options) {
   const { installRoot, registry, fsImpl = fs, now = new Date(), displayName } = options;
@@ -518,9 +480,6 @@ function importLegacyInstall(options) {
     now,
   );
   const targetRoot = profileDataDir(installRoot, profile.id);
-  const paths = computePaths(installRoot);
-  const stamp = nowIso(now).replace(/[:.]/g, "-");
-  const preflightDir = path.join(targetRoot, "Backup", "pre-multi-business-migration", stamp);
 
   const moved = [];
   try {
@@ -529,17 +488,6 @@ function importLegacyInstall(options) {
       moveEntry(entry.source, path.join(targetRoot, entry.name), fsImpl);
       moved.push(entry);
     }
-    // Durable evidence of the configuration this migration carried, taken from
-    // its new home so it cannot collide with the `Backup/` folder being moved.
-    // Best effort only: a copy that fails must not undo an already-safe rename.
-    try {
-      for (const name of ["config.json", "config.backup.json"]) {
-        const source = path.join(targetRoot, "Configuration", name);
-        if (!fsImpl.existsSync(source)) continue;
-        fsImpl.mkdirSync(preflightDir, { recursive: true });
-        fsImpl.copyFileSync(source, path.join(preflightDir, name));
-      }
-    } catch {}
     const added = addProfile(registry, { ...profile, id: profile.id }, now);
     if (!added.ok) throw new Error(`profile_registry_refused:${added.error}`);
     const registryNext = writeRegistry(installRoot, added.registry, fsImpl);
@@ -550,13 +498,6 @@ function importLegacyInstall(options) {
       registry: registryNext,
       targetRoot,
       moved: moved.map((entry) => entry.name),
-      preflightDir: (() => {
-        try {
-          return fsImpl.existsSync(preflightDir) ? preflightDir : null;
-        } catch {
-          return null;
-        }
-      })(),
     };
   } catch (error) {
     const rollbackFailures = moved.map((entry) => moveBackSafely(entry, targetRoot, fsImpl)).filter(Boolean);
@@ -603,16 +544,11 @@ function profileHasData(installRoot, profileId, fsImpl = fs) {
 }
 
 module.exports = {
-  REGISTRY_FILENAME,
   REGISTRY_FORMAT,
   REGISTRY_SCHEMA_VERSION,
-  PROFILES_DIRNAME,
   MAX_PROFILES,
-  BUSINESS_MODES,
-  FORBIDDEN_KEYS,
   isProfileId,
   registryPath,
-  profilesDir,
   profileDataDir,
   emptyRegistry,
   validateProfile,
@@ -621,11 +557,8 @@ module.exports = {
   writeRegistry,
   createProfile,
   addProfile,
-  updateProfile,
   removeProfile,
   selectProfile,
-  clearActiveProfile,
-  resumableProfileId,
   planLegacyImport,
   importLegacyInstall,
   deleteProfileData,

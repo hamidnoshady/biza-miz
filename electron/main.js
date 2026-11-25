@@ -31,16 +31,13 @@ const { ServerSupervisor } = require("./server-supervisor");
 const { ProfileManager } = require("./profile-manager");
 const {
   addProfile,
-  clearActiveProfile,
   deleteProfileData,
-  emptyRegistry,
   importLegacyInstall,
   profileDataDir,
   profileHasData,
   readRegistry,
   registryPath,
   removeProfile,
-  resumableProfileId,
   selectProfile,
   writeRegistry,
 } = require("./profile-registry");
@@ -111,8 +108,6 @@ function runDesktopShell() {
   // `businesses/<profile-uuid>/` and is served by exactly one backend at a time.
   let installRoot = null;
   let profileManager = null;
-  let activeProfile = null;
-  let profileCount = 0;
   // One CloudPane partition per business, so its cloud cookies and storage are
   // never the ones the next business's pane loads.
   let cloudPartitionName = CLOUD_PARTITION;
@@ -367,27 +362,29 @@ function runDesktopShell() {
     });
 
     // Desktop multi-business (#1571/#1572): which business this window is
-    // serving, and the "change business" action. The answer is read from the
-    // live manager, never from renderer input.
-    handleIpc("desktop:business-current", async () => ({
-      status: profileManager?.status() ?? null,
-      multiBusiness: profileCount > 1,
-    }));
+    // serving, and the "change business" action. The answers come from the live
+    // manager and the registry, never from renderer input.
+    handleIpc("desktop:business-current", async () => {
+      const current = readRegistry(installRoot);
+      return {
+        status: profileManager?.status() ?? null,
+        multiBusiness: (current.registry?.profiles.length ?? 0) > 1,
+      };
+    });
     handleIpc("desktop:business-switch", async () => {
-      if (profileCount < 2) throw new Error("only_one_business");
       const current = readRegistry(installRoot);
       if (current.state !== "ok") throw new Error("profile_registry_unreadable");
-      // Clearing the active pointer is what makes the relaunched app open the
-      // picker instead of silently re-entering the business being left.
-      writeRegistry(installRoot, clearActiveProfile(current.registry));
+      if (current.registry.profiles.length < 2) throw new Error("only_one_business");
       logger.info("Owner requested a business switch; restarting into the picker", {
-        from: activeProfile?.id ?? null,
+        from: profileManager?.status().activeProfileId ?? null,
       });
       quitting = true;
       serverSupervisor?.cancel();
       // A full relaunch, not an in-process handover: it is the only way to be
       // sure every local writer, gateway and background tick of this business is
-      // gone before another one starts.
+      // gone before another one starts. Two or more saved businesses are what
+      // make the relaunched app open the picker, so nothing of this one survives
+      // into the next.
       await cleanup();
       app.relaunch();
       app.exit(0);
@@ -620,9 +617,9 @@ function runDesktopShell() {
 
   /**
    * Start the one active business. `ProfileManager` owns the lifecycle — the
-   * single-active-backend guarantee, the serialized switch and the rollback —
-   * so this function only wires the gateway/certificate/firewall managers to
-   * whichever business the manager just started.
+   * single-active-backend guarantee and the serialized start/stop — so this
+   * function only wires the gateway/certificate/firewall managers to whichever
+   * business the manager just started.
    */
   async function initialiseBackend(profile) {
     profileManager = new ProfileManager({ app, logger, safeStorage, installRoot });
@@ -630,7 +627,6 @@ function runDesktopShell() {
     // The manager owns the running backend; this reference is what the IPC
     // handlers and the crash supervisor already use.
     backend = profileManager.backend;
-    activeProfile = profile;
     cloudPartitionName = cloudPartition(profile.id);
     const certificates = createCertificateManager(state.userDataDir, logger);
     firewall = new FirewallManager(logger);
@@ -856,7 +852,7 @@ function runDesktopShell() {
       return null;
     }
 
-    let registry = read.registry ?? emptyRegistry();
+    let registry = read.registry;
 
     if (registry.profiles.length === 0) {
       const imported = importLegacyInstall({ installRoot, registry });
@@ -875,7 +871,6 @@ function runDesktopShell() {
         logger.info("Imported the existing single-business install into its first desktop profile", {
           profileId: imported.profile.id,
           moved: imported.moved,
-          preflightDir: imported.preflightDir,
         });
         registry = imported.registry ?? read.registry;
       } else {
@@ -886,17 +881,21 @@ function runDesktopShell() {
       }
     }
 
-    profileCount = registry.profiles.length;
+    // The single-business shortcut applies to the launch only. Once the picker
+    // has been shown it reopens for every add or removal, so removing a business
+    // can never silently drop the app into whichever one is left (and removing
+    // the last one leaves an empty picker to add a named business from).
+    let pickerOpened = false;
 
     for (;;) {
-      if (profileCount < 2) {
-        const profileId = resumableProfileId(registry) ?? registry.profiles[0]?.id ?? null;
-        const profile = registry.profiles.find((entry) => entry.id === profileId);
-        if (!profile) return null;
-        const selected = selectProfile(registry, profile.id);
+      if (!pickerOpened && registry.profiles.length < 2) {
+        const only = registry.profiles[0];
+        if (!only) return null;
+        const selected = selectProfile(registry, only.id);
         if (selected.ok) writeRegistry(installRoot, selected.registry);
-        return selected.ok ? selected.profile : profile;
+        return selected.ok ? selected.profile : only;
       }
+      pickerOpened = true;
 
       const outcome = await showProfilePicker({
         logger,
@@ -932,12 +931,10 @@ function runDesktopShell() {
           logger.warn("Refused a new desktop business profile", { error: created.error });
           continue;
         }
-        registry = writeRegistry(installRoot, created.registry);
-        profileCount = registry.profiles.length;
-        const selected = selectProfile(registry, created.profile.id);
-        if (selected.ok) registry = writeRegistry(installRoot, selected.registry);
+        const selected = selectProfile(created.registry, created.profile.id);
+        registry = writeRegistry(installRoot, selected.ok ? selected.registry : created.registry);
         logger.info("Added a desktop business profile", { profileId: created.profile.id });
-        return created.profile;
+        return selected.ok ? selected.profile : created.profile;
       }
 
       if (outcome.action === "remove") {
@@ -952,13 +949,6 @@ function runDesktopShell() {
           logger.error("Removing a desktop business profile's local data failed", error);
         }
         logger.info("Removed a desktop business profile from this computer", { profileId: outcome.profileId });
-        profileCount = registry.profiles.length;
-        if (profileCount === 0) {
-          const created = addProfile(registry, { displayName: DEFAULT_PROFILE_LABEL });
-          if (!created.ok) return null;
-          registry = writeRegistry(installRoot, created.registry);
-          profileCount = 1;
-        }
         continue;
       }
     }
