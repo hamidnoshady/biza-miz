@@ -134,7 +134,7 @@ every item is terminal and the post-apply cross-check passes.
   after product/customer mappings commit; they are not independently reviewed as
   financial documents here.
 - **#1289** owns historical sales-invoice workbooks and their posting/cutover.
-- **#1376** owns safe re-import of existing product prices and stock.
+- **#1376** (delivered) owns safe re-import of existing product prices and stock: the catalogue file's explicit `catalogue_only` / `fill_missing` / `update_existing` modes, current→proposed review, and the price/stock write path through `saveStockPrices` and `createItemStockCount`.
 - **#1335** (delivered) owns the catalogue entry point and generic brand handling.
 - Category/attribute/media reconciliation stays with the taxonomy and media
   services; the engine currently reviews product, party, financial-document and

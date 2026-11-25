@@ -3,6 +3,14 @@ import { xlsxCellToString } from "./codecs";
 import { normaliseHeader, westernDigits } from "./csv";
 import { normalizeSkuKey } from "../import-reconciliation/normalize";
 import type { WatchMovement } from "../watch-attributes-service";
+import {
+  parseCatalogueMoney,
+  parseCatalogueQuantity,
+  type CatalogueAmountState,
+  type CatalogueCurrency,
+  type CatalogueMoneyCell,
+  type CatalogueQuantityCell,
+} from "./catalogue-values";
 
 /**
  * Strict first-sheet view for reviewed catalogue imports. Formula caches are
@@ -69,7 +77,8 @@ export const CATALOGUE_FIELDS = {
   lock_type: ["نوع قفل"],
   case_color: ["رنگ قاب"],
   case_form: ["شکل قاب"],
-  price: ["قیمت"],
+  price: ["قیمت", "قیمت فروش"],
+  cost: ["بهای خرید", "قیمت خرید", "cost"],
   quantity: ["موجودی", "stock", "qty"],
   parent_sku: ["شناسه والد", "group_sku"],
   parent_title: ["نام والد"],
@@ -155,6 +164,8 @@ export type BrandSource = "excel" | "fallback" | "none";
 
 export interface ParseCatalogueOptions {
   fallbackBrand?: string | null;
+  /** The workbook's money unit. Stored and compared as integer Rial. */
+  currency?: CatalogueCurrency;
 }
 
 export function parseCatalogueRows(
@@ -163,6 +174,7 @@ export function parseCatalogueRows(
   options: ParseCatalogueOptions = {},
 ) {
   const fallbackBrand = normalizeBrandFallback(options.fallbackBrand);
+  const currency = options.currency === "toman" ? "toman" : "rial";
   const hasBrandColumn = mapping.brand !== undefined;
   if (!hasBrandColumn && !fallbackBrand) {
     throw new Error("catalogue_brand_required");
@@ -177,20 +189,41 @@ export function parseCatalogueRows(
     const raw: Partial<Record<CatalogueField, string>> = {};
     const values: Partial<Record<CatalogueField, string>> = {};
     const issues: { field: CatalogueField; code: string }[] = [];
+    const amounts: Record<"price" | "cost", CatalogueMoneyCell> = {
+      price: { raw: null, rial: null, state: "blank" },
+      cost: { raw: null, rial: null, state: "blank" },
+    };
+    let stock: CatalogueQuantityCell = { raw: null, quantity: null, state: "blank" };
     for (const field of keys) {
       const index = mapping[field];
       const cell = index === undefined ? undefined : row.cells[index];
       if (cell?.text) raw[field] = cell.text;
+      const text = catalogueText(cell?.text ?? "");
+      // Price, cost and quantity are values with a state, not free text: a
+      // blank, a formula, a malformed number and an explicit zero are four
+      // different facts and only the last one is ever a number the file meant.
+      if (field === "price" || field === "cost") {
+        const parsedAmount = parseCatalogueMoney(cell?.text ?? "", currency, cell?.issue);
+        amounts[field] = parsedAmount;
+        if (cell?.issue) issues.push({ field, code: cell.issue });
+        else if (parsedAmount.state === "invalid") issues.push({ field, code: "invalid_amount" });
+        else if (parsedAmount.state === "blank") issues.push({ field, code: "missing" });
+        else if (parsedAmount.state === "zero") issues.push({ field, code: "explicit_zero" });
+        continue;
+      }
+      if (field === "quantity") {
+        stock = parseCatalogueQuantity(cell?.text ?? "", cell?.issue);
+        if (cell?.issue) issues.push({ field, code: cell.issue });
+        else if (stock.state === "invalid") issues.push({ field, code: "invalid_amount" });
+        else if (stock.state === "blank") issues.push({ field, code: "missing" });
+        else if (stock.state === "zero") issues.push({ field, code: "explicit_zero" });
+        continue;
+      }
       if (cell?.issue) {
         issues.push({ field, code: cell.issue });
         continue;
       }
-      const text = catalogueText(cell?.text ?? "");
-      if (field === "price" || field === "quantity") {
-        issues.push({ field, code: text ? "metadata_only" : "missing" });
-      } else if (text) {
-        values[field] = text;
-      }
+      if (text) values[field] = text;
     }
 
     let brandSource: BrandSource = "none";
@@ -234,8 +267,19 @@ export function parseCatalogueRows(
     if (values.drive && !movement) issues.push({ field: "drive", code: "movement_review" });
     const dimensions = values.case_dimension ? dimensionsMm(values.case_dimension) : null;
     if (values.case_dimension && !dimensions) issues.push({ field: "case_dimension", code: "dimension_review" });
-    return { number: row.number, raw, values, issues, sku, title, movement, dimensions, brandSource };
+    return { number: row.number, raw, values, issues, sku, title, movement, dimensions, brandSource, amounts, stock };
   });
+
+  const countStates = (states: CatalogueAmountState[]) => {
+    const counts: Record<CatalogueAmountState, number> = { blank: 0, valid: 0, zero: 0, invalid: 0, formula: 0, error: 0 };
+    for (const state of states) counts[state] += 1;
+    return counts;
+  };
+  const valueTotals = {
+    price: countStates(parsed.map((row) => row.amounts.price.state)),
+    cost: countStates(parsed.map((row) => row.amounts.cost.state)),
+    quantity: countStates(parsed.map((row) => row.stock.state)),
+  };
   const groups = new Map<string, number[]>();
   for (const row of parsed) {
     if (!row.sku) continue;
@@ -246,6 +290,7 @@ export function parseCatalogueRows(
   const duplicates = [...groups].filter(([, rows]) => rows.length > 1);
   return {
     rows: parsed.map((row) => ({ ...row, duplicateRows: row.sku ? (groups.get(row.sku) ?? []).filter(n => n !== row.number) : [] })),
+    valueTotals,
     totals: {
       rows: parsed.length,
       distinctSkus: groups.size,

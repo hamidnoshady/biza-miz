@@ -2,11 +2,17 @@ import { normalizeSkuKey } from "../import-reconciliation/normalize";
 import type { IncomingProduct } from "../import-reconciliation/types";
 import { attributeComparisonKey } from "../product-attributes";
 import type { CatalogueRow, CatalogueTarget } from "./catalogue-profile";
+import type { CatalogueIncomingValues, CatalogueValuePlan } from "./catalogue-values";
 
 export interface CatalogueRecord extends IncomingProduct {
   catalogue: CatalogueRow;
   family?: { axis: string; children: CatalogueRow[] };
   familyParentRow?: number;
+  /** Sale price, opening/purchase cost and target quantity exactly as reviewed. */
+  values?: CatalogueIncomingValues;
+  costRial?: string | null;
+  /** Set at staging for a resolved existing product; applied after the link. */
+  valuePlan?: CatalogueValuePlan;
 }
 
 export function catalogueRecords(
@@ -58,6 +64,14 @@ export function catalogueRecords(
       kind: family ? "variant_parent" : "simple",
       tracking: target === "watch" ? "serial" : "none",
       catalogue: row,
+      values: {
+        priceRial: row.amounts.price.rial,
+        costRial: row.amounts.cost.rial,
+        quantity: row.stock.quantity,
+      },
+      priceRial: row.amounts.price.rial == null ? null : String(row.amounts.price.rial),
+      stockQuantity: row.stock.quantity,
+      costRial: row.amounts.cost.rial == null ? null : String(row.amounts.cost.rial),
       ...(family ? { family } : {}),
       ...(consumed.has(row.number) ? { familyParentRow: consumed.get(row.number) } : {}),
     };
