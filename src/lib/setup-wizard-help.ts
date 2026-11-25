@@ -111,11 +111,13 @@ export const SETUP_STEP_HELP: Record<WizardStep, SetupInlineHelp> = {
     ],
   },
   menu: {
-    pageKey: "page:/setup/menu",
-    marker: "ورود منو",
+    // Legacy knowledge key; /setup/menu now redirects to unified /setup/import.
+    pageKey: "page:/setup/import",
+    marker: "ورود منو و اطلاعات اولیه",
     lines: [
-      "دسته‌ها و اقلام قابل فروش را بسازید یا فایل منو را وارد کنید.",
-      "برای فروش در صندوق دست‌کم یک قلم فعال لازم است؛ بعداً هم قابل ویرایش است.",
+      "برای کافه و رستوران، دسته و آیتم‌های منو را از گزینهٔ «ثبت دستی» وارد کنید.",
+      "ورود فایل منو از مسیر مشترک نگاشت، پیش‌نمایش و تأیید انتقال داده انجام می‌شود.",
+      "ورود منو برای پایان راه‌اندازی اختیاری است؛ آغاز فروش به آیتم فعال نیاز دارد.",
     ],
   },
   hardware: {
