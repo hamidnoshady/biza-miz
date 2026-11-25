@@ -19,7 +19,7 @@
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
 import { RETAIL_ACCOUNT_CODES } from "./retail-account-codes";
-import type { Industry } from "./industries";
+import { isRetailCatalogueIndustry, type Industry } from "./industries";
 import { averageBasedValue, carryingDrift, type FungibleStockState } from "./item-stock-valuation";
 
 export interface ValuationDriftRow {
@@ -145,7 +145,7 @@ export async function readItemStockValuationReconciliation(
     [input.businessId],
   );
   const industry = industryRows[0]?.industry;
-  const codes = industry && industry !== "food_service" ? RETAIL_ACCOUNT_CODES[industry] : undefined;
+  const codes = isRetailCatalogueIndustry(industry) ? RETAIL_ACCOUNT_CODES[industry] : undefined;
   const inventoryAccountCode = codes?.inventory ?? null;
 
   const { rows: totalRows } = await client.query<{ total: string }>(
