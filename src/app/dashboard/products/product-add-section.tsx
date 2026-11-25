@@ -760,6 +760,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     setIssues([]);
     const result = await api<{
       item?: { id: string };
+      openingStockDocumentId?: string | null;
       error?: string;
       message?: string;
       issues?: ProductValidationIssue[];
@@ -799,7 +800,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     if (activeDraftId !== null) {
       persistDrafts(drafts.filter((draft) => draft.id !== activeDraftId));
     }
-    resetForm("محصول با موفقیت ذخیره شد. می‌توانید محصول بعدی را ثبت کنید.");
+    // GH #1567 F2 — an opening quantity is a draft opening-stock document,
+    // not stock: it reaches the shelf (and the ledger) only once reviewed.
+    resetForm(
+      result.data.openingStockDocumentId
+        ? "محصول ذخیره شد. موجودی اولیه به‌صورت پیش‌نویس سند موجودی افتتاحیه ثبت شد و پس از بازبینی و تأیید مدیر مالی به انبار و دفاتر وارد می‌شود."
+        : "محصول با موفقیت ذخیره شد. می‌توانید محصول بعدی را ثبت کنید.",
+    );
     setCreatedProductId(result.data.item?.id ?? null);
   }
 
@@ -1065,7 +1072,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                     />
                     <InlineError message={fieldErrors.get("purchasePrice")} />
                   </Field>
-                  <Field label="موجودی اولیه" hint="برای کالای شمارشی، مقدار اعشاری هم پذیرفته می‌شود.">
+                  <Field label="موجودی اولیه" hint="به‌صورت پیش‌نویس سند موجودی افتتاحیه ثبت می‌شود و پس از بازبینی به انبار و دفاتر می‌رسد. مقدار اعشاری هم پذیرفته می‌شود.">
                     <PersianNumberInput
                       className={inputClass}
                       value={form.quantity}

@@ -22,6 +22,7 @@ import {
   type StockVelocityClass,
 } from "./industry-reports";
 import { rialText } from "./inventory-exact";
+import { createItemStockCount } from "./item-stock-count-service";
 
 // Side-effect import: registers item.markdown_write_down with the engine.
 import "./merchandising-posting-rules";
@@ -49,6 +50,11 @@ export async function bulkUpdateVariantMatrix(
   },
 ): Promise<void> {
   if (input.updates.length === 0) return;
+  // F2 (GH #1567): a new on-hand figure typed into the grid is a stock count,
+  // not a silent overwrite — it goes through the canonical count, so the
+  // shortage/surplus posts to the ledger at the carrying value and the count
+  // is reversible. A variant with no cost basis is refused below.
+  const countLines: Array<{ itemId: string; countedQty: string }> = [];
 
   for (const update of input.updates) {
     const { rows } = await client.query<{ id: string }>(
@@ -72,11 +78,14 @@ export async function bulkUpdateVariantMatrix(
       if (!Number.isFinite(update.quantity) || update.quantity < 0) {
         throw new Error("موجودی نمی‌تواند منفی باشد.");
       }
-      await client.query(
-        `INSERT INTO item_stock (item_id, quantity) VALUES ($1, $2)
-         ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [update.itemId, update.quantity],
+      const current = await client.query<{ quantity: string }>(
+        `SELECT quantity::text FROM item_stock WHERE item_id = $1`,
+        [update.itemId],
       );
+      // An unchanged cell is not a count line (no empty count documents).
+      if (!new Decimal(current.rows[0]?.quantity ?? 0).eq(update.quantity)) {
+        countLines.push({ itemId: update.itemId, countedQty: String(update.quantity) });
+      }
     }
 
     await recordItemEvent(
@@ -93,6 +102,23 @@ export async function bulkUpdateVariantMatrix(
       },
       client,
     );
+  }
+
+  if (countLines.length > 0) {
+    const counted = await createItemStockCount(client, {
+      businessId: input.businessId,
+      locationId: input.locationId,
+      note: "ویرایش گروهی موجودی از جدول تنوع‌ها",
+      lines: countLines,
+      createdBy: input.createdBy ?? null,
+    });
+    // A variant with no cost basis would gain or lose units at an unknown
+    // value — exactly the silent stock change F2 removes. Refuse the grid
+    // (the caller's transaction rolls every cell back); its first stock
+    // belongs on an opening-stock document or a purchase.
+    if (counted.warnings.some((warning) => warning.startsWith("missing_cost_basis"))) {
+      throw new Error("برای تنوعی که قیمت تمام‌شده ندارد، موجودی را با سند موجودی افتتاحیه یا خرید ثبت کنید.");
+    }
   }
 }
 

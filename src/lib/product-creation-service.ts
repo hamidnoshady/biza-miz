@@ -8,7 +8,8 @@
  */
 import Decimal from "decimal.js";
 import { getPool, type PoolClient } from "./db";
-import { setInitialUnitCost, receiveStock, setUnitPrice } from "./accessories-service";
+import { setInitialUnitCost, setUnitPrice } from "./accessories-service";
+import { createOpeningStockDraft, type OpeningStockLineInput } from "./item-opening-stock-service";
 import { assignBarcode } from "./item-barcodes-service";
 import {
   createItem,
@@ -42,6 +43,12 @@ export interface CreatedProduct {
   item: Item;
   variants: Item[];
   galleryMediaIds?: string[];
+  /**
+   * The draft opening-stock document holding the quantities the form proposed
+   * (GH #1567 F2); null when no opening quantity was entered. Nothing is on
+   * the shelf until it is reviewed and posted.
+   */
+  openingStockDocumentId?: string | null;
 }
 
 function commonMeta(input: ParsedProductCreateInput): ItemMetaPatch {
@@ -62,31 +69,33 @@ function commonMeta(input: ParsedProductCreateInput): ItemMetaPatch {
   };
 }
 
+/**
+ * Writes the catalogue half of the opening values — the sale price and the
+ * purchase price as a price-list fact — and returns the opening quantity as a
+ * proposed opening-stock line. Stock is never moved here (GH #1567 F2): a
+ * quantity typed into the product form becomes a draft opening-stock document
+ * that is reviewed and posted (stock + Dr inventory / Cr opening equity) as
+ * its own act. Before F2 this path received the stock with no journal entry.
+ */
 async function writeOpeningValues(
   client: PoolClient,
   itemId: string,
   defaults: Pick<ParsedProductCreateInput, "sellPrice" | "purchasePrice" | "quantity">,
   override?: ParsedProductVariantInput,
-): Promise<number | null> {
+): Promise<{ sellPrice: number | null; openingLine: OpeningStockLineInput | null }> {
   const sellPrice = override?.sellPrice ?? defaults.sellPrice;
   const purchasePrice = override?.purchasePrice ?? defaults.purchasePrice;
   const quantity = override?.quantity ?? defaults.quantity;
 
   if (sellPrice !== null) await setUnitPrice(itemId, sellPrice, client);
+  // A known purchase price is a price-list fact with or without stock.
+  if (purchasePrice !== null) await setInitialUnitCost(itemId, purchasePrice, client);
 
-  if (quantity !== null && new Decimal(quantity).gt(0)) {
-    await receiveStock(
-      itemId,
-      { quantity, unitCost: purchasePrice ?? 0 },
-      client,
-    );
-  } else if (purchasePrice !== null) {
-    // A known purchase price with no opening quantity is useful in the price
-    // list, but is not a stock receipt (the old path attempted a zero-quantity
-    // receipt, failed validation and left the already-created item behind).
-    await setInitialUnitCost(itemId, purchasePrice, client);
-  }
-  return sellPrice;
+  const openingLine =
+    quantity !== null && new Decimal(quantity).gt(0)
+      ? { itemId, quantity: new Decimal(quantity).toFixed(), unitCost: String(purchasePrice ?? 0) }
+      : null;
+  return { sellPrice, openingLine };
 }
 
 /**
@@ -300,6 +309,7 @@ export async function createProductRecord(
 ): Promise<CreatedProduct> {
   const client = transactionClient ?? await getPool().connect();
   const priced: { itemId: string; sellPrice: number }[] = [];
+  const openingLines: OpeningStockLineInput[] = [];
   try {
     if (!transactionClient) await client.query("BEGIN");
 
@@ -340,7 +350,8 @@ export async function createProductRecord(
     if (!hasVariants) {
       if (resolvedInput.barcode) await assignBarcode(parent.id, { code: resolvedInput.barcode }, client);
       const written = await writeOpeningValues(client, parent.id, resolvedInput);
-      if (written !== null) priced.push({ itemId: parent.id, sellPrice: written });
+      if (written.sellPrice !== null) priced.push({ itemId: parent.id, sellPrice: written.sellPrice });
+      if (written.openingLine) openingLines.push(written.openingLine);
     } else {
       for (const variant of resolvedInput.variants) {
         const childName =
@@ -368,7 +379,8 @@ export async function createProductRecord(
         // left it — the variant's barcode and media are written by that call,
         // so the stale `child` would drop them from the response.
         const written = await writeOpeningValues(client, child.id, resolvedInput, variant);
-        if (written !== null) priced.push({ itemId: child.id, sellPrice: written });
+        if (written.sellPrice !== null) priced.push({ itemId: child.id, sellPrice: written.sellPrice });
+        if (written.openingLine) openingLines.push(written.openingLine);
         variants.push(updatedChild ?? child);
       }
     }
@@ -383,11 +395,31 @@ export async function createProductRecord(
       );
     }
 
+    let openingStockDocumentId: string | null = null;
+    if (openingLines.length > 0) {
+      const businessId = audit?.businessId ?? (await client.query<{ business_id: string }>(
+        `SELECT business_id::text FROM locations WHERE id = $1`,
+        [locationId],
+      )).rows[0]?.business_id;
+      if (!businessId) throw new Error("location_not_found");
+      const draft = await createOpeningStockDraft(client, {
+        businessId,
+        locationId,
+        source: "product_form",
+        note: `موجودی اولیهٔ «${resolvedInput.name}» — پیش از ثبت بازبینی شود`.slice(0, 500),
+        idempotencyKey: `product:${parent.id}`,
+        lines: openingLines,
+        createdBy: audit?.userId ?? null,
+      });
+      openingStockDocumentId = draft.document.id;
+    }
+
     if (!transactionClient) await client.query("COMMIT");
     return {
       item: updatedParent ?? parent,
       variants,
       galleryMediaIds,
+      openingStockDocumentId,
     };
   } catch (error) {
     if (!transactionClient) await client.query("ROLLBACK");

@@ -76,6 +76,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // A matrix quantity edit is a stock count since GH #1567 F2.
+  await db.query("DELETE FROM item_stock_count_lines");
+  await db.query("DELETE FROM item_stock_counts");
   await db.query("DELETE FROM item_stock");
   await db.query("DELETE FROM item_variant_attributes");
   await db.query("DELETE FROM items");
@@ -155,6 +158,15 @@ describe("matrix bulk editor", () => {
     );
     expect(Number(after.rows[0].quantity)).toBe(3);
     expect(Number(after.rows[1].quantity)).toBe(4);
+    // GH #1567 F2 — the new on-hand figures are a posted count, not a silent
+    // overwrite: 5→4 and 5→3 at 20,000 relieve 60,000 from inventory (1350).
+    const inventory = await db.query<{ net: string }>(
+      `SELECT (coalesce(sum(jl.debit),0) - coalesce(sum(jl.credit),0))::text AS net
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+        WHERE je.business_id = $1 AND jl.account_id = $2`,
+      [biz.id, acct.inventory],
+    );
+    expect(inventory.rows[0].net).toBe("-60000");
 
     // A failure on the second cell rolls back the first.
     await expect(

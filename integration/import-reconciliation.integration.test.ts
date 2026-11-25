@@ -1563,8 +1563,20 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
     );
     expect(appliedInv.summary.run.status).toBe("applied");
     expect(appliedInv.crossCheck.ok).toBe(true);
+    // GH #1567 F2 — a Holoo opening sheet proposes opening stock; it does not
+    // put 12 units on the shelf with no journal entry. The reviewed draft
+    // carries the sheet's quantity and unit cost.
     const stockCheck = await db.query<{ quantity: string }>(`SELECT quantity::text FROM item_stock WHERE item_id = $1`, [hGoodsId]);
-    expect(Number(stockCheck.rows[0]?.quantity)).toBe(12);
+    expect(Number(stockCheck.rows[0]?.quantity ?? 0)).toBe(0);
+    const holooDraft = await db.query<{ status: string; source: string; quantity: string; unit_cost: string }>(
+      `SELECT d.status, d.source, l.quantity::text, l.unit_cost::text
+         FROM item_opening_stock_documents d JOIN item_opening_stock_lines l ON l.document_id = d.id
+        WHERE d.business_id = $1 AND l.item_id = $2`,
+      [holooBiz.id, hGoodsId],
+    );
+    expect(holooDraft.rows.map((r) => ({ ...r, quantity: String(Number(r.quantity)) }))).toEqual([
+      { status: "draft", source: "import", quantity: "12", unit_cost: "150000" },
+    ]);
 
     const appliedJrn = await asBusiness(holooBiz.id, () =>
       applyRunner.applyReconciliationRunWithDomainHandlers({
@@ -1658,8 +1670,20 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
       `SELECT quantity::text, unit_price::text FROM item_stock WHERE item_id = $1`,
       [child.id],
     );
-    expect(Number(stock.rows[0]?.quantity)).toBe(2);
+    // GH #1567 F2 — the store's stock figure is proposed as opening stock
+    // (no cost known yet, so it cannot post until reviewed), never written to
+    // the shelf without a journal entry.
+    expect(Number(stock.rows[0]?.quantity)).toBe(0);
     expect(stock.rows[0]?.unit_price).toBe("120000");
+    const proposed = await db.query<{ status: string; quantity: string; unit_cost: string }>(
+      `SELECT d.status, l.quantity::text, l.unit_cost::text
+         FROM item_opening_stock_documents d JOIN item_opening_stock_lines l ON l.document_id = d.id
+        WHERE l.item_id = $1`,
+      [child.id],
+    );
+    expect(proposed.rows.map((r) => ({ ...r, quantity: String(Number(r.quantity)) }))).toEqual([
+      { status: "draft", quantity: "2", unit_cost: "0" },
+    ]);
 
     const attrs = await db.query<{ name: string; value: string }>(
       `SELECT name, value FROM item_variant_attributes WHERE item_id = $1`,

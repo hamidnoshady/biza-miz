@@ -16,6 +16,7 @@ const {
   mockPartyToken,
   mockFinToken,
   mockInvToken,
+  mockAppendOpeningStock,
 } = vi.hoisted(() => ({
   mockWithTenantTransaction: vi.fn(),
   mockGetBusinessIndustry: vi.fn(),
@@ -32,6 +33,7 @@ const {
   mockPartyToken: vi.fn(),
   mockFinToken: vi.fn(),
   mockInvToken: vi.fn(),
+  mockAppendOpeningStock: vi.fn(),
 }));
 
 vi.mock("../db", () => ({
@@ -60,6 +62,11 @@ vi.mock("../settings", () => ({
 vi.mock("../integrations/holoo/journal-import-service", () => ({
   HOLOO_IMPORT_SOURCE_TYPE: "holoo_import",
   postReconciledHolooVoucherOnClient: mockPostVoucher,
+}));
+// GH #1567 F2 — imported stock is proposed on an opening-stock draft; the
+// draft service has its own DB suite (item-opening-stock.integration.test.ts).
+vi.mock("../item-opening-stock-service", () => ({
+  appendImportedOpeningStock: mockAppendOpeningStock,
 }));
 vi.mock("../data-transfer/import-service", () => ({
   finalizeReconciledImportJob: mockFinalizeImportJob,
@@ -278,6 +285,11 @@ describe("applyReconciliationRunWithDomainHandlers domain writers", () => {
       [{ name: "رنگ", value: "قرمز" }],
       fakeClient,
     );
+    // The store's stock figure becomes a proposed opening line (cost unknown).
+    expect(mockAppendOpeningStock).toHaveBeenCalledWith(
+      fakeClient,
+      expect.objectContaining({ itemId: "child-1", quantity: "3", unitCost: "0", sourceKey: "conn-1" }),
+    );
   });
 
   it("wires inventory create for retail item_stock and food_service inventory_items + stock_movements", async () => {
@@ -324,10 +336,18 @@ describe("applyReconciliationRunWithDomainHandlers domain writers", () => {
 
     await applyReconciliationRunWithDomainHandlers({ businessId: bizId, runId, locationId: locId, actor });
     expect(retailResult).toEqual({ canonicalId: "item-retail-1" });
-    expect(fakeRetailClient.query).toHaveBeenCalledWith(
-      expect.stringContaining("INSERT INTO item_stock"),
-      ["item-retail-1", "8", "25000"],
-    );
+    // GH #1567 F2 — proposed as opening stock, never written to the shelf
+    // without its journal entry.
+    expect(fakeRetailClient.query).not.toHaveBeenCalledWith(expect.stringContaining("INSERT INTO item_stock"), expect.anything());
+    expect(mockAppendOpeningStock).toHaveBeenCalledWith(fakeRetailClient, {
+      businessId: bizId,
+      locationId: locId,
+      sourceKey: "holoo:c1:inventory",
+      itemId: "item-retail-1",
+      quantity: "8",
+      unitCost: "25000",
+      createdBy: actor.userId ?? null,
+    });
   });
 
   it("writes food_service inventory.items product runs into inventory_items (not menu_items) and finalizes linked Data Transfer jobs", async () => {
