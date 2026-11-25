@@ -10,6 +10,7 @@ import { AccountsError, replaceChartOfAccounts } from "@/lib/accounts-service";
 import { AccountTreeError } from "@/lib/account-hierarchy";
 import { coaTemplateForIndustry, validateAccounts } from "@/lib/coa-template";
 import { accountingSetupEnabled } from "@/lib/setup-opening-service";
+import { eligibleOpeningAccounts } from "@/lib/setup-opening";
 import { ACCOUNT_TREE_MESSAGES, REQUIRED_OPENING_CHART_CODES } from "@/lib/setup-chart";
 
 /**
@@ -60,16 +61,36 @@ export const POST = withTenantScope(async () => {
   const client = await getPool().connect();
   try {
     // Idempotence first: if the recovery already succeeded, a retry is a no-op
-    // success — the chart exists and has a postable leaf. This is also the
-    // "never overwrite" rule: nothing is written when the owner has a usable
-    // chart, customized or not.
-    const { rows: usable } = await client.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM accounts a
-        WHERE a.business_id = $1 AND a.is_active
-          AND NOT EXISTS (SELECT 1 FROM accounts k WHERE k.parent_id = a.id)`,
+    // success — the chart exists and has a postable opening leaf. This is also
+    // the "never overwrite" rule: nothing is written when the owner has a usable
+    // chart, customized or not. The eligibility check is the same contract the
+    // opening step reads (setup-opening.ts), so a chart with only the inventory
+    // control does not count as recovered.
+    const { rows: existingChart } = await client.query<{
+      id: string;
+      code: string;
+      type: string;
+      parent_id: string | null;
+      is_active: boolean;
+      has_children: boolean;
+    }>(
+      `SELECT a.id, a.code, a.type::text AS type, a.parent_id, a.is_active,
+              EXISTS (SELECT 1 FROM accounts k WHERE k.parent_id = a.id) AS has_children
+         FROM accounts a WHERE a.business_id = $1`,
       [session.businessId],
     );
-    if (Number(usable[0]?.n ?? 0) > 0) {
+    if (
+      eligibleOpeningAccounts(
+        existingChart.map((row) => ({
+          id: row.id,
+          code: row.code,
+          type: row.type,
+          parentId: row.parent_id,
+          isActive: row.is_active,
+          hasChildren: row.has_children,
+        })),
+      ).length > 0
+    ) {
       return NextResponse.json({ ok: true, created: 0, alreadyPresent: true, industry });
     }
 
