@@ -105,10 +105,11 @@ reconciliation/authority gates (`canPublishConnectionOutbound`,
 
 ## Recovery
 
-Archiving is `is_active = false`. To recover one row, set it back to active by
-the same permission-checked path that archived it (the audit row names the id,
-the twin, the quantity and the timestamp). Do not delete the audit row and do
-not re-point a mapping as part of a recovery.
+Archiving is `is_active = false`. The review screen offers «بازگردانی نسخهٔ بایگانی‌شده» for the plan's own
+archived row (`restore_archived`), which flips it back and writes
+`item.duplicate_archive_restored`; it refuses a row that is not inactive, has a mapping, or was not archived
+by this workflow. At the data level the audit row names the id, the twin, the quantity and the timestamp.
+Do not delete the audit row and do not re-point a mapping as part of a recovery.
 
 ## Recurrence prevention (code)
 

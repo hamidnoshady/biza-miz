@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   listDuplicateCandidateSkus: vi.fn(),
   recordDuplicateKeepSeparate: vi.fn(),
   archiveDuplicateOrphanFromReview: vi.fn(),
+  restoreDuplicateFromReview: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -58,6 +59,7 @@ beforeEach(() => {
   mocks.listDuplicateCandidateSkus.mockResolvedValue(["zza05023"]);
   mocks.recordDuplicateKeepSeparate.mockResolvedValue({ sku: "zza05023", reviewed: true });
   mocks.archiveDuplicateOrphanFromReview.mockResolvedValue({ archived: { orphanItemId: UUID }, blockers: [] });
+  mocks.restoreDuplicateFromReview.mockResolvedValue({ restored: true });
 });
 
 describe("GET", () => {
@@ -107,6 +109,24 @@ describe("POST", () => {
     expect(mocks.archiveDuplicateOrphanFromReview).toHaveBeenCalledWith("tenant-a", {
       sku: "zza05023",
       orphanItemId: UUID,
+      reviewToken: "token-1",
+      actorUserId: "user-1",
+      locationId: LOCATION,
+    });
+  });
+
+  it("restores an archive this workflow made", async () => {
+    const response = await post({
+      sku: "zza05023",
+      action: "restore_archived",
+      orphanItemId: UUID,
+      confirm: true,
+      reviewToken: "token-1",
+    });
+    expect(response.status).toBe(200);
+    expect(mocks.restoreDuplicateFromReview).toHaveBeenCalledWith("tenant-a", {
+      sku: "zza05023",
+      itemId: UUID,
       reviewToken: "token-1",
       actorUserId: "user-1",
       locationId: LOCATION,

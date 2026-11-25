@@ -40,6 +40,7 @@ let review: typeof import("../src/lib/duplicate-items-review-service");
 const biz = {
   id: "",
   locationId: "",
+  ownerId: "",
   connectionId: "",
   pushConnectionId: "",
   otherBizId: "",
@@ -156,6 +157,13 @@ beforeAll(async () => {
   biz.locationId = (
     await db.query<{ id: string }>("INSERT INTO locations (business_id, name) VALUES ($1, 'Main') RETURNING id", [biz.id])
   ).rows[0].id;
+  biz.ownerId = (
+    await db.query<{ id: string }>(
+      `INSERT INTO users (business_id, location_id, role, full_name, password_hash)
+       VALUES ($1, $2, 'owner', 'مالک', 'x') RETURNING id`,
+      [biz.id, biz.locationId],
+    )
+  ).rows[0].id;
   biz.connectionId = (
     await db.query<{ id: string }>(
       `INSERT INTO integration_connections
@@ -256,6 +264,26 @@ describe("weeks-apart duplicate products", () => {
       twinItemId: kept,
       daysApart: 34,
     });
+
+    // Reversible through the same review: the row was never deleted and no
+    // inventory/history moved, so restoring is one audited flag.
+    const [archivedGroup] = await review.loadDuplicateReviewGroups(biz.id, { sku: "HIST-1", locationId: biz.locationId });
+    expect(archivedGroup.plan?.status).toBe("already_archived");
+    const restored = await review.restoreDuplicateFromReview(biz.id, {
+      sku: "HIST-1",
+      itemId: old,
+      reviewToken: archivedGroup.reviewToken,
+      actorUserId: null,
+      locationId: biz.locationId,
+    });
+    expect(restored).toEqual({ restored: true });
+    expect(await isActive(old)).toBe(true);
+    expect(await auditRows("item.duplicate_archive_restored", old)).toHaveLength(1);
+    // Only this workflow's archive is reversible; a second restore is refused.
+    expect(await resolve.restoreArchivedDuplicateItem(biz.id, { itemId: old })).toEqual({
+      restored: false,
+      reason: "already_active",
+    });
   });
 
   it("blocks a historical twin that still holds stock, even with only item_stock as evidence", async () => {
@@ -315,7 +343,7 @@ describe("weeks-apart duplicate products", () => {
   });
 
   it("records a prior link to the same store as provenance and copies no mappings", async () => {
-    const created = await connections.createConnection(biz.id, randomUUID(), {
+    const created = await connections.createConnection(biz.id, biz.ownerId, {
       name: "Store (relinked)",
       baseUrl: "https://www.beauty.example.com/",
       linkMode: "plugin",

@@ -184,6 +184,60 @@ export interface ArchiveOrphansResult {
 }
 
 /**
+ * Reverse one archive this workflow performed.
+ *
+ * Only a row whose latest archive audit is the duplicate archive can be
+ * restored, and only while it is still inactive and still unmapped — so this
+ * cannot resurrect a row a person archived for a different reason, and cannot
+ * create a second mapped copy. The row was never deleted, so restore is a flag
+ * and one audit row; inventory and history were never moved.
+ */
+export async function restoreArchivedDuplicateItem(
+  businessId: string,
+  input: { itemId: string; actorUserId?: string | null },
+): Promise<{ restored: boolean; reason?: "not_found" | "already_active" | "not_duplicate_archive" }> {
+  return withTenantTransaction(businessId, async (client) => {
+    const { rows: locked } = await client.query<{ is_active: boolean; location_id: string; sku: string }>(
+      `SELECT i.is_active, i.location_id::text, i.sku
+         FROM items i JOIN locations l ON l.id = i.location_id
+        WHERE i.id = $1 AND l.business_id = $2 FOR UPDATE OF i`,
+      [input.itemId, businessId],
+    );
+    if (!locked[0]) return { restored: false, reason: "not_found" };
+    if (locked[0].is_active) return { restored: false, reason: "already_active" };
+
+    const { rows: mappings } = await client.query(
+      `SELECT 1 FROM integration_mappings WHERE business_id = $1 AND local_id = $2 LIMIT 1`,
+      [businessId, input.itemId],
+    );
+    const { rows: archivedByThis } = await client.query<{ action: string }>(
+      `SELECT action FROM audit_log
+        WHERE business_id = $1 AND entity = 'item' AND entity_id = $2
+          AND action IN ('item.duplicate_orphan_archived', 'item.duplicate_historical_archived')
+        ORDER BY created_at DESC LIMIT 1`,
+      [businessId, input.itemId],
+    );
+    if (mappings.length > 0 || archivedByThis.length === 0) {
+      return { restored: false, reason: "not_duplicate_archive" };
+    }
+
+    await client.query(`UPDATE items SET is_active = true, updated_at = now() WHERE id = $1`, [input.itemId]);
+    await client.query(
+      `INSERT INTO audit_log (business_id, location_id, user_id, action, entity, entity_id, payload)
+       VALUES ($1, $2, $3, 'item.duplicate_archive_restored', 'item', $4, $5::jsonb)`,
+      [
+        businessId,
+        locked[0].location_id,
+        input.actorUserId ?? null,
+        input.itemId,
+        JSON.stringify({ sku: locked[0].sku, restoredFrom: archivedByThis[0].action }),
+      ],
+    );
+    return { restored: true };
+  });
+}
+
+/**
  * Archive every orphan the plan marks `archive`. Each one is re-checked inside
  * its own transaction, under a row lock, so a mapping, a reference or a twin
  * that changed since the plan stops that row (and only that row).

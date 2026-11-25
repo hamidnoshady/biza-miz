@@ -9,6 +9,7 @@ import {
   listDuplicateCandidateSkus,
   loadDuplicateReviewGroups,
   recordDuplicateKeepSeparate,
+  restoreDuplicateFromReview,
 } from "@/lib/duplicate-items-review-service";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -18,14 +19,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *
  * Read-only on GET: the same tenant-scoped, `READ ONLY` report the operator
  * script uses, plus each candidate's archive plan and review state. POST records
- * one of exactly two decisions and nothing else:
+ * one of exactly three decisions and nothing else:
  *
  *  - `keep_separate` — «نگهداری جداگانه»: an audited "these are different rows";
  *  - `archive_orphan` — the existing guarded, reversible archive of a proven
  *    duplicate twin (the ten-minute creation race or the weeks-apart historical
- *    duplicate) that nothing references and that holds no inventory.
+ *    duplicate) that nothing references and that holds no inventory;
+ *  - `restore_archived` — undo that archive, for a row this workflow archived,
+ *    while it is still inactive and unmapped.
  *
- * Both echo the `reviewToken` the screen was shown, so a plan that changed in
+ * Each echoes the `reviewToken` the screen was shown, so a plan that changed in
  * the meantime is refused rather than acted on. Nothing here merges two items,
  * aggregates their stock or moves a sale.
  */
@@ -107,6 +110,21 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       if (!result.archived) return NextResponse.json({ error: "duplicate_not_safe_to_archive", blockers: result.blockers }, { status: 409 });
       const groups = await loadDuplicateReviewGroups(session.businessId, { sku: body.sku, locationId });
       return NextResponse.json({ ok: true, archived: result.archived, group: groups[0] ?? null });
+    }
+    if (body.action === "restore_archived") {
+      if (typeof body.orphanItemId !== "string" || !UUID_RE.test(body.orphanItemId)) {
+        return NextResponse.json({ error: "invalid_duplicate_decision" }, { status: 400 });
+      }
+      const result = await restoreDuplicateFromReview(session.businessId, {
+        sku: body.sku,
+        itemId: body.orphanItemId,
+        reviewToken: body.reviewToken,
+        actorUserId: session.sub,
+        locationId,
+      });
+      if (!result.restored) return NextResponse.json({ error: "duplicate_not_restorable", reason: result.reason }, { status: 409 });
+      const groups = await loadDuplicateReviewGroups(session.businessId, { sku: body.sku, locationId });
+      return NextResponse.json({ ok: true, group: groups[0] ?? null });
     }
     return NextResponse.json({ error: "invalid_duplicate_decision" }, { status: 400 });
   } catch (cause) {

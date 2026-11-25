@@ -20,7 +20,12 @@ function match(overrides: Partial<LocalSkuMatch> = {}): LocalSkuMatch {
 }
 
 function client(responses: unknown[][]): PoolClient {
-  const query = vi.fn(async () => ({ rows: responses.shift() ?? [] }));
+  const query = vi.fn(async (sql: string) => {
+    // The guard takes the branch+SKU advisory lock before it reads; that query
+    // has no rows of its own.
+    if (String(sql).includes("pg_advisory_xact_lock")) return { rows: [] };
+    return { rows: responses.shift() ?? [] };
+  });
   return { query } as unknown as PoolClient;
 }
 

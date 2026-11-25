@@ -29,6 +29,7 @@ import { findDuplicateItemGroups, type DuplicateReportMember } from "./duplicate
 import {
   archiveDuplicateOrphans,
   planOrphanArchivesForGroups,
+  restoreArchivedDuplicateItem,
   type ArchiveOrphansResult,
 } from "./duplicate-items-resolve-service";
 import { duplicateAmbiguityNotes, keepSeparateReasons } from "./duplicate-items-copy";
@@ -257,4 +258,27 @@ export async function archiveDuplicateOrphanFromReview(
     archived,
     blockers: archived ? [] : result.changedSincePlan[0]?.blockers ?? ["has_references"],
   };
+}
+
+/**
+ * Undo the archive of the plan's own orphan. The token must still describe the
+ * `already_archived` plan, so a row that changed after the read is refused.
+ */
+export async function restoreDuplicateFromReview(
+  businessId: string,
+  input: {
+    sku: string;
+    itemId: string;
+    reviewToken: string;
+    actorUserId: string | null;
+    locationId?: string | null;
+  },
+): Promise<{ restored: boolean; reason?: "not_found" | "already_active" | "not_duplicate_archive" }> {
+  const group = await assertReviewToken(businessId, input.sku, input.reviewToken, {
+    locationId: input.locationId ?? null,
+  });
+  if (!group.plan || group.plan.orphanItemId !== input.itemId || group.plan.status !== "already_archived") {
+    throw new Error("duplicate_review_plan_changed");
+  }
+  return restoreArchivedDuplicateItem(businessId, { itemId: input.itemId, actorUserId: input.actorUserId });
 }
