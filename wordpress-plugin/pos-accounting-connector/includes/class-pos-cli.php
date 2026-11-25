@@ -176,9 +176,10 @@ class POS_Connector_CLI {
 	 * proves the address and the token, never that the scheduler runs.
 	 *
 	 * [--queue-bytes]
-	 * : Include a scan of payload byte totals by topic and status with --json.
+	 * : Include payload byte totals by topic and status, plus the physical
+	 * table size, with --json.
 	 *
-	  * ## EXAMPLES
+	 * ## EXAMPLES
 	 *
 	 *     wp pos-connector doctor
 	 *     wp pos-connector doctor --json --queue-bytes
@@ -279,6 +280,7 @@ class POS_Connector_CLI {
 
 		if ( isset( $assoc_args['queue-bytes'], $assoc_args['json'] ) ) {
 			$report['queue']['payloadStorageByTopic'] = POS_Connector_Queue::payload_storage_by_topic();
+			$report['queue']['tableStorageBytes']     = POS_Connector_Queue::table_storage_bytes();
 		}
 
 		if ( isset( $assoc_args['ping'] ) ) {

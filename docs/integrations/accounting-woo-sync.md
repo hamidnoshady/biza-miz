@@ -155,6 +155,7 @@ Diagnose without changing anything:
 wp pos-connector doctor          # human-readable; exits non-zero when failing
 wp pos-connector doctor --json   # for monitoring and support tickets
 wp pos-connector doctor --ping   # also a CONNECTION test — not a cron test
+wp pos-connector doctor --json --queue-bytes   # payload per topic + physical table size
 ```
 
 ### «تست کرون و مسیر همگام‌سازی»

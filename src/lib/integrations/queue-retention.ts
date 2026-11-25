@@ -8,6 +8,8 @@
  *
  *   - finished rows are kept 90 days (a quarter of reconciliation plus a
  *     month): outbox `sent` / `skipped`, inbox `processed` / `duplicate`;
+ *   - one-shot editor answers (`post_body_read`) are kept one hour: the
+ *     editor polls for them for two minutes and consumes them on read;
  *   - unresolved failures are kept 180 days, because someone may still ask
  *     "why did this order never arrive": outbox `dead`, inbox `failed`;
  *   - everything else is never touched: `pending`, `processing`, `deferred`,
@@ -39,15 +41,25 @@ export const QUEUE_RETENTION_BATCH = 1000;
 /** Batches per table per business per sweep; the rest is left for the next tick. */
 export const QUEUE_RETENTION_MAX_BATCHES = 50;
 
+/**
+ * One-shot editor bodies (`post_body_read`) are read within the editor's own
+ * two-minute poll. An answer nobody collected — the owner closed the editor
+ * before the plugin replied — is dead weight, up to a body-sized payload per
+ * post, so it is deleted long before the quarter-long `sent` retention.
+ */
+export const QUEUE_ANSWER_RETENTION_MINUTES = 60;
+const MINUTE_MS = 60 * 1000;
+
 export interface RetentionCounts {
   outboxDone: number;
   outboxDead: number;
+  outboxAnswers: number;
   inboxDone: number;
   inboxFailed: number;
 }
 
 function emptyCounts(): RetentionCounts {
-  return { outboxDone: 0, outboxDead: 0, inboxDone: 0, inboxFailed: 0 };
+  return { outboxDone: 0, outboxDead: 0, outboxAnswers: 0, inboxDone: 0, inboxFailed: 0 };
 }
 
 /**
@@ -83,6 +95,17 @@ export async function sweepQueueRetention(
     return entry;
   };
 
+  await deleteInBatches(
+    `DELETE FROM integration_outbox_events
+      WHERE id IN (
+        SELECT id FROM integration_outbox_events
+         WHERE entity_type = 'post_body_read' AND status = 'sent'
+           AND updated_at < $1
+         LIMIT $2)
+      RETURNING connection_id`,
+    new Date(now.getTime() - QUEUE_ANSWER_RETENTION_MINUTES * MINUTE_MS),
+    (id) => (counts(id).outboxAnswers += 1),
+  );
   await deleteInBatches(
     `DELETE FROM integration_outbox_events
       WHERE id IN (

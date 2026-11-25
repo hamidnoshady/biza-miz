@@ -2291,6 +2291,11 @@ class POS_Connector_Sync {
 				++$applied;
 			} catch ( Throwable $e ) {
 				$ack['status'] = 'failed';
+				// A failed job has no result to return. In particular, an editor
+				// body that failed its own single-job ack must not ride in the
+				// batch below — the batch is exactly what the one-job path exists
+				// to keep under the request-size limit.
+				unset( $ack['result'] );
 				$ack['error']  = POS_Connector_Log::scrub_urls( $e->getMessage() );
 				$results[]     = $ack;
 				if ( '' === $error ) {
