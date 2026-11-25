@@ -113,7 +113,7 @@ export const SETUP_STEP_HELP: Record<WizardStep, SetupInlineHelp> = {
   menu: {
     // Legacy knowledge key; /setup/menu now redirects to unified /setup/import.
     pageKey: "page:/setup/import",
-    marker: "ورود منو و اطلاعات اولیه",
+    marker: "ورود منو",
     lines: [
       "برای کافه و رستوران، دسته و آیتم‌های منو را از گزینهٔ «ثبت دستی» وارد کنید.",
       "ورود فایل منو از مسیر مشترک نگاشت، پیش‌نمایش و تأیید انتقال داده انجام می‌شود.",
