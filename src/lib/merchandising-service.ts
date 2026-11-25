@@ -315,14 +315,26 @@ export async function applyMarkdown(
 export interface CollectionSellThroughRow {
   collection: string | null;
   season: string | null;
+  /** GH #1567 F4 — the «دسته‌بندی» the sale was tagged with, frozen at sale time. */
+  category: string | null;
+  /**
+   * False for sales (and returns) recorded before sale-time snapshots existed
+   * (migration 0328): their tags were never captured, so the row is
+   * "unknown" — never today's tags passed off as then's.
+   */
+  snapshotKnown: boolean;
   quantitySold: string;
   netRevenue: number;
 }
 
 /**
- * Sell-through by collection/season, off the same `accessory.sale_revenue` /
- * `cosmetic.sale_revenue` events the sales report reads — so the two always
- * agree for the same period. Untagged items group under null.
+ * Sell-through by collection / season / category — net of returns, over both
+ * channels, grouped by the tags each sale carried WHEN IT HAPPENED (GH #1567
+ * F4). Re-tagging a style moves only its future sales. The counter's tags are
+ * in its `<trade>.sale_revenue` event (`payload.merch`), a website sale's in
+ * `online_sale_lines.merch`, and a return carries its sale's tags in
+ * `sale_return_facts.merch`; quantities and revenue are exactly the ones the
+ * variant report (SALE_FACTS_CTE) nets, so the two always agree.
  */
 export async function sellThroughByCollection(
   businessId: string,
@@ -331,27 +343,53 @@ export async function sellThroughByCollection(
 ): Promise<CollectionSellThroughRow[]> {
   const prefix = options.eventPrefix ?? "accessory";
   const { rows } = await query<{
+    snapshot_known: boolean;
     collection: string | null;
     season: string | null;
+    category: string | null;
     quantity_sold: string;
     net_revenue: string;
   }>(
-    `SELECT i.collection, i.season,
-            SUM((e.payload->>'quantity')::numeric)::text AS quantity_sold,
-            SUM((e.payload->>'net')::numeric)::text AS net_revenue
-       FROM domain_events e
-       JOIN items i ON i.id = e.source_id
-      WHERE e.business_id = $1 AND e.location_id = $2
-        AND e.event_type = $5 || '.sale_revenue'
-        AND ($3::date IS NULL OR e.created_at >= $3::date)
-        AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
-      GROUP BY i.collection, i.season
-      ORDER BY net_revenue DESC`,
+    `WITH facts AS (
+        SELECT e.payload -> 'merch' AS merch,
+               (e.payload->>'quantity')::numeric AS quantity,
+               (e.payload->>'net')::numeric AS net
+          FROM domain_events e
+         WHERE e.business_id = $1 AND e.location_id = $2
+           AND e.event_type = $5 || '.sale_revenue'
+           AND ($3::date IS NULL OR e.created_at >= $3::date)
+           AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
+        UNION ALL
+        SELECT f.merch, f.quantity, f.net_rial::numeric
+          FROM online_sale_lines f
+          JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
+         WHERE f.location_id = $2 AND f.item_id IS NOT NULL
+           AND ($3::date IS NULL OR f.occurred_at >= $3::date)
+           AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
+        UNION ALL
+        SELECT rf.merch, -trim_scale(rf.quantity), -rf.net_rial::numeric
+          FROM sale_return_facts rf
+          JOIN order_items oi ON oi.id = rf.order_item_id AND oi.status <> 'voided'
+         WHERE rf.business_id = $1 AND rf.location_id = $2
+           AND ($3::date IS NULL OR rf.occurred_at >= $3::date)
+           AND ($4::date IS NULL OR rf.occurred_at < ($4::date + 1))
+      )
+      SELECT jsonb_typeof(merch) = 'object' AS snapshot_known,
+             NULLIF(merch->>'collection', '') AS collection,
+             NULLIF(merch->>'season', '') AS season,
+             NULLIF(merch->>'category', '') AS category,
+             SUM(quantity)::text AS quantity_sold,
+             SUM(net)::text AS net_revenue
+        FROM facts
+       GROUP BY 1, 2, 3, 4
+       ORDER BY SUM(net) DESC, 2 NULLS LAST, 3 NULLS LAST, 4 NULLS LAST`,
     [businessId, locationId, options.from ?? null, options.to ?? null, prefix],
   );
   return rows.map((r) => ({
     collection: r.collection,
     season: r.season,
+    category: r.category,
+    snapshotKnown: r.snapshot_known === true,
     quantitySold: r.quantity_sold,
     netRevenue: Number(r.net_revenue),
   }));

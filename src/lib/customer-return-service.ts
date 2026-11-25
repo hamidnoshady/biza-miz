@@ -1,4 +1,5 @@
 import Decimal from "decimal.js";
+import { allocateProportionally, parseSaleMerchSnapshot, recordSaleReturnFact } from "./sale-return-facts";
 import type { PoolClient } from "pg";
 import {
   boundedRialText,
@@ -309,6 +310,20 @@ export async function createCustomerReturn(
     cogsAccountId: null as string | null,
   };
 
+  // GH #1567 F4 — the report side of each items-model line returned: its
+  // revenue weight (the sale's own net, prorated), the COGS this return
+  // reversed for it, and the sale's frozen merchandising snapshot.
+  const retailReturnLines: {
+    orderItemId: string;
+    itemId: string | null;
+    reportable: boolean;
+    quantity: string;
+    disposition: "restockable" | "discarded";
+    weight: bigint;
+    cogs: bigint;
+    merch: ReturnType<typeof parseSaleMerchSnapshot>;
+  }[] = [];
+
   for (const line of lines) {
     const soldQuantity = soldById.get(line.orderItemId);
     if (soldQuantity === undefined) throw new Error("order_item_not_found");
@@ -329,6 +344,7 @@ export async function createCustomerReturn(
     // back together. A discarded (damaged/unsellable) return refunds without
     // restocking — the goods stay out of the shelf and out of the reversal.
     if (soldRow.retail_snapshot) {
+      const lineCogsBefore = retailCogs.amount;
       if (line.disposition === "restockable") {
         const snap = soldRow.retail_snapshot as {
           kind?: unknown;
@@ -428,6 +444,24 @@ export async function createCustomerReturn(
             });
           }
         }
+      }
+      {
+        const snap = soldRow.retail_snapshot as { kind?: unknown; net?: unknown; merch?: unknown };
+        const kind = typeof snap.kind === "string" ? snap.kind : null;
+        const soldNet = typeof snap.net === "string" || typeof snap.net === "number" ? new Decimal(snap.net) : new Decimal(0);
+        const weight = new Decimal(soldQuantity).gt(0)
+          ? BigInt(roundRial(soldNet.times(line.quantity).div(soldQuantity)))
+          : 0n;
+        retailReturnLines.push({
+          orderItemId: line.orderItemId,
+          itemId: soldRow.item_id ?? null,
+          reportable: kind === "accessory" || kind === "stocked" || kind === "cosmetic",
+          quantity: String(line.quantity),
+          disposition: line.disposition,
+          weight: weight > 0n ? weight : 0n,
+          cogs: retailCogs.amount - lineCogsBefore,
+          merch: parseSaleMerchSnapshot(snap.merch),
+        });
       }
       continue;
     }
@@ -580,6 +614,34 @@ export async function createCustomerReturn(
         { accountId: retailCogs.cogsAccountId, debit: zero, credit: retailReversal, dimensions: returnAttribution },
       ],
     });
+  }
+  if (retailReturnLines.length > 0) {
+    // The contra-revenue this return books (refund − its VAT, the same split
+    // postExactCustomerRefundEntry receives), shared across the returned lines
+    // so the report's shares sum to the ledger exactly. A zero-money exchange
+    // returns quantity with no revenue; the replacement is its own sale.
+    const refundTax = refund <= 0n || BigInt(orders[0].total) === 0n
+      ? 0n
+      : BigInt(roundRial(new Decimal(refundAmount).times(orders[0].tax).div(orders[0].total)));
+    const contraRevenue = refund > refundTax ? refund - refundTax : 0n;
+    const shares = allocateProportionally(contraRevenue, retailReturnLines.map((l) => l.weight));
+    for (const [index, returned] of retailReturnLines.entries()) {
+      if (!returned.reportable || !returned.itemId) continue;
+      await recordSaleReturnFact(client, {
+        businessId: params.businessId,
+        locationId: params.locationId,
+        orderId: params.orderId,
+        orderItemId: returned.orderItemId,
+        itemId: returned.itemId,
+        factSource: "customer_return",
+        sourceId: returnId,
+        quantity: returned.quantity,
+        netRial: shares[index],
+        cogsRial: returned.cogs,
+        disposition: returned.disposition,
+        merch: returned.merch,
+      });
+    }
   }
   await client.query("UPDATE customer_returns SET inventory_event_id=$2 WHERE id=$1", [returnId, events[0].id]);
   await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [events[0].id]);

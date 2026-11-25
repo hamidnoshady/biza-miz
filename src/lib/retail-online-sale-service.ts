@@ -24,6 +24,7 @@
  * («سود موقت»), and what a refund restores against. The rules themselves are
  * pure and live in `online-sale-policy.ts`.
  */
+import { readSaleMerchSnapshot, type SaleMerchSnapshot } from "./sale-return-facts";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import { rialText, roundRial, type RialText } from "./inventory-exact";
@@ -262,15 +263,18 @@ async function recordOnlineSaleLine(
   },
 ): Promise<void> {
   if (new Decimal(fact.quantity).lte(0)) return;
+  // GH #1567 F4 — freeze the merchandising tags the website sale is reported
+  // under, exactly as the counter does in its sale event.
+  const merch = fact.itemId ? await readSaleMerchSnapshot(client, fact.itemId) : null;
   await client.query(
     `INSERT INTO online_sale_lines
        (order_item_id, order_id, location_id, item_id, source_type, quantity, net_rial,
-        cost_status, cogs_rial, stock_outcome, relieved_quantity, short_quantity, occurred_at)
-     VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $11::numeric, $12::numeric, $13)`,
+        cost_status, cogs_rial, stock_outcome, relieved_quantity, short_quantity, occurred_at, merch)
+     VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $11::numeric, $12::numeric, $13, $14::jsonb)`,
     [
       fact.orderItemId, fact.orderId, fact.locationId, fact.itemId, fact.sourceType, fact.quantity,
       fact.netRial, fact.costStatus, fact.cogsRial, fact.stockOutcome, fact.relievedQuantity,
-      fact.shortQuantity, fact.occurredAt,
+      fact.shortQuantity, fact.occurredAt, merch ? JSON.stringify(merch) : null,
     ],
   );
 }

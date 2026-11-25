@@ -14,6 +14,7 @@
  */
 import type { RialText } from "../inventory-exact";
 import type { Purity } from "../gold";
+import type { SaleMerchSnapshot } from "../sale-return-facts";
 
 /** Money as the API/DB hands it back — an integer-Rial string, per repo convention (see inventory-exact.ts). */
 export type Money = RialText | string;
@@ -55,6 +56,8 @@ interface RetailInvoiceLineSnapshotBase {
    * such a line automatically rather than leave it unreversed.
    */
   ledgerEntryIds?: string[];
+  /** GH #1567 F4 — collection/season/category/brand frozen at sale time; absent on pre-0328 lines (reported as unknown). */
+  merch?: SaleMerchSnapshot;
 }
 
 export interface GoldLineSnapshot extends RetailInvoiceLineSnapshotBase {

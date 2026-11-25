@@ -27,6 +27,7 @@ import {
   type AccessorySalePriceBreakdown,
 } from "./accessories";
 import { getItem } from "./items-service";
+import { readSaleMerchSnapshot, type SaleMerchSnapshot } from "./sale-return-facts";
 import { emitDomainEvent } from "./posting-engine";
 import type { RialText } from "./inventory-exact";
 import type { SettlementMethod } from "./ledger";
@@ -211,6 +212,8 @@ export interface SellAccessoryResult {
   cogsEntryId: string | null;
   /** The COGS this sale posted, Rial — the same number the commission margin basis uses. */
   cost: RialText;
+  /** GH #1567 F4 — merchandising tags frozen at sale time. */
+  merch: SaleMerchSnapshot;
 }
 
 /**
@@ -279,6 +282,9 @@ export async function sellAccessoryUnits(
   const postingSourceId = randomUUID();
   const lineTenders = resolveLineTenders(input, breakdown.total);
 
+  // GH #1567 F4 — the merchandising tags this sale is reported under,
+  // frozen now so re-tagging the style later never moves it.
+  const merch = await readSaleMerchSnapshot(client, input.itemId);
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -293,6 +299,7 @@ export async function sellAccessoryUnits(
       vat: breakdown.vat,
       total: breakdown.total,
       tenders: lineTenders,
+      merch,
     },
     sourceType: "accessory_sale",
     sourceId: input.itemId,
@@ -311,7 +318,7 @@ export async function sellAccessoryUnits(
     createdBy: input.createdBy ?? null,
   });
 
-  return { breakdown, revenueEntryId, cogsEntryId, cost };
+  return { breakdown, revenueEntryId, cogsEntryId, cost, merch };
 }
 
 export interface VariantSummary {

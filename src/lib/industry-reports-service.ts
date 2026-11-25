@@ -277,6 +277,15 @@ export const repairReportPage = (locationId: string, options: { from?: string; t
  * by a posting rule. Neither path writes the other, so the union below counts
  * every sale exactly once. A voided online line (a reversed order) drops out,
  * and an online line is dated by its own `occurred_at`, not the import's.
+ *
+ * GH #1567 F4 — returns come off both sides: every counter return and website
+ * refund writes `sale_return_facts` (migration 0328) with the quantity, the
+ * contra-revenue share and the COGS it actually reversed, dated by the return
+ * — so the report nets exactly as the ledger does (a damaged return reduces
+ * quantity and revenue but reverses no COGS; an exchange returns quantity
+ * with no revenue). A return of a later-reversed (voided) line drops out with
+ * its sale. An online line therefore contributes its full `cogs_rial`; what
+ * a refund restored is in its return fact (legacy refunds were backfilled).
  * `$1` business, `$2` branch, `$3`/`$4` from/to dates, `$5` trade prefix.
  */
 const SALE_FACTS_CTE = `revenue AS (
@@ -297,6 +306,13 @@ const SALE_FACTS_CTE = `revenue AS (
              WHERE f.location_id = $2 AND f.item_id IS NOT NULL
                AND ($3::date IS NULL OR f.occurred_at >= $3::date)
                AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
+            UNION ALL
+            SELECT rf.item_id, -trim_scale(rf.quantity), -rf.net_rial::numeric
+              FROM sale_return_facts rf
+              JOIN order_items oi ON oi.id = rf.order_item_id AND oi.status <> 'voided'
+             WHERE rf.business_id = $1 AND rf.location_id = $2
+               AND ($3::date IS NULL OR rf.occurred_at >= $3::date)
+               AND ($4::date IS NULL OR rf.occurred_at < ($4::date + 1))
           ) facts
          GROUP BY item_id
       ), cost AS (
@@ -309,12 +325,19 @@ const SALE_FACTS_CTE = `revenue AS (
                AND ($3::date IS NULL OR e.created_at >= $3::date)
                AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
             UNION ALL
-            SELECT f.item_id, (f.cogs_rial - f.restored_cogs_rial)::numeric
+            SELECT f.item_id, f.cogs_rial::numeric
               FROM online_sale_lines f
               JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
              WHERE f.location_id = $2 AND f.item_id IS NOT NULL
                AND ($3::date IS NULL OR f.occurred_at >= $3::date)
                AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
+            UNION ALL
+            SELECT rf.item_id, -rf.cogs_rial::numeric
+              FROM sale_return_facts rf
+              JOIN order_items oi ON oi.id = rf.order_item_id AND oi.status <> 'voided'
+             WHERE rf.business_id = $1 AND rf.location_id = $2
+               AND ($3::date IS NULL OR rf.occurred_at >= $3::date)
+               AND ($4::date IS NULL OR rf.occurred_at < ($4::date + 1))
           ) facts
          GROUP BY item_id
       )`;

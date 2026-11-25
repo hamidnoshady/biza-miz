@@ -293,8 +293,8 @@ describe("5.1 collections, seasons and markdowns", () => {
 
     const rows = await merch.sellThroughByCollection(biz.id, biz.main, { eventPrefix: "fashion_apparel" });
     expect(rows).toEqual([
-      { collection: "زمستان ۱۴۰۵", season: "winter", quantitySold: "1", netRevenue: 400_000 },
-      { collection: "تابستان ۱۴۰۵", season: "summer", quantitySold: "2", netRevenue: 160_000 },
+      { collection: "زمستان ۱۴۰۵", season: "winter", category: null, snapshotKnown: true, quantitySold: "1", netRevenue: 400_000 },
+      { collection: "تابستان ۱۴۰۵", season: "summer", category: null, snapshotKnown: true, quantitySold: "2", netRevenue: 160_000 },
     ]);
     expect(await merch.sellThroughByCollection(biz.id, biz.branch, { eventPrefix: "fashion_apparel" })).toEqual([]);
   });

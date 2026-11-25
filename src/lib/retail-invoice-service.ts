@@ -1285,6 +1285,7 @@ async function settleLine(
         vat: tradeSale.breakdown.vat,
         net: tradeSale.breakdown.net,
         total: tradeSale.breakdown.total,
+        merch: tradeSale.merch,
         ledgerEntryIds: [tradeSale.revenueEntryId, tradeSale.cogsEntryId].filter(
           (id): id is string => id != null,
         ),
@@ -1305,7 +1306,7 @@ async function settleLine(
           tenders: tenderQueue,
           createdBy: input.createdBy ?? null,
         });
-  const { breakdown, cost, revenueEntryId, cogsEntryId } = sale;
+  const { breakdown, cost, revenueEntryId, cogsEntryId, merch } = sale;
   const baseSnapshot = {
     quantity: line.quantity,
     unitPrice: line.unitPrice != null ? rialText(String(Math.round(line.unitPrice))) : null,
@@ -1316,6 +1317,8 @@ async function settleLine(
     vat: breakdown.vat,
     net: breakdown.net,
     total: breakdown.total,
+    // GH #1567 F4 — the frozen merchandising snapshot a return copies.
+    merch,
     ledgerEntryIds: [revenueEntryId, cogsEntryId].filter((id): id is string => id != null),
   } as const;
   return {

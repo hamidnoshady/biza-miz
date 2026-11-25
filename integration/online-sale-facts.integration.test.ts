@@ -446,6 +446,31 @@ describe("online sale facts — refunds", () => {
     expect((await stock(first)).quantity).toBe("5.000000000");
     expect((await stock(second)).quantity).toBe("5.000000000");
     expect((await factFor(second))[0].restored_cogs_rial).toBe("400");
+    // GH #1567 F4 — one return fact per refunded line, written once (the
+    // capped 9052 and the replayed 9051 add nothing), carrying the restored
+    // COGS and a contra-revenue split that sums to the refund's net.
+    const { rows: facts } = await db.query<{ item_id: string; quantity: string; net_rial: string; cogs_rial: string; amounts_known: boolean }>(
+      `SELECT item_id, trim_scale(quantity)::text AS quantity, net_rial::text, cogs_rial::text, amounts_known
+         FROM sale_return_facts WHERE order_id = $1 AND source_type = 'online_refund' ORDER BY cogs_rial`,
+      [(await factFor(first))[0].order_id],
+    );
+    expect(facts.map(({ net_rial: _net, ...rest }) => rest)).toEqual([
+      { item_id: first, quantity: "2", cogs_rial: "200", amounts_known: true },
+      { item_id: second, quantity: "2", cogs_rial: "400", amounts_known: true },
+    ]);
+    // Equal lines split the contra-revenue evenly, and the split sums to the
+    // sales-returns (4400) debit the refund actually posted.
+    expect(facts[0].net_rial).toBe(facts[1].net_rial);
+    const { rows: contra } = await db.query<{ total: string }>(
+      `SELECT coalesce(sum(jl.debit - jl.credit), 0)::text AS total
+         FROM journal_entries je
+         JOIN journal_lines jl ON jl.entry_id = je.id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.business_id = $1 AND je.source_type = 'woocommerce_refund' AND je.memo LIKE '%#9051' AND a.code = '4400'`,
+      [biz.id],
+    );
+    expect(BigInt(facts[0].net_rial) + BigInt(facts[1].net_rial)).toBe(BigInt(contra[0].total));
+    expect(BigInt(contra[0].total)).toBeGreaterThan(0n);
   });
 
   it("serializes distinct refunds of one order and never restores more than sold", async () => {

@@ -41,6 +41,7 @@ import { quantityText, rialText, roundRial, type RialText } from "./inventory-ex
 import { getItem, type Item } from "./items-service";
 import { buildVariantMatrix, type MatrixAxis } from "./variant-matrix";
 import { relieveFungibleStock } from "./item-stock-valuation";
+import { readSaleMerchSnapshot, type SaleMerchSnapshot } from "./sale-return-facts";
 import { emitDomainEvent } from "./posting-engine";
 import type { SettlementMethod } from "./ledger";
 import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
@@ -268,6 +269,8 @@ export interface SellCosmeticResult {
   breakdown: CosmeticSalePriceBreakdown;
   revenueEntryId: string | null;
   cogsEntryId: string | null;
+  /** GH #1567 F4 — the sale-time merchandising snapshot (also in the event payload). */
+  merch: SaleMerchSnapshot;
   /** The COGS this sale posted, Rial — the actual FEFO batch cost when batch-tracked. */
   cost: RialText;
   /** Batch number(s) consumed, when the item is batch-tracked. */
@@ -360,6 +363,9 @@ export async function sellCosmeticUnits(
   const postingSourceId = randomUUID();
   const lineTenders = resolveLineTenders(input, breakdown.total);
 
+  // GH #1567 F4 — the merchandising tags this sale is reported under,
+  // frozen now so re-tagging the style later never moves it.
+  const merch = await readSaleMerchSnapshot(client, input.itemId);
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -375,6 +381,7 @@ export async function sellCosmeticUnits(
       total: breakdown.total,
       tenders: lineTenders,
       batchNumbers: batchNumbers ?? [],
+      merch,
     },
     sourceType: "cosmetic_sale",
     sourceId: input.itemId,
@@ -403,7 +410,7 @@ export async function sellCosmeticUnits(
   }
   // Non-batch stock was relieved (quantity, value and last_sold_at) above.
 
-  return { breakdown, revenueEntryId, cogsEntryId, cost, batchNumbers, expiryDate, batchAllocations };
+  return { breakdown, revenueEntryId, cogsEntryId, merch, cost, batchNumbers, expiryDate, batchAllocations };
 }
 
 /**
