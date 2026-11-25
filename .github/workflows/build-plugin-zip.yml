@@ -334,7 +334,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           git tag "v$env:NEXT"
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          git push origin "HEAD:refs/heads/$env:GITHUB_REF_NAME" "refs/tags/v$env:NEXT"
+          # `--atomic` is load-bearing. Without it git pushes each ref on its
+          # own, so a branch push rejected as non-fast-forward (main moved on
+          # while this run was queued) still lands the tag. A tag with no
+          # commit behind it burns that version number forever: the next run
+          # computes the same version, "Refuse to shadow a shipped version"
+          # rejects it, and the plugin can never be built again - exactly the
+          # state v1.6.29 left behind. All or nothing now: either the bump and
+          # its tag both land, or neither does and a retry can reuse it.
+          git push --atomic origin "HEAD:refs/heads/$env:GITHUB_REF_NAME" "refs/tags/v$env:NEXT"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Publish the versioned GitHub Release
