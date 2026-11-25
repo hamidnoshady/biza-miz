@@ -401,9 +401,12 @@ function removeProfile(registry, profileId) {
 }
 
 /**
- * The identity a running business reports about itself, normalized to the same
+ * The identity a running business proved about itself, normalized to the same
  * closed shapes the registry already stores. Returns `null` for anything it
  * cannot prove, including a credential-shaped key smuggled into the payload.
+ *
+ * The caller is the desktop shell reading the identity file its own backend
+ * published (`business-identity-file.js`), never renderer input.
  */
 function normalizeReportedIdentity(input) {
   if (!isRecord(input)) return null;
@@ -432,6 +435,10 @@ function normalizeReportedIdentity(input) {
  * and nothing is written — re-pairing is an explicit decision, not a side
  * effect of a login. The record still goes through `validateProfile` on write,
  * so the registry stays non-secret whatever the caller sends.
+ *
+ * The identity comes from the backend's own published file, not from the
+ * renderer; a file that fails the instance-fingerprint check never reaches
+ * this function (see `business-identity-file.js`).
  */
 function recordProfileIdentity(registry, profileId, identity) {
   const index = registry.profiles.findIndex((profile) => profile.id === profileId);
@@ -619,6 +626,7 @@ module.exports = {
   createProfile,
   addProfile,
   removeProfile,
+  normalizeReportedIdentity,
   recordProfileIdentity,
   selectProfile,
   planLegacyImport,

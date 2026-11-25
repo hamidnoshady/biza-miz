@@ -8,7 +8,6 @@ import { FormLoadingSkeleton } from "@/components/form-loading-skeleton";
 import { Button } from "@/components/ui/button";
 import { Field, inputClass } from "@/app/dashboard/ui";
 import { normalizeServerAddress } from "@/lib/connection-code";
-import { recordDesktopBusinessIdentity } from "@/lib/desktop-business-identity";
 import { toPersianDigits } from "@/lib/digits";
 import { ENROLLMENT_POLL_INTERVAL_MS, formatUserCode } from "@/lib/desktop-enroll-shared";
 
@@ -138,18 +137,8 @@ export function CloudEnrollForm({
           signedIn?: boolean;
           identitySyncPending?: boolean;
           credentialSync?: CredentialSync | null;
-          businessId?: string;
-          businessSubdomain?: string;
-          cloudOrigin?: string;
         };
         if (res.ok) {
-          // #1572 — same hand-off as the pairing wizard: the shell names the
-          // saved business now that enrollment has proven it. No-op in a browser.
-          recordDesktopBusinessIdentity({
-            businessId: data.businessId,
-            businessSubdomain: data.businessSubdomain ?? null,
-            cloudOrigin: data.cloudOrigin ?? null,
-          });
           // Paired. The device-local owner PIN is optional from here: Cloud
           // identity material already travelled with the snapshot, and the
           // epic's contract is no compulsory second setup form on the till.

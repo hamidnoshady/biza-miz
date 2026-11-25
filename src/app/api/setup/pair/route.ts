@@ -15,6 +15,7 @@ import {
 } from "@/lib/pairing-snapshot";
 import { hasAnyUser } from "@/lib/setup-state";
 import { acknowledgePendingPairing } from "@/lib/server-sync";
+import { publishDesktopBusinessIdentity } from "@/lib/desktop-identity-file";
 
 /** How long to wait on the online server before calling it unreachable. */
 const REDEEM_TIMEOUT_MS = 30_000;
@@ -172,6 +173,16 @@ export async function POST(request: NextRequest) {
     pairingSessionId,
     installationId,
   });
+  // #1572 — this backend now holds the business, so it is the authority on the
+  // saved profile's identity. It publishes a non-secret file beside its own
+  // config, and the desktop shell reads it on the next launch. The renderer is
+  // not told the tenant id and cannot report one; a browser has no identity
+  // path and this is a no-op.
+  publishDesktopBusinessIdentity({
+    businessId: applied.businessId,
+    businessSubdomain: applied.businessSubdomain,
+    cloudOrigin: new URL(remoteUrl).origin,
+  });
 
   // The cloud credential intentionally remains pending until this point.
   // `acknowledgePendingPairing` also promotes the stored local config to
@@ -246,13 +257,6 @@ export async function POST(request: NextRequest) {
     /** False only when the business is paired but its Owner could not be signed in: go to /login. */
     signedIn: token !== null,
     slug: applied.businessSlug,
-    // #1572 — the desktop shell fills a saved business's empty identity fields
-    // from here; a browser ignores them. None of this is secret: the tenant id
-    // and subdomain are already in the signed session, and the origin is the
-    // Cloud this install was just paired with.
-    businessId: applied.businessId,
-    businessSubdomain: applied.businessSubdomain,
-    cloudOrigin: new URL(remoteUrl).origin,
     ownerUserId: applied.ownerUserId,
     activationPending,
     // Hybrid replicates supported cloud login material on purpose

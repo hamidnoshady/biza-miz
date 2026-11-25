@@ -2,7 +2,7 @@
 // The application server remains loopback-only; explicitly enabled phones and
 // tablets use the separate HTTPS gateway in gateway-manager.js.
 "use strict";
-const { assertGatewaySender, authorizeGatewayInvocation } = require("./gateway-ipc-authorization");
+const { authorizeGatewayInvocation } = require("./gateway-ipc-authorization");
 
 const { app, BrowserWindow, dialog, ipcMain, Notification, session, shell, safeStorage } = require("electron");
 const path = require("node:path");
@@ -43,6 +43,7 @@ const {
   writeRegistry,
 } = require("./profile-registry");
 const { showProfilePicker } = require("./profile-picker");
+const { businessIdentityPath, instanceFingerprint, readBusinessIdentityFile } = require("./business-identity-file");
 const { BRAND_NAME_EN, brandName, byLocale } = require("./brand");
 const { resolveUserDataDir } = require("./user-data-path");
 
@@ -392,32 +393,6 @@ function runDesktopShell() {
       return { ok: true };
     });
 
-    // #1572 follow-up — the identity the running business's own enrollment just
-    // proved. The renderer never names a profile: this fills the *active* one,
-    // only where a field is still empty, and a disagreement with a stored tenant
-    // id is refused rather than written (a profile's business is immutable).
-    handleIpc("desktop:business-identity", async (event, payload) => {
-      assertGatewaySender(event, mainWindow, mainAppUrl);
-      const profileId = profileManager?.activeProfile?.id ?? null;
-      if (!profileId) return { ok: false, error: "no_active_profile" };
-      const current = readRegistry(installRoot);
-      if (current.state !== "ok") throw new Error("profile_registry_unreadable");
-      const result = recordProfileIdentity(current.registry, profileId, payload);
-      if (!result.ok) {
-        logger.warn("Desktop business identity was not recorded", {
-          profileId,
-          error: result.error,
-          field: result.field ?? null,
-        });
-        return result;
-      }
-      if (result.changed) {
-        writeRegistry(installRoot, result.registry);
-        logger.info("Desktop business identity recorded", { profileId });
-      }
-      return { ok: true, changed: result.changed };
-    });
-
     // Desktop updates: manual and background downloads share this one engine.
     // Renderer input is still treated as hostile: the engine validates SemVer,
     // HTTPS origin, exact size/hash, Authenticode publisher and backup evidence.
@@ -668,6 +643,66 @@ function runDesktopShell() {
       }
     }
     return state;
+  }
+
+  /**
+   * Name the profile this launch is serving, from the file its *own backend*
+   * published (#1572 follow-up).
+   *
+   * The renderer is not involved: pairing/reconnect/bootstrap/signup make the
+   * local server write `Configuration/business-identity.json`, and this reads
+   * it once the backend is up. Two independent refusals protect the registry —
+   * the document must carry this profile's instance fingerprint (so a file
+   * copied from another saved business is `foreign` and ignored), and
+   * `recordProfileIdentity` still refuses a tenant that disagrees with a value
+   * the profile already holds. A missing or unreadable file is normal (a first
+   * run that has not enrolled yet) and never blocks startup.
+   */
+  function applyPublishedIdentity(profile, instanceId) {
+    try {
+      applyPublishedIdentityUnsafe(profile, instanceId);
+    } catch (error) {
+      // A metadata gap must never turn a healthy launch into a recovery dialog.
+      logger.warn("Desktop business identity could not be applied", {
+        profileId: profile.id,
+        detail: error?.message || String(error),
+      });
+    }
+  }
+
+  function applyPublishedIdentityUnsafe(profile, instanceId) {
+    const file = businessIdentityPath(profileDataDir(installRoot, profile.id));
+    const read = readBusinessIdentityFile(file, instanceFingerprint(instanceId));
+    if (!read.identity) {
+      if (read.state !== "missing") {
+        logger.warn("Desktop business identity file was not used", {
+          profileId: profile.id,
+          state: read.state,
+        });
+      }
+      return;
+    }
+    const current = readRegistry(installRoot);
+    if (current.state !== "ok") {
+      logger.warn("Desktop business identity was not recorded", {
+        profileId: profile.id,
+        error: "profile_registry_unreadable",
+      });
+      return;
+    }
+    const result = recordProfileIdentity(current.registry, profile.id, read.identity);
+    if (!result.ok) {
+      logger.warn("Desktop business identity was not recorded", {
+        profileId: profile.id,
+        error: result.error,
+        field: result.field ?? null,
+      });
+      return;
+    }
+    if (result.changed) {
+      writeRegistry(installRoot, result.registry);
+      logger.info("Desktop business identity recorded from the running backend", { profileId: profile.id });
+    }
   }
 
   async function cleanup() {
@@ -986,6 +1021,9 @@ function runDesktopShell() {
       try {
         cleanupStarted = null;
         const state = await initialiseBackend(profile);
+        // The backend has committed this profile's business (if any), so its
+        // published identity is now trustworthy for this profile.
+        applyPublishedIdentity(profile, state.config.instanceId);
         // Reaching here proves both PostgreSQL and the packaged web backend
         // passed their health checks. Only now may a pending update be marked
         // successful (and only when app.getVersion() is the expected target).

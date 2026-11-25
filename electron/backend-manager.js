@@ -306,6 +306,7 @@ function desktopServerEnvironment(config, runtimeUrl, appVersion = "unknown", op
     updateTargetPath,
     updatePolicyPath,
     updateCommandPath,
+    identityPath,
   } = options;
   return {
     DATABASE_URL: runtimeUrl,
@@ -361,6 +362,9 @@ function desktopServerEnvironment(config, runtimeUrl, appVersion = "unknown", op
     ...(updateTargetPath ? { DESKTOP_UPDATE_TARGET_PATH: updateTargetPath } : {}),
     ...(updatePolicyPath ? { DESKTOP_UPDATE_POLICY_PATH: updatePolicyPath } : {}),
     ...(updateCommandPath ? { DESKTOP_UPDATE_COMMAND_PATH: updateCommandPath } : {}),
+    // #1572 — where this profile's backend publishes the non-secret identity
+    // the shell reads on the next launch (src/lib/desktop-identity-file.ts).
+    ...(identityPath ? { DESKTOP_IDENTITY_PATH: identityPath } : {}),
   };
 }
 
@@ -886,6 +890,7 @@ class BackendManager {
       updateTargetPath: path.join(desktopPaths.configDir, "update-target.json"),
       updatePolicyPath: path.join(desktopPaths.configDir, "update-policy.json"),
       updateCommandPath: path.join(desktopPaths.configDir, "update-command.json"),
+      identityPath: path.join(desktopPaths.configDir, "business-identity.json"),
     });
     // Last cancellation point, in the same tick as the spawn: a stop() that has
     // already run must not leave an unsupervised application server behind,
