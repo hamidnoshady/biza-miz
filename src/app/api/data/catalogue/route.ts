@@ -19,6 +19,7 @@ import {
 import {
   applyCatalogue, catalogueItems, catalogueRuns, catalogueSummary, reviewCatalogueItem, stageCatalogue, type CatalogueOwner,
 } from "@/lib/data-transfer/catalogue-service";
+import { CATALOGUE_VALUE_REASONS } from "@/lib/data-transfer/catalogue-values";
 import { catalogueWooStatus, previewCatalogueWoo, queueCatalogueWoo } from "@/lib/data-transfer/catalogue-woo";
 import { cancelRun, ReconciliationError } from "@/lib/import-reconciliation/service";
 import type { CatalogueRecord } from "@/lib/data-transfer/catalogue-plan";
@@ -58,7 +59,8 @@ const itemKey = { ...runKey, itemId: z.number().int().positive().safe() };
 const storeKey = { ...itemKey, connectionId: uuid };
 const command = z.discriminatedUnion("action", [
   z.object({ action: z.literal("review"), ...itemKey, decision: z.enum(["link", "create_separate", "skip", "keep_for_review"]), canonicalId: uuid.optional() }),
-  z.object({ action: z.literal("apply"), ...runKey, confirmMetadataOnly: z.literal(true), approveSafe: z.boolean() }),
+  z.object({ action: z.literal("apply"), ...runKey, confirmMetadataOnly: z.literal(true), approveSafe: z.boolean(),
+    confirmPrices: z.boolean().optional(), confirmStock: z.boolean().optional() }),
   z.object({ action: z.literal("cancel"), ...runKey }),
   z.object({ action: z.literal("woo-preview"), ...storeKey }),
   z.object({ action: z.literal("woo-queue"), ...storeKey, token: z.string().regex(/^[a-f0-9]{64}$/),
@@ -72,6 +74,8 @@ const fileOptions = z.object({
   duplicateRows: z.array(z.number().int().min(2).max(CATALOGUE_MAX_ROWS + 1)).max(CATALOGUE_MAX_ROWS).default([]),
   sourceName: z.string().trim().min(1).max(100).default("catalogue"),
   axis: z.string().trim().max(100).default(""),
+  valueMode: z.enum(["catalogue_only", "fill_missing", "update_existing"]).default("catalogue_only"),
+  currency: z.enum(["rial", "toman"]).default("rial"),
 });
 
 async function boundedWorkbook(request: Request) {
@@ -142,12 +146,25 @@ export const GET = withTenantScope(async (request: Request) => {
     const items = await catalogueItems(owner, runId);
     if (params.get("report") === "csv") {
       const byRow = new Map(items.map(item => [item.rowNumber, item]));
-      return fileResponse(toCsv(["row", "sku", "title", "brand", "brand_source", "outcome", "status", "issues", "other_rows", "family_parent_row", "error"], items.map(item => {
+      return fileResponse(toCsv(["row", "sku", "title", "brand", "brand_source", "outcome", "status", "issues",
+        "price_current_rial", "price_proposed_rial", "price_action",
+        "cost_current_rial", "cost_proposed_rial", "cost_action",
+        "stock_current", "stock_proposed", "stock_action",
+        "other_rows", "family_parent_row", "error"], items.map(item => {
         const record = item.snapshot as CatalogueRecord;
         const row = record.catalogue;
         const effective = record.familyParentRow ? byRow.get(record.familyParentRow) ?? item : item;
+        const plan = record.valuePlan;
+        const valueCells = (field: "price" | "cost" | "quantity") => {
+          const entry = plan?.[field];
+          if (!entry) return ["", "", ""];
+          return [entry.current ?? "", entry.proposed ?? "",
+            entry.action === "held" ? `held: ${CATALOGUE_VALUE_REASONS[entry.reason ?? ""] ?? entry.reason}` : entry.action];
+        };
         return [row.number, row.sku, row.title, row.values.brand ?? "", row.brandSource, effective.outcome, effective.status,
-          row.issues.map(issue => `${issue.field} ${issue.code}`).join(" | "), row.duplicateRows.join(", "), record.familyParentRow, effective.error];
+          row.issues.map(issue => `${issue.field} ${issue.code}`).join(" | "),
+          ...valueCells("price"), ...valueCells("cost"), ...valueCells("quantity"),
+          row.duplicateRows.join(", "), record.familyParentRow, effective.error];
       })), "text/csv; charset=utf-8", "catalogue-review.csv");
     }
     return NextResponse.json({ ...await catalogueSummary(owner, runId), items });
@@ -166,7 +183,7 @@ export const POST = withTenantScope(async (request: Request) => {
       if (options.action === "analyse") return NextResponse.json({ columns: sheet.columns, sheet: sheet.name, mapping: suggestCatalogueMapping(sheet.columns) });
       const mapping = validateCatalogueMapping(options.mapping, sheet.columns.length);
       if (options.action === "preview") {
-        return NextResponse.json(parseCatalogueRows(sheet, mapping, { fallbackBrand: options.fallbackBrand }));
+        return NextResponse.json(parseCatalogueRows(sheet, mapping, { fallbackBrand: options.fallbackBrand, currency: options.currency }));
       }
       return NextResponse.json({ runId: await stageCatalogue(owner, {
         ...options, mapping, sheet, fileName: file.name.slice(0, 255), fingerprint: createHash("sha256").update(new Uint8Array(bytes)).digest("hex"),
@@ -180,7 +197,9 @@ export const POST = withTenantScope(async (request: Request) => {
       case "review":
         return NextResponse.json({ item: await reviewCatalogueItem(owner, input.runId, input.itemId, input.decision, input.canonicalId) });
       case "apply":
-        return NextResponse.json(await applyCatalogue(owner, input.runId, input.approveSafe));
+        return NextResponse.json(await applyCatalogue(owner, input.runId, input.approveSafe, {
+          prices: input.confirmPrices === true, stock: input.confirmStock === true,
+        }));
       case "cancel":
         await catalogueSummary(owner, input.runId);
         return NextResponse.json({ run: await cancelRun(owner.businessId, input.runId, owner.actor) });

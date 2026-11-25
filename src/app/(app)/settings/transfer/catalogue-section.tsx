@@ -9,6 +9,11 @@ import { RECONCILIATION_OUTCOME_LABELS, RECONCILIATION_RUN_STATUS_LABELS } from 
 import type { BrandSource, CatalogueField, CatalogueMapping, CatalogueRow } from "@/lib/data-transfer/catalogue-profile";
 import type { CatalogueRecord } from "@/lib/data-transfer/catalogue-plan";
 import type { catalogueItems, catalogueRuns, catalogueSummary } from "@/lib/data-transfer/catalogue-service";
+import {
+  CATALOGUE_VALUE_MODE_LABELS, CATALOGUE_VALUE_REASONS,
+  type CatalogueValueMode, type CatalogueValuePlan,
+} from "@/lib/data-transfer/catalogue-values";
+import { useMoney } from "@/components/money/money-context";
 import type { catalogueWooStatus, previewCatalogueWoo } from "@/lib/data-transfer/catalogue-woo";
 
 const url = "/api/data/catalogue";
@@ -16,7 +21,7 @@ const labels: Record<CatalogueField, string> = {
   sku: "شناسه کالا", title: "نام محصول", barcode: "بارکد", collection: "مجموعه",
   brand: "برند", case_dimension: "ابعاد قاب", case_material: "جنس قاب", band_material: "جنس بند",
   band_color: "رنگ بند", drive: "نوع موتور", face: "رنگ صفحه", lock_type: "نوع قفل", case_color: "رنگ قاب",
-  case_form: "شکل قاب", price: "قیمت (فقط بررسی)", quantity: "موجودی (فقط بررسی)", parent_sku: "شناسه والد",
+  case_form: "شکل قاب", price: "قیمت فروش", cost: "بهای خرید", quantity: "موجودی", parent_sku: "شناسه والد",
   parent_title: "نام والد", option: "مقدار محور تنوع",
 };
 const issueLabels: Record<string, string> = {
@@ -25,6 +30,11 @@ const issueLabels: Record<string, string> = {
   movement_review: "نوع موتور مبهم است و ثبت نمی‌شود",
   dimension_review: "ابعاد نامعتبر است و ثبت نمی‌شود", missing: "بدون مقدار",
   metadata_only: "خارج از ورود اطلاعات این مرحله",
+  invalid_amount: "عدد نامعتبر است و ثبت نمی‌شود",
+  explicit_zero: "صفر صریح در فایل",
+};
+const amountStateLabels: Record<string, string> = {
+  valid: "معتبر", zero: "صفر صریح", invalid: "نامعتبر", formula: "فرمول", error: "خطای اکسل", blank: "خالی",
 };
 const brandSourceLabels: Record<BrandSource, string> = {
   excel: "از ستون اکسل",
@@ -55,6 +65,10 @@ const errors: Record<string, string> = {
   catalogue_woo_discovery_pending: "درخواست بررسی فقط‌خواندنی در صف افزونه است. پس از اجرای افزونه، دوباره پیش‌نمایش فروشگاه را بگیرید.",
   catalogue_plugin_update_required: "نسخهٔ افزونه از انتشار بازبینی‌شده پشتیبانی نمی‌کند.",
   catalogue_woo_mirror_unverified: "برای ادامه، بررسی نهایی شناسه توسط افزونه را تأیید کنید.",
+  catalogue_price_confirmation_required: "اعمال قیمت‌ها به تأیید جداگانهٔ مالی نیاز دارد.",
+  catalogue_stock_confirmation_required: "اعمال موجودی به تأیید جداگانه نیاز دارد.",
+  catalogue_update_requires_existing: "در حالت به‌روزرسانی، شناسهٔ ناشناخته ایجاد نمی‌شود و باید بررسی شود.",
+  catalogue_value_conflict: "یکی از مقادیر هنگام اعمال تغییر کرده بود؛ ردیف برای بررسی نگه داشته شد.",
 };
 
 type RunList = Awaited<ReturnType<typeof catalogueRuns>>;
@@ -71,7 +85,8 @@ type BrandTotals = {
   fallbackBrandRows?: number;
   unbrandedRows?: number;
 };
-type DryRun = { rows: CatalogueRow[]; totals: BrandTotals };
+type ValueTotals = { price: Record<string, number>; cost: Record<string, number>; quantity: Record<string, number> };
+type DryRun = { rows: CatalogueRow[]; totals: BrandTotals; valueTotals?: ValueTotals };
 type Overview = { runs: RunList; stores: { id: string; name: string }[]; target: "watch" | "retail"; localOnly: boolean };
 
 async function request<T>(path = "", body?: Record<string, unknown> | FormData): Promise<T> {
@@ -83,6 +98,30 @@ async function request<T>(path = "", body?: Record<string, unknown> | FormData):
   return result.data;
 }
 
+function ValuePlanSummary({ plan }: { plan: CatalogueValuePlan | undefined }) {
+  const money = useMoney();
+  if (!plan) return null;
+  const rows = [
+    ["قیمت فروش", plan.price], ["بهای خرید", plan.cost], ["موجودی", plan.quantity],
+  ] as const;
+  const actionLabels = { set: "اعمال می‌شود", unchanged: "بدون تغییر", held: "نگه داشته شد" };
+  return (
+    <ul className="space-y-1 text-sm">
+      {rows.map(([label, entry]) => entry ? (
+        <li key={label}>
+          {label}: {entry.current == null || entry.current === "" ? "—" : typeof entry.current === "number"
+            ? money.format(entry.current) : toPersianDigits(String(entry.current))}
+          {" ← "}
+          {typeof entry.proposed === "number"
+            ? money.format(entry.proposed) : toPersianDigits(String(entry.proposed))}
+          {" · "}{actionLabels[entry.action]}
+          {entry.action === "held" && entry.reason ? <> · {CATALOGUE_VALUE_REASONS[entry.reason] ?? entry.reason}</> : null}
+        </li>
+      ) : null)}
+    </ul>
+  );
+}
+
 function RowEvidence({ row }: { row: CatalogueRow }) {
   return (
     <details className="min-w-0 text-sm">
@@ -92,7 +131,12 @@ function RowEvidence({ row }: { row: CatalogueRow }) {
           const field = key as CatalogueField;
           const value = row.raw[field];
           const warning = row.issues.find(issue => issue.field === field);
-          const normalized = field === "drive" ? row.movement : field === "case_dimension" ? row.dimensions?.join(" × ") : row.values[field];
+          const normalized = field === "drive" ? row.movement : field === "case_dimension" ? row.dimensions?.join(" × ")
+            : field === "price" || field === "cost" ? row.amounts?.[field]?.rial ?? undefined
+            : field === "quantity" ? row.stock?.quantity ?? undefined
+            : row.values[field];
+          const amountState = field === "price" || field === "cost" ? row.amounts?.[field]?.state
+            : field === "quantity" ? row.stock?.state : undefined;
           return <div key={field} className="min-w-0">
             <dt className="font-medium">
               {labels[field]}
@@ -104,7 +148,8 @@ function RowEvidence({ row }: { row: CatalogueRow }) {
             </dt>
             {value ? <dd className="break-words" dir="auto">{value}</dd> : null}
             {warning ? <dd className="text-muted-foreground">{issueLabels[warning.code]}</dd> : null}
-            {!warning && normalized && normalized !== value ? <dd dir="auto">{normalized}</dd> : null}
+            {!warning && amountState ? <dd className="text-muted-foreground">{amountStateLabels[amountState]}</dd> : null}
+            {!warning && normalized != null && normalized !== "" && normalized !== value ? <dd dir="auto">{String(normalized)}</dd> : null}
           </div>;
         })}
       </dl>
@@ -120,6 +165,10 @@ export function CatalogueSection() {
   const [fallbackBrand, setFallbackBrand] = useState("");
   const [axis, setAxis] = useState("");
   const [source, setSource] = useState("catalogue");
+  const [valueMode, setValueMode] = useState<CatalogueValueMode>("fill_missing");
+  const [currency, setCurrency] = useState<"rial" | "toman">("rial");
+  const [confirmPrices, setConfirmPrices] = useState(false);
+  const [confirmStock, setConfirmStock] = useState(false);
   const [dry, setDry] = useState<DryRun | null>(null);
   const [chosen, setChosen] = useState<Record<string, number>>({});
   const [run, setRun] = useState<RunDetails | null>(null);
@@ -164,6 +213,8 @@ export function CatalogueSection() {
       ...(trimmedFallback ? { fallbackBrand: trimmedFallback } : {}),
       axis,
       sourceName: source,
+      valueMode,
+      currency,
       duplicateRows: Object.values(chosen),
     }));
     return body;
@@ -200,6 +251,13 @@ export function CatalogueSection() {
     .filter(({ row }) => `${row.number} ${row.sku ?? ""} ${row.title} ${row.values.brand ?? ""}`.toLowerCase().includes(search.trim().toLowerCase()));
   const totals = (run?.run.evidence.totals as BrandTotals | undefined) ?? dry?.totals;
   const activeRun = run && ["staged", "in_review", "applying", "partially_applied"].includes(run.run.status);
+  const pendingValues = {
+    prices: run?.items.some(entry => {
+      const plan = (entry.snapshot as CatalogueRecord).valuePlan;
+      return plan?.price?.action === "set" || plan?.cost?.action === "set";
+    }) ?? false,
+    stock: run?.items.some(entry => (entry.snapshot as CatalogueRecord).valuePlan?.quantity?.action === "set") ?? false,
+  };
   const canReview = activeRun && run.run.status !== "applying";
   const saved = overview?.runs.filter(entry => entry.evidence.columns && JSON.stringify(entry.evidence.columns) === JSON.stringify(columns)) ?? [];
   const hasBrandColumn = mapping.brand !== undefined;
@@ -212,7 +270,7 @@ export function CatalogueSection() {
     <div dir="rtl" className="min-w-0 space-y-5">
       {error ? <ErrorBox>{error}</ErrorBox> : null}
       <SectionCard title="ورود کاتالوگ محصولات از اکسل" description="ابتدا ستون‌ها و ردیف‌های فایل، سپس شناسه‌های شعبه و فروشگاه را بررسی کنید.">
-        <InfoBox>این فرایند اطلاعات کاتالوگ را وارد می‌کند. قیمت، بهای خرید، موجودی و شمارهٔ سریال واحدها ثبت نمی‌شوند.</InfoBox>
+        <InfoBox>این فرایند اطلاعات کاتالوگ را وارد می‌کند. قیمت، بهای خرید و موجودی فقط در حالت انتخاب‌شده و پس از تأیید جداگانه اعمال می‌شوند؛ شمارهٔ سریال واحدها هرگز از فایل ساخته نمی‌شود.</InfoBox>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <Field label="فایل اکسل"><input className={inputClass} type="file" accept=".xlsx" disabled={busy || !overview}
             onChange={event => { setFile(event.target.files?.[0] ?? null); setColumns([]); changeMapping({}); setRun(null); setItem(null); resetWoo(); }} /></Field>
@@ -237,6 +295,21 @@ export function CatalogueSection() {
       {columns.length > 0 && !run ? <SectionCard title="تطبیق ستون‌های فایل">
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="نام ثابت منبع"><input className={inputClass} value={source} maxLength={100} disabled={busy} onChange={e => setSource(e.target.value)} /></Field>
+          <Field
+            label="حالت ورود قیمت، بها و موجودی"
+            hint="فقط محصولات شناسایی‌شده به‌روزرسانی می‌شوند؛ هیچ محصول تکراری ساخته نمی‌شود."
+          >
+            <select className={inputClass} value={valueMode} disabled={busy} onChange={e => setValueMode(e.target.value as CatalogueValueMode)}>
+              {(Object.keys(CATALOGUE_VALUE_MODE_LABELS) as CatalogueValueMode[]).map(mode =>
+                <option key={mode} value={mode}>{CATALOGUE_VALUE_MODE_LABELS[mode]}</option>)}
+            </select>
+          </Field>
+          <Field label="واحد پول ستون‌های قیمت و بها">
+            <select className={inputClass} value={currency} disabled={busy} onChange={e => setCurrency(e.target.value === "toman" ? "toman" : "rial")}>
+              <option value="rial">ریال</option>
+              <option value="toman">تومان</option>
+            </select>
+          </Field>
           {saved.length > 0 ? <Field label="تطبیق ذخیره‌شده برای این ستون‌ها"><select className={inputClass} defaultValue="" disabled={busy} onChange={e => {
             const entry = saved.find(candidate => candidate.id === e.target.value);
             if (entry) { changeMapping(entry.evidence.mapping); setSource(entry.evidence.sourceName); }
@@ -292,6 +365,17 @@ export function CatalogueSection() {
               {typeof totals.unbrandedRows === "number" && totals.unbrandedRows > 0 ? <> · {toPersianDigits(totals.unbrandedRows)} ردیف بدون برند</> : null}
             </p>
           ) : null}
+          {(run?.run.evidence.valueTotals as ValueTotals | undefined ?? dry?.valueTotals) ? (() => {
+            const values = (run?.run.evidence.valueTotals as ValueTotals | undefined) ?? dry!.valueTotals!;
+            const part = (label: string, counts: Record<string, number>) =>
+              `${label}: ${toPersianDigits(counts.valid ?? 0)} معتبر، ${toPersianDigits(counts.zero ?? 0)} صفر، ${toPersianDigits((counts.invalid ?? 0) + (counts.formula ?? 0) + (counts.error ?? 0))} نامعتبر، ${toPersianDigits(counts.blank ?? 0)} خالی`;
+            return <p className="text-sm text-muted-foreground">
+              {part("قیمت", values.price)} · {part("بهای خرید", values.cost)} · {part("موجودی", values.quantity)}
+            </p>;
+          })() : null}
+          {valueMode !== "catalogue_only" && (["price", "cost", "quantity"] as CatalogueField[]).some(field => mapping[field] !== undefined) ? <InfoBox>
+            مقادیر معتبر ستون‌های قیمت، بها و موجودی برای محصولات شناسایی‌شده پیشنهاد می‌شوند و تنها پس از تأیید جداگانهٔ مالی و موجودی اعمال می‌شوند.
+          </InfoBox> : null}
           {!run && totals?.blankBrandRows && totals.blankBrandRows > 0 && !trimmedFallback ? (
             <InfoBox>
               در {toPersianDigits(totals.blankBrandRows)} ردیف ستون برند خالی است. برای ثبت برند این ردیف‌ها می‌توانید برند جایگزین وارد کنید یا بدون برند ادامه دهید.
@@ -337,6 +421,7 @@ export function CatalogueSection() {
 
       {run && item ? <SectionCard title={`بررسی ${(item.snapshot as CatalogueRecord).catalogue.title}`}>
         <div className="space-y-3">
+          <ValuePlanSummary plan={(item.snapshot as CatalogueRecord).valuePlan} />
           {item.candidates.map(candidate => <div key={candidate.id} className="flex flex-wrap items-center gap-2">
             <span>{candidate.label}</span>
             {canReview && item.status !== "applied" ? <SecondaryButton disabled={busy} onClick={() => void perform(async () => {
@@ -415,14 +500,26 @@ export function CatalogueSection() {
       </SectionCard> : null}
 
       {run && (activeRun || run.run.status === "stale") ? <SectionCard title="اعمال تغییرات شعبه">
-        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={confirm} onChange={e => setConfirm(e.target.checked)} />
-          اعمال اطلاعات کاتالوگ بدون قیمت و موجودی را تأیید می‌کنم.
-        </label>
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={confirm} onChange={e => setConfirm(e.target.checked)} />
+            اعمال اطلاعات کاتالوگ (بدون تغییر قیمت و موجودی) را تأیید می‌کنم.
+          </label>
+          {pendingValues.prices ? <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={confirmPrices} onChange={e => setConfirmPrices(e.target.checked)} />
+            ثبت قیمت فروش و بهای خرید پیشنهادی و تاریخچهٔ قیمت را تأیید می‌کنم.
+          </label> : null}
+          {pendingValues.stock ? <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={confirmStock} onChange={e => setConfirmStock(e.target.checked)} />
+            ثبت موجودی پیشنهادی از طریق انبارگردانی و اصلاح مجاز موجودی را تأیید می‌کنم.
+          </label> : null}
+        </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          <PrimaryButton disabled={busy || !confirm || !activeRun} onClick={() => void perform(async () => {
+          <PrimaryButton disabled={busy || !confirm || !activeRun || (pendingValues.prices && !confirmPrices) || (pendingValues.stock && !confirmStock)}
+            onClick={() => void perform(async () => {
             let status: string;
             do {
-              const data = await request<{ run: { status: string } }>("", { action: "apply", runId: run.run.id, confirmMetadataOnly: true, approveSafe: true });
+              const data = await request<{ run: { status: string } }>("", { action: "apply", runId: run.run.id, confirmMetadataOnly: true, approveSafe: true,
+                confirmPrices, confirmStock });
               status = data.run.status;
               await loadRun(run.run.id);
             } while (status === "applying");
