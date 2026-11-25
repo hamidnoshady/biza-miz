@@ -110,14 +110,14 @@ openRun ─► stageProducts … ─► completeProductDiscovery ─► decideIt
 |---|---|
 | WooCommerce plugin first handshake | `ensureFirstContactReconciliationGate` opens a **discovering** product and/or party run when the tenant already has canonical rows. Bootstrap exports are still queued, but their product/customer webhooks are parked in `integration_webhook_events` as `deferred` until the run resolves. The export completion marker stages the buffered records in bounded keyset batches (`stageDeferredInboxForRun`) and completes discovery, so the run reaches review instead of sitting empty. |
 | WooCommerce `syncProducts` / «تطبیق پیش از همگام‌سازی» | A populated catalogue is staged through `stageWooCatalogueToReconciliation`; the blind sync path refuses with `reconciliation_required` until review. |
+| WooCommerce create, per remote identity | `createForRemoteOnce` holds the identity lock and, since #1592, `assertNoAmbiguousLocalIdentity` refuses a create when the branch already carries the same SKU on a row this connection does not own. One incoming product is staged into the connection's product run (`product_identity_review_required`); webhook deliveries are parked `deferred`, not failed. A re-linked connection is a new identity namespace, so this is the reconnect/reimport gate — nothing is auto-linked on SKU, and mappings are never copied. |
 | Orders and refunds during any active run | Financial webhooks wait behind the product/party run too, so a historical sale cannot create a customer or relieve stock while identity decisions are open. They stay durable in the inbox and are replayed after the last run applies. |
 | Holoo base/workbook feeds | `stageHolooBaseToReconciliation` splits goods, persons, opening inventory and journals into their own runs; the create writers post through the domain services. |
 | Data Transfer file imports | A populated entity is staged through `stageImportJobToReconciliation`; a completed job is finalised from the reconciled decisions, never by replaying the raw rows. |
 | Review, apply, report | The shared wizard and `/api/data/reconciliation` routes list runs, decide items, set cutover policy, apply bounded batches and download a non-sensitive JSON/CSV report. The summary, wizard and JSON report show how many source events are still buffered; a run with buffered events is not "fully reconciled". |
 | Outbound publication | WooCommerce price/stock pushes are gated on the item being applied, the mapping committed, ownership confirmed and no active product run; rejected remote edits are suppressed so an unchanged remote value is not echoed back. The Holoo accounting push queue waits for **any** active run on its connection, so a sale, receipt or purchase is never written while inventory/ledger ownership is still under review. |
 
-WooCommerce product shapes are preserved through staging: a `variable` product
-is a non-sellable `variant_parent`, a variation is a `variant_child` with its
+WooCommerce product shapes are preserved through staging: a `variable` productis a non-sellable `variant_parent`, a variation is a `variant_child` with its
 parent external id and option axis, and apply writes parents before children.
 A child whose parent cannot be resolved fails visibly instead of becoming a
 second simple product.

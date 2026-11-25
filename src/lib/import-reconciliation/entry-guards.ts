@@ -7,6 +7,7 @@ import { query, withTenantTransaction } from "../db";
 import { remoteEditFingerprint } from "./field-authority";
 import { canPublishOutbound } from "./lifecycle";
 import { isRemoteEditSuppressed } from "./service";
+import { duplicateStockConflictForRemote } from "../integrations/product-authority-guard";
 import type { ReconciliationDomain, ReconciliationRunStatus } from "./types";
 
 function canonicalFieldValue(value: unknown): string {
@@ -336,6 +337,14 @@ export async function checkManualProductOutboundGuard(
   const connGate = await canPublishConnectionOutbound(businessId, connection);
   if (!connGate.allowed) {
     return { ok: false, reason: connGate.reason ?? "outbound_blocked" };
+  }
+  // Issue #1592: a stocked, unmapped twin means the local stock snapshot this
+  // patch was prepared from is not the whole physical quantity. Refuse the
+  // manual push too, with its own reason, until the duplicate review resolves
+  // which row owns the stock.
+  if ("stock_quantity" in patch || "regular_price" in patch || "sale_price" in patch) {
+    const conflict = await duplicateStockConflictForRemote(businessId, connection.id, remoteId);
+    if (conflict) return { ok: false, reason: "duplicate_stock_conflict" };
   }
   // Check any latest run item for this remoteId to honour `canPublishOutbound`
   const { rows: itemRows } = await query<{

@@ -1,4 +1,9 @@
 import { gateWooCatalogueCreate } from "../data-transfer/catalogue-gate";
+import {
+  assertNoAmbiguousLocalIdentity,
+  PRODUCT_IDENTITY_REVIEW_REQUIRED,
+} from "./product-identity-guard";
+import type { PoolClient } from "pg";
 /**
  * Phase 23 (issue #118) — Wave 3: pull products and customers from a
  * WooCommerce store into the local menu/customer directory, remembering each
@@ -298,6 +303,85 @@ async function upsertFnbProduct(
   return "created";
 }
 
+/**
+ * Issue #1592 — stage one incoming product whose local identity is ambiguous,
+ * then let the caller refuse the blind create.
+ *
+ * Reuses the #1118 product run for the connection: an existing discovering run
+ * receives the record, a run already in review/applying already gates the
+ * connection (nothing to add), and no run means one is opened. Staging writes
+ * only reconciliation tables; the canonical catalogue is untouched until an
+ * owner decides `link` or `create separately`.
+ */
+async function stageProductForIdentityReview(
+  connection: ConnectionRow,
+  locationId: string,
+  product: WooProduct,
+): Promise<void> {
+  const businessId = connection.business_id;
+  const actor = { userId: null, name: "سامانه" };
+  let runId: string | null = null;
+  let runStages = true;
+
+  const active = await findActiveRunForConnection(businessId, connection.id, "product");
+  if (active) {
+    runId = active.id;
+    // `stageProducts` only writes into a discovering run. A run already under
+    // review is the gate we want; it needs no extra record to keep blocking.
+    runStages = active.status === "discovering";
+  } else {
+    try {
+      const opened = await openReconciliationRun({
+        businessId,
+        locationId,
+        domain: "product",
+        sourceKind: "provider",
+        provider: "woocommerce",
+        sourceKey: connection.id,
+        connectionId: connection.id,
+        importMode: "live_link",
+        sourceFingerprint: `woo:${connection.id}:identity-review:${product.id}`,
+        evidence: { reason: "duplicate_sku_candidate", remoteId: String(product.id), sku: product.sku ?? null },
+        actor,
+      });
+      runId = opened.id;
+    } catch (err) {
+      // A concurrent writer claimed the scope first; reuse its run.
+      const racing = await findActiveRunForConnection(businessId, connection.id, "product");
+      if (!racing) throw err;
+      runId = racing.id;
+      runStages = racing.status === "discovering";
+    }
+  }
+
+  if (runStages && runId) {
+    try {
+      await stageReconciliationProducts(businessId, runId, [wooProductToIncoming(product, connection.currency_unit)]);
+      await completeProductDiscovery(businessId, runId, actor);
+    } catch (err) {
+      // Staging must never turn a refusal into a create. Record why it could
+      // not stage and keep the create blocked; the connection's review screen
+      // and the audit trail carry the failure.
+      await writeIntegrationAudit({
+        businessId,
+        connectionId: connection.id,
+        action: "reconciliation.staging_failed",
+        entityType: "product",
+        remoteId: String(product.id),
+        error: (err as Error).message,
+      });
+    }
+  }
+  await writeIntegrationAudit({
+    businessId,
+    connectionId: connection.id,
+    action: "product.identity_review_required",
+    entityType: "product",
+    remoteId: String(product.id),
+    error: "duplicate_sku_candidate",
+  });
+}
+
 /** Retail: route every WooCommerce product type into the `items` model. */
 async function upsertRetailProduct(
   connection: ConnectionRow,
@@ -321,6 +405,21 @@ async function upsertRetailProduct(
       ? wooVariationDisplayName(product.name, attributes)
       : product.name;
   const remoteId = String(product.id);
+
+  // Every create below runs under the identity lock (audit F13), which covers
+  // one remote identity in one connection. Issue #1592 widens the question by
+  // one step: does this branch already carry this SKU on a row this connection
+  // does not own? That is a reimport or a reconnect, and it is staged through
+  // the shared reconciliation run instead of being duplicated.
+  const createOnce = async (create: (client: PoolClient) => Promise<string>) => {
+    try {
+      return await createForRemoteOnce(businessId, connection.id, "product", remoteId, create);
+    } catch (err) {
+      if ((err as Error).message !== PRODUCT_IDENTITY_REVIEW_REQUIRED) throw err;
+      await stageProductForIdentityReview(connection, locationId, product);
+      throw new Error(PRODUCT_IDENTITY_REVIEW_REQUIRED);
+    }
+  };
 
   const applyUpdate = async (existing: string): Promise<"updated"> => {
     await query(
@@ -389,7 +488,13 @@ async function upsertRetailProduct(
     return applyUpdate(linked.localId);
   }
   if (shape.container) {
-    const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
+    const outcome = await createOnce(async (client) => {
+      await assertNoAmbiguousLocalIdentity(client, {
+        businessId,
+        locationId,
+        connectionId: connection.id,
+        sku: product.sku,
+      });
       await gateWooCatalogueCreate(client, businessId, locationId, product.sku);
       const { rows } = await client.query<{ id: string }>(
         `INSERT INTO items (location_id, name, sku, kind, tracking)
@@ -416,7 +521,13 @@ async function upsertRetailProduct(
 
   // Item + stock + attributes + mapping in one transaction, so a retry after a
   // partial failure cannot orphan a stock row or duplicate a variant.
-  const outcome = await createForRemoteOnce(businessId, connection.id, "product", remoteId, async (client) => {
+  const outcome = await createOnce(async (client) => {
+    await assertNoAmbiguousLocalIdentity(client, {
+      businessId,
+      locationId,
+      connectionId: connection.id,
+      sku: product.sku,
+    });
     await gateWooCatalogueCreate(client, businessId, locationId, product.sku);
     const { rows } = await client.query<{ id: string }>(
       `INSERT INTO items (location_id, parent_item_id, name, sku, kind, tracking)

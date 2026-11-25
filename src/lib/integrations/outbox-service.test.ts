@@ -249,8 +249,33 @@ describe("refreshOutboxForConnection — stock semantics and per-product switche
     expect(pricePaused.some((i) => i.params[2] === "stock")).toBe(true);
   });
 
-  it("ignores a paused flag that is not exactly `true` — a corrupted meta value must not silently stop pushes", async () => {
+  it("holds both axes when an unmapped twin holds the stock (issue #1592)", async () => {
     mocks.listMappings.mockResolvedValue([
+      { entityType: "product", remoteId: "11", localId: "local-11", lastPushedPayload: {}, updatedAt: null },
+    ]);
+    const inserts: { sql: string; params: unknown[] }[] = [];
+    vi.mocked(query).mockImplementation((async (sql: string, params?: unknown[]) => {
+      const text = String(sql);
+      if (text.includes("twin.id")) {
+        return { rows: [{ local_id: "local-11", twin_item_id: "twin-1", twin_quantity: "5" }] };
+      }
+      if (text.includes("INSERT INTO integration_outbox_events")) {
+        inserts.push({ sql: text, params: params ?? [] });
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes("FROM integration_outbox_events")) return { rows: [] };
+      if (text.includes("item_stock")) return { rows: [LOCAL_STATE] };
+      return { rows: [] };
+    }) as never);
+
+    await refreshOutboxForConnection(connection());
+
+    // The mapped row says 9; the unmapped twin holds 5. Pushing either number
+    // would overwrite the store with a partial quantity, so nothing is queued.
+    expect(inserts).toEqual([]);
+  });
+
+  it("ignores a paused flag that is not exactly `true` — a corrupted meta value must not silently stop pushes", async () => {    mocks.listMappings.mockResolvedValue([
       { entityType: "product", remoteId: "62", localId: "local-62", lastPushedPayload: { wooType: "simple", remoteManageStock: true, stockPushPaused: "true" }, updatedAt: null },
     ]);
     const inserts = stubQueries();

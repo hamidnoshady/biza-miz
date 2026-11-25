@@ -332,8 +332,76 @@ export type CreateConnectionResult =
       webhookSecret: string;
       /** Shown once, and only in plugin mode: what the owner pastes into the WordPress plugin. */
       linkToken?: string;
+      /**
+       * Issue #1592 — earlier connections to the same store (including a
+       * disconnected one). Their mappings are *not* copied or re-pointed; this
+       * is provenance for the owner and for the first-sync review.
+       */
+      reconnectOf?: ReconnectProvenance[];
     }
   | { ok: false; error: string };
+
+/** A prior link to the same store, for provenance only. */
+export interface ReconnectProvenance {
+  connectionId: string;
+  name: string;
+  linkMode: string;
+  deletedAt: string | null;
+  mappedProducts: number;
+}
+
+/** The store a connection points at, normalised so two links to one shop compare equal. */
+export function connectionStoreKey(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const key = url
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/\/+$/, "");
+  return key || null;
+}
+
+/**
+ * Existing WooCommerce connections that point at the same store as `baseUrl`.
+ * A reconnected shop is usually a *new* connection row, so this is recorded as
+ * provenance when the link is created — never used to copy its mappings.
+ */
+async function reconnectProvenance(
+  businessId: string,
+  baseUrl: string,
+): Promise<ReconnectProvenance[]> {
+  const storeKey = connectionStoreKey(baseUrl);
+  if (!storeKey) return [];
+  const { rows } = await query<{
+    id: string;
+    name: string;
+    link_mode: string;
+    base_url: string;
+    plugin_site_url: string | null;
+    deleted_at: Date | null;
+    mapped_products: string;
+  }>(
+    `SELECT c.id::text, c.name, c.link_mode, c.base_url, c.plugin_site_url, c.deleted_at,
+            (SELECT count(*)::text FROM integration_mappings m
+              WHERE m.business_id = c.business_id AND m.connection_id = c.id
+                AND m.entity_type = 'product') AS mapped_products
+       FROM integration_connections c
+      WHERE c.business_id = $1 AND c.provider = 'woocommerce'
+      ORDER BY c.created_at DESC`,
+    [businessId],
+  );
+  return rows
+    .filter((row) => connectionStoreKey(row.plugin_site_url ?? row.base_url) === storeKey)
+    .map((row) => ({
+      connectionId: row.id,
+      name: row.name,
+      linkMode: row.link_mode,
+      deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
+      mappedProducts: Number(row.mapped_products ?? 0),
+    }));
+}
+
 
 export async function createConnection(
   businessId: string,
@@ -358,6 +426,11 @@ export async function createConnection(
   const key = resolveEncryptionKey(process.env);
   const webhookSecret = randomBytes(32).toString("base64url");
   const linkToken = linkMode === "plugin" ? generatePluginToken() : null;
+  // Issue #1592: a reinstalled/relinked plugin is a new connection row, and a
+  // new row has no mappings. Record which earlier links pointed at this same
+  // store (including a disconnected one) so the owner can see the provenance;
+  // its mappings stay with the old row and are never copied or re-pointed.
+  const reconnectOf = await reconnectProvenance(businessId, baseUrl);
   const { rows } = await query<ConnectionRow>(
     `INSERT INTO integration_connections
        (business_id, location_id, name, base_url, link_mode,
@@ -399,13 +472,22 @@ export async function createConnection(
     businessId,
     connectionId: rows[0].id,
     action: "connection.created",
-    payload: { name, baseUrl, linkMode, currencyUnit: input.currencyUnit },
+    payload: {
+      name,
+      baseUrl,
+      linkMode,
+      currencyUnit: input.currencyUnit,
+      ...(reconnectOf.length > 0
+        ? { reconnectOf: reconnectOf.map((prior) => ({ connectionId: prior.connectionId, deletedAt: prior.deletedAt, mappedProducts: prior.mappedProducts })) }
+        : {}),
+    },
   });
   return {
     ok: true,
     connection: mapConnection(rows[0]),
     webhookSecret,
     ...(linkToken ? { linkToken } : {}),
+    ...(reconnectOf.length > 0 ? { reconnectOf } : {}),
   };
 }
 
