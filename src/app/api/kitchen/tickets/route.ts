@@ -4,6 +4,7 @@ import { PERMISSIONS } from "@/lib/permissions";
 import { query } from "@/lib/db";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { rankKitchenQueue, type KitchenQueueEntry } from "@/lib/kitchen-priority";
+import { archiveKitchenTicketsPastBusinessDay } from "@/lib/kitchen-workflow";
 
 /**
  * Live kitchen ticket queue: every non-voided, non-served order item across
@@ -16,6 +17,12 @@ export const GET = withTenantScope(async () => {
 
   const location = await resolveActiveLocation(session);
   if (!location) return NextResponse.json({ items: [] });
+
+  // A ticket from a business date before today's leaves the board on its own
+  // — the rollover that happens without anyone closing the day (the close
+  // path archives in its own transaction). Runs before the read so the
+  // snapshot this request returns is already today's queue.
+  await archiveKitchenTicketsPastBusinessDay({ query }, location.id);
 
   const { rows: rawItems } = await query<KitchenQueueEntry & Record<string, unknown>>(
     `SELECT oi.id, oi.order_id, oi.name_snapshot, oi.quantity, oi.status, oi.note,

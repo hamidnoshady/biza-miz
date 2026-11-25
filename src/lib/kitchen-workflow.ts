@@ -3,6 +3,19 @@ import { query } from "./db";
 
 export type KitchenWorkflow = "kitchen_team" | "manage_from_orders" | "ready_on_send";
 
+/**
+ * Anything that can run SQL on the branch's tenant connection — the pooled
+ * `query` helper (`{ query }`) or a transaction client. The pool helper is a
+ * free function, so it cannot satisfy `Pick<PoolClient, "query">`; the routes
+ * that have no transaction pass `{ query }`.
+ */
+export type KitchenSqlRunner = {
+  query<T extends Record<string, unknown> = Record<string, unknown>>(
+    text: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
+};
+
 export function isKitchenWorkflow(value: unknown): value is KitchenWorkflow {
   return value === "kitchen_team" || value === "manage_from_orders" || value === "ready_on_send";
 }
@@ -154,4 +167,59 @@ export async function previewShiftKitchenClose(shift: {
     [shift.locationId, shift.employeeId, shift.startedAt],
   );
   return rows[0] ?? null;
+}
+
+/**
+ * Every kitchen ticket whose business day has passed leaves the board on its
+ * own — «سفارشی که از روز کاری خود عبور کرده باشد بایگانی می‌شود».
+ *
+ * The kitchen queue is a *today* surface: a ticket still sitting there from a
+ * previous business date is work nobody closed out, and keeping it on the
+ * board past the day it belonged to only buries today's tickets under
+ * yesterday's. So the archive is automatic and unconditional — there is no
+ * manual «بررسی سفارش‌های قدیمی» pass any more, and nothing to decide per
+ * order. Order status and payment are untouched; this only removes the lines
+ * from the kitchen display, exactly like the paid/timer/shift exits do.
+ *
+ * "Crossed the business day" is the branch's own definition of a day
+ * (`app_business_date`, migration 0076): a branch whose day starts at 18:00
+ * rolls its board over at 18:00, a branch without the setting rolls it over
+ * at local midnight. The branch's timezone lives on the row, so the statement
+ * reads it from `locations` rather than taking it as a parameter.
+ *
+ * Callers run this at the two moments a day actually turns over — a business
+ * day close, and every read of the queue (which catches the rollover that
+ * happens on its own when nobody closes the day). Idempotent: already
+ * archived lines and past-day lines of *today's* date are excluded, so a
+ * repeated call on the same instant archives nothing extra.
+ */
+export async function archiveKitchenTicketsPastBusinessDay(
+  runner: KitchenSqlRunner,
+  locationId: string,
+): Promise<number> {
+  const { rows } = await runner.query<{ count: number }>(
+    `WITH archived AS (
+       UPDATE order_items oi
+          SET kitchen_archived_at = now(),
+              kitchen_archive_reason = 'business_day'
+         FROM locations l
+        WHERE l.id = $1
+          AND oi.location_id = l.id
+          AND oi.status IN ('sent', 'preparing', 'ready')
+          AND oi.kitchen_archived_at IS NULL
+          AND oi.sent_to_kitchen_at IS NOT NULL
+          AND app_business_date(oi.sent_to_kitchen_at, l.timezone, l.business_day_start_minutes)
+            < app_business_date(now(), l.timezone, l.business_day_start_minutes)
+          AND EXISTS (
+            SELECT 1 FROM orders o
+             WHERE o.id = oi.order_id AND o.location_id = oi.location_id
+               AND o.status IN ('open', 'held', 'completed')
+               AND (o.website_approval_state IS NULL OR o.website_approval_state = 'accepted')
+          )
+       RETURNING oi.order_id
+     )
+     SELECT COUNT(DISTINCT order_id)::int AS count FROM archived`,
+    [locationId],
+  );
+  return rows[0]?.count ?? 0;
 }
