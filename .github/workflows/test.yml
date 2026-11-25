@@ -633,7 +633,9 @@ jobs:
       - name: CRM Today customer-link E2E (desktop and mobile)
         run: npm run test:e2e:crm-queue-links
       - name: Guided tours E2E (authenticated, desktop + mobile, cross-page)
-        run: npm run test:e2e:guided-tours
+        run: |
+          npx tsx scripts/seed-guided-tours-e2e.ts
+          npm run test:e2e:guided-tours
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

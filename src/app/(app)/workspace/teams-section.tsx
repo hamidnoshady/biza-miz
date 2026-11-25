@@ -12,7 +12,7 @@
  */
 
 import type { WorkspaceIntent } from "./workspace-routes";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PlusIcon, Trash2Icon, UsersIcon } from "lucide-react";
 import {
   EmptyState,
@@ -92,14 +92,20 @@ export function TeamsSection({
     if (!projectId && lookups.projects.length) setProjectId(lookups.projects[0].id);
   }, [projectId, lookups.projects]);
 
+  // Issue #907 F12 — switching project quickly must not let the previous
+  // project's member list land under the new name. Only the newest read writes.
+  const requestSeq = useRef(0);
   const load = useCallback(() => {
+    const seq = ++requestSeq.current;
     if (!projectId) {
       setMembers([]);
       return;
     }
     setMembers(null);
+    setError("");
     api<{ members: MemberRow[] }>(`/api/workspace/projects/${projectId}/members`).then(
       ({ ok, data }) => {
+        if (seq !== requestSeq.current) return;
         if (ok) setMembers(data.members);
         else {
           setMembers([]);
@@ -180,23 +186,30 @@ export function TeamsSection({
           </EmptyState>
         ) : (
           <DataTable caption="اعضای پروژه" tableClassName={stackedTableClass}>
+            {/* `DataTableHead` already renders the `<tr>`; wrapping the cells in
+                a second one produced invalid nested-row markup (#907 F13). */}
             <DataTableHead>
-              <tr>
-                <Th>عضو</Th>
-                <Th>نقش در پروژه</Th>
-                <Th>بار کاری</Th>
-                <Th>از تاریخ</Th>
-                <Th>حذف</Th>
-              </tr>
+              <Th>عضو</Th>
+              <Th>نقش در پروژه</Th>
+              <Th>بار کاری</Th>
+              <Th>از تاریخ</Th>
+              <Th>حذف</Th>
             </DataTableHead>
             <DataTableBody>
-              {members.map((member) => (
+              {members.map((member) => {
+                // Issue #907 F14 — the named owner cannot be demoted or removed
+                // without transferring ownership first, and `assertNotLosingOwner`
+                // refuses it on the server. Offering the control anyway made the
+                // screen lie about what it could do; the action is disabled with
+                // the reason it is disabled.
+                const isOwner = member.role === "owner";
+                return (
                 <DataTableRow key={member.id}>
                   <Td data-label="عضو">
                     <span className="font-medium">{member.fullName}</span>
                   </Td>
                   <Td data-label="نقش در پروژه">
-                    {canManage ? (
+                    {canManage && !isOwner ? (
                       <select
                         className={inputClass}
                         value={member.role}
@@ -211,10 +224,15 @@ export function TeamsSection({
                         ))}
                       </select>
                     ) : (
-                      <StatusBadge tone={member.role === "owner" ? "active" : "neutral"}>
+                      <StatusBadge tone={isOwner ? "active" : "neutral"}>
                         {WORKSPACE_ROLE_LABELS[member.role]}
                       </StatusBadge>
                     )}
+                    {isOwner ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        مالک پروژه؛ برای تغییر نقش، ابتدا مالکیت را منتقل کنید.
+                      </p>
+                    ) : null}
                   </Td>
                   <Td data-label="بار کاری">
                     {/* Workload on this project (#761 §13), from the task rows themselves. */}
@@ -235,7 +253,10 @@ export function TeamsSection({
                   </Td>
                   <Td data-label="حذف">
                     {canManage ? (
-                      <SecondaryButton onClick={() => remove(member.userId)} disabled={busy}>
+                      <SecondaryButton
+                        onClick={() => remove(member.userId)}
+                        disabled={busy || isOwner}
+                      >
                         <Trash2Icon className="size-4" aria-hidden />
                         <span className="sr-only">حذف {member.fullName}</span>
                       </SecondaryButton>
@@ -244,7 +265,8 @@ export function TeamsSection({
                     )}
                   </Td>
                 </DataTableRow>
-              ))}
+                );
+              })}
             </DataTableBody>
           </DataTable>
         )}
@@ -259,6 +281,8 @@ export function TeamsSection({
               onChange={setAddUserId}
               options={addable.map((m) => ({ id: m.id, label: m.fullName }))}
               placeholder={addable.length ? "— انتخاب کنید —" : "همهٔ کاربران عضو هستند"}
+              searchable
+              searchPlaceholder="جست‌وجوی همکار…"
             />
             <SelectField
               label="نقش"
@@ -284,14 +308,12 @@ export function TeamsSection({
       >
         <DataTable caption="اجازه‌های هر نقش در پروژه">
           <DataTableHead>
-            <tr>
-              <Th>نقش</Th>
-              {(Object.keys(CAPABILITY_LABELS) as Array<keyof typeof CAPABILITY_LABELS>).map(
-                (capability) => (
-                  <Th key={capability}>{CAPABILITY_LABELS[capability]}</Th>
-                ),
-              )}
-            </tr>
+            <Th>نقش</Th>
+            {(Object.keys(CAPABILITY_LABELS) as Array<keyof typeof CAPABILITY_LABELS>).map(
+              (capability) => (
+                <Th key={capability}>{CAPABILITY_LABELS[capability]}</Th>
+              ),
+            )}
           </DataTableHead>
           <DataTableBody>
             {WORKSPACE_ROLES.map((role) => (

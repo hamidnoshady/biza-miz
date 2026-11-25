@@ -30,13 +30,24 @@ function source(relativePath: string): string {
 }
 
 describe("setup completion semantics per creation path", () => {
-  it("leaves console-provisioned food_service businesses to the readiness-checked wizard", () => {
+  it("leaves every console/MCP-provisioned business to the wizard, whatever its industry", () => {
+    // Issue #1239 / ESH-90 supersedes the earlier "non-F&B trades are ready to
+    // enter" rule: the wizard is also where the owner picks the paid apps and
+    // records the profile, so every new tenant meets it.
     const route = source("src/app/api/platform/businesses/route.ts");
     expect(route).toContain("shouldCompleteSetupForPlatformProvision(input.industry)");
     expect(route).toContain("seedChartOfAccounts: true");
 
     const provisioning = source("src/lib/business-provisioning.ts");
-    expect(provisioning).toContain('wizardStepsForIndustry(industry ?? "food_service").includes("menu")');
+    expect(provisioning).toContain("export function shouldCompleteSetupForPlatformProvision");
+    expect(provisioning).toMatch(/shouldCompleteSetupForPlatformProvision\([^)]*\): boolean \{\s*return false;/);
+    // The old industry split must not come back.
+    expect(provisioning).not.toContain('wizardStepsForIndustry(industry ?? "food_service").includes("menu")');
+
+    // The MCP door goes through the same decision, not a hard-coded true.
+    expect(source("src/lib/mcp/platform-mcp.ts")).toContain(
+      "shouldCompleteSetupForPlatformProvision(validated.input.industry)",
+    );
   });
 
   it("stamps completion for the platform's own company workspace", () => {
@@ -88,33 +99,49 @@ describe("setup completion semantics per creation path", () => {
     expect(state).toContain("wizardStepsForIndustry(industry).includes(step)");
   });
 
-  it("routes on the formal marker alone, in both guards, with no readiness exception", () => {
+  it("routes on the formal marker alone, in every guard, with no readiness exception", () => {
     // The bug this whole issue started from: `/setup`'s layout ejected the
     // owner to /settings as soon as the *required steps were ready*, before
-    // Hardware/Backup/Opening/Finish were visited. The fix is that both guards
-    // ask the one canonical question — `isSetupComplete` — and neither of them
+    // Hardware/Backup/Opening/Finish were visited. The fix is that every guard
+    // asks the one canonical question — `isSetupComplete` — and none of them
     // consults readiness to decide where the owner may go. Issue #808 forbids
     // fixing this with redirect exceptions, so a future edit that adds a
     // readiness carve-out here has to delete this assertion and say why.
-    for (const path of ["src/app/setup/layout.tsx", "src/app/page.tsx", "src/lib/root-landing.ts"]) {
+    //
+    // Issue #1239 added the fourth: the workspace shell, which is what makes a
+    // direct /dashboard or app URL stop bypassing the wizard.
+    for (const path of [
+      "src/app/setup/layout.tsx",
+      "src/app/page.tsx",
+      "src/lib/root-landing.ts",
+      "src/app/dashboard/workspace-shell.tsx",
+    ]) {
       const guard = source(path);
       expect(guard).toContain("isSetupComplete");
       expect(guard).not.toContain("readiness");
       expect(guard).not.toContain("missingForCompletion");
     }
 
+    // The workspace shell's decision is the one pure policy module, and the
+    // shell must actually call it rather than re-implement a role check.
+    const shell = source("src/app/dashboard/workspace-shell.tsx");
+    expect(shell).toContain("firstRunRedirect({");
+    expect(shell).toContain('h.get("x-pathname")');
+    expect(source("src/middleware.ts")).toContain('requestHeaders.set("x-pathname"');
+
     // The wizard layout still lets a manager through to the steps: the redirect
     // is the *only* guard there, and it is the marker's answer.
     const layout = source("src/app/setup/layout.tsx");
     expect(layout).toContain('if (await isSetupComplete(session.businessId)) redirect("/settings")');
 
-    // The root page sends an unfinished business into the wizard, and only an
-    // owner/manager (a cashier's landing page is the dashboard). Since issue
-    // #1003 that decision lives in src/lib/root-landing.ts, shared by the root
-    // page and the /api/host/landing redirect middleware sends `/` to.
+    // The root page sends an unfinished business into the wizard, for every
+    // role that can finish it (a cashier's landing page is the dashboard).
+    // Since issue #1003 that decision lives in src/lib/root-landing.ts, shared
+    // by the root page and the /api/host/landing redirect middleware sends `/` to.
     const root = source("src/lib/root-landing.ts");
     expect(root).toContain('location: "/setup"');
-    expect(root).toMatch(/session\.role === "owner" \|\| session\.role === "manager"/);
+    expect(root).toMatch(/session\.role === "owner"/);
+    expect(root).toMatch(/session\.role === "admin"/);
     expect(source("src/app/page.tsx")).toContain("resolveRootLanding");
   });
 

@@ -1,48 +1,10 @@
 /**
- * Universal, metadata-driven baseline tours (issue #972, owner decision
- * 2026-11-06).
- *
- * The `TOURS` catalogue in `tours.ts` is authored: a person writes the steps
- * for one screen and reviews them. That is the right shape for an advanced
- * walkthrough, and the wrong shape for the platform's ~100 registered pages —
- * a page whose «آموزش» button has nothing behind it is a dead end, and
- * "nobody wrote a tour for it" is not a reason to teach a member nothing.
- *
- * So every page in the canonical `KNOWLEDGE_PAGES` registry gets a **baseline
- * tour** derived from metadata the platform already owns:
- *
- *  - the page's canonical route and its human-readable label (`KNOWLEDGE_PAGES`);
- *  - the navigation group it is filed under — the same grouping the Knowledge
- *    Center and the super-admin page picker show;
- *  - any **declared safe region** (`PAGE_TOUR_REGIONS`), i.e. a registered
- *    `data-tour-id` anchor an owning shared component really renders.
- *
- * A new registered page therefore gains basic guidance with no `TOURS` entry,
- * no migration and no PR to this file. Nothing is guessed: a baseline tour
- * describes only the page as the registry describes it, never a control the
- * tour cannot prove is there. When the page has no declared region the tour is
- * explanation-only, and `tour-coverage.ts` reports it as an editorial gap
- * rather than pretending the page is covered by a real walkthrough.
- *
- * Precedence is the whole point of "one guide, no duplicates":
- *
- *  - a page that has **any** authored tour belongs to the authored catalogue.
- *    A member who is eligible gets that tour; a member who is not gets
- *    nothing — a baseline "about" a screen whose instructions are gated would
- *    describe screens they may not be allowed to see.
- *  - pages owned exclusively by Tour Studio get only their published tours;
- *    absent or ineligible publications leave the help panel empty.
- *  - a page with **no** authored tour gets exactly one baseline tour: the same
- *    runtime, the same progress table, the same button.
- *
- * Client-safe: pure data, no database and no DOM.
+ * Historical baseline definitions for the offline coverage audit and fixtures.
+ * Member tour requests read published Studio revisions.
  */
-import { KNOWLEDGE_PAGES, knowledgePage, type KnowledgePage } from "./knowledge-base";
-import { mergePublishedTours } from "./tour-studio";
+import type { KnowledgePage } from "./knowledge-base";
 import {
   TOUR_ANCHORS,
-  tourById,
-  toursForPage,
   type TourAnchor,
   type TourDefinition,
   type TourStep,
@@ -253,17 +215,7 @@ export function baselineTourForPage(
   };
 }
 
-/**
- * What the «آموزش» button's page lookup starts from: the authored catalogue
- * when the page has one, otherwise its single baseline tour.
- *
- * `published` is the super-admin's published catalogue (migration 0288). A
- * published tour replaces a code tour with the same id and otherwise joins the
- * page's catalogue, so an authored tour can be edited without a deployment —
- * and the page still falls back to its baseline only when *nothing* authored
- * exists. Callers still narrow the result per viewer with `tourForViewer`; this
- * only decides which catalogue owns the page.
- */
+/** Studio-owned routes in the historical coverage audit. */
 export const STUDIO_ONLY_PAGE_KEYS: ReadonlySet<string> = new Set([
   "page:/crm/overview",
   "page:/crm/directory",
@@ -272,57 +224,3 @@ export const STUDIO_ONLY_PAGE_KEYS: ReadonlySet<string> = new Set([
   "page:/crm/proposals",
   "page:/crm/client-campaigns",
 ]);
-
-export function pageTourCandidates(
-  pageKey: string,
-  published: readonly TourDefinition[] = [],
-): TourDefinition[] {
-  const publishedForPage = published.filter((tour) => tour.pageKey === pageKey);
-  // These CRM pages are authored and served only by Tour Studio. An absent
-  // or ineligible publication intentionally leaves the help panel empty.
-  if (STUDIO_ONLY_PAGE_KEYS.has(pageKey)) return publishedForPage;
-  const authored = mergePublishedTours(toursForPage(pageKey), publishedForPage);
-  if (authored.length > 0) return authored;
-  const page = knowledgePage(pageKey);
-  return page ? [baselineTourForPage(page)] : [];
-}
-
-const BASELINE_PAGE_BY_ID: ReadonlyMap<string, KnowledgePage> = new Map(
-  KNOWLEDGE_PAGES.map((page) => [baselineTourIdForRoute(page.route), page]),
-);
-
-/** Pure lookup half of `tourDefinitionById`, exported for the coverage audit. */
-export function baselinePageForId(id: string): KnowledgePage | undefined {
-  return BASELINE_PAGE_BY_ID.get(id);
-}
-
-/**
- * The tour a client named: published catalogue first (it may intentionally
- * replace a code tour with the same id), then the code catalogue, then the
- * page's baseline. A baseline id for a page that has authored tours is unknown:
- * the authored catalogue owns that page, exactly as `pageTourCandidates`
- * decides for the list.
- */
-export function tourDefinitionById(
-  id: string,
-  published: readonly TourDefinition[] = [],
-): TourDefinition | undefined {
-  const studio = published.find((tour) => tour.id === id);
-  if (studio) return studio;
-  const authored = tourById(id);
-  // CRM Deals, Briefs, Proposals and Client Campaigns code-tour ids are retired;
-  // published Studio content may still use them, but code must never serve them.
-  if (
-    authored?.pageKey === "page:/crm/deals" ||
-    authored?.pageKey === "page:/crm/briefs" ||
-    authored?.pageKey === "page:/crm/proposals" ||
-    authored?.pageKey === "page:/crm/client-campaigns"
-  ) {
-    return undefined;
-  }
-  if (authored) return authored;
-  if (!isBaselineTourId(id)) return undefined;
-  const page = baselinePageForId(id);
-  if (!page || STUDIO_ONLY_PAGE_KEYS.has(page.key) || toursForPage(page.key).length > 0) return undefined;
-  return baselineTourForPage(page);
-}

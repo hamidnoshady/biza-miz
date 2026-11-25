@@ -93,19 +93,6 @@ const initialItems = [
 
 const defaultThresholds = { overdueMinutes: 10, approachingMinutes: null };
 
-const kitchenRules = {
-  events: [
-    { key: "kitchen.ticket_created", label: "سفارش تازه در آشپزخانه", description: "سفارش تازه" },
-    { key: "kitchen.items_added", label: "اقلام تازه به سفارش آشپزخانه", description: "اقلام تازه" },
-    { key: "kitchen.ticket_aged", label: "گذشتن سفارش از آستانهٔ آماده‌سازی", description: "سن سفارش" },
-  ],
-  preferences: [
-    { eventKey: "kitchen.ticket_created", enabled: false, channels: ["inapp"], isDefault: true },
-    { eventKey: "kitchen.items_added", enabled: false, channels: ["inapp"], isDefault: true },
-    { eventKey: "kitchen.ticket_aged", enabled: false, channels: ["inapp"], isDefault: true },
-  ],
-};
-
 function installApi(
   initialItemsForTest = initialItems,
   thresholds: { overdueMinutes: number; approachingMinutes: number | null } = defaultThresholds,
@@ -121,9 +108,6 @@ function installApi(
         return { ok: true, status: 200, data: { thresholds: body.thresholds, canEdit: true } };
       }
       return { ok: true, status: 200, data: { thresholds: state.thresholds, canEdit: true } };
-    }
-    if (url === "/api/notifications/rules") {
-      return { ok: true, status: 200, data: kitchenRules };
     }
     if (url === "/api/kitchen/tickets") {
       return { ok: true, status: 200, data: { items: state.items, modifiers: [] } };
@@ -530,9 +514,6 @@ describe("KdsBoard operational controls", () => {
       if (url === "/api/kitchen/alerts") {
         return Promise.resolve({ ok: true, status: 200, data: { thresholds: defaultThresholds, canEdit: true } });
       }
-      if (url === "/api/notifications/rules") {
-        return Promise.resolve({ ok: true, status: 200, data: kitchenRules });
-      }
       if (url === "/api/kitchen/tickets") {
         ticketRequest += 1;
         if (ticketRequest === 1) {
@@ -561,32 +542,43 @@ describe("KdsBoard operational controls", () => {
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
-  it("saves branch thresholds from the alerts panel and keeps the settings separate", async () => {
-    installApi(initialItems, defaultThresholds);
+  it("shows the branch thresholds read-only and sends their editing to the settings notifications tab", async () => {
+    installApi(initialItems, { overdueMinutes: 12, approachingMinutes: 6 });
     render(<KdsBoard />);
     await waitFor(() => expect(document.body.textContent).toContain("سفارش ۱"));
 
-    fireEvent.click(screen.getByRole("button", { name: "اعلان‌ها و صدا" }));
-    await waitFor(() =>
-      expect(document.body.textContent).toContain("اعلان‌ها، صدا و چاپ آشپزخانه"),
-    );
-    expect(document.body.textContent).toContain("اعلان‌های داخل برنامه و Push");
+    // The board displays the branch policy but no longer edits it: the
+    // thresholds, the sound matrix and the notification rules are configured
+    // in /settings/notifications.
+    expect(document.body.textContent).toContain("آستانهٔ تأخیر این شعبه");
+    expect(document.body.textContent).toContain("۱۲ دقیقه");
+    expect(screen.queryByRole("button", { name: "اعلان‌ها و صدا" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "تنظیمات آشپزخانه" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "بررسی سفارش‌های قدیمی" })).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("آستانهٔ تأخیر (دقیقه)"), { target: { value: "20" } });
-    fireEvent.change(screen.getByLabelText("آستانهٔ نزدیک‌شدن (دقیقه؛ خالی = خاموش)"), {
-      target: { value: "12" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "ذخیرهٔ آستانه‌ها" }));
+    const settingsLink = screen.getByRole("link", { name: "تنظیم" });
+    expect(settingsLink.getAttribute("href")).toBe("/settings/notifications");
+  });
 
-    await waitFor(() => {
-      const put = mocks.api.mock.calls.find(
-        ([url, init]) => url === "/api/kitchen/alerts" && (init as RequestInit | undefined)?.method === "PUT",
+  it("follows sound preferences written by the settings notifications panel on the same device", async () => {
+    installApi(initialItems, defaultThresholds);
+    render(<KdsBoard />);
+    const toggle = await screen.findByRole("button", { name: "هشدار صوتی خاموش" });
+
+    // The settings panel persists through the shared store; the board must
+    // follow the event rather than own a second copy of the state.
+    await act(async () => {
+      localStorage.setItem("kds.sound-alerts", "true");
+      localStorage.setItem(
+        "kds.sound-preferences",
+        JSON.stringify({ enabled: true, events: { newTicket: true } }),
       );
-      expect(put).toBeTruthy();
-      expect(JSON.parse(String((put?.[1] as RequestInit).body))).toEqual({
-        thresholds: { overdueMinutes: 20, approachingMinutes: 12 },
-      });
+      window.dispatchEvent(new CustomEvent("biza:kitchen-sound-preferences"));
     });
-    expect(document.body.textContent).toContain("آستانه‌های این شعبه ذخیره شد.");
+
+    expect(
+      screen.queryByRole("button", { name: /هشدار صوتی روشن|فعال‌سازی صدای هشدار/ }),
+    ).not.toBeNull();
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
   });
 });

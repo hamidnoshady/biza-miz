@@ -2,7 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { knowledgePage, knowledgeSection } from "@/lib/knowledge-base";
-import { kbGuideForSection, kbRelatedGuidesForArticle } from "@/lib/knowledge-service";
+import {
+  kbGuideBodyForSection,
+  kbGuideForSection,
+  kbRelatedGuidesForArticle,
+} from "@/lib/knowledge-service";
+import { extractGuideStepLines } from "@/lib/kb-step-excerpt";
+import { setupStepHelp, setupStepPageKey } from "@/lib/setup-wizard-help";
+import type { WizardStep } from "@/lib/wizard-steps";
 import { isWorkspaceKnowledgeSection } from "@/lib/workspace-eligibility";
 import { workspaceAccessFor } from "@/lib/workspace-access";
 
@@ -72,9 +79,44 @@ export const GET = withTenantScope(async (request: NextRequest) => {
       )
     : relatedGuides;
 
+  // Issue #1239 / ESH-90 — the wizard step's inline help. Only a *known* step
+  // id is accepted, and only when it names the `/setup` page the caller asked
+  // for: the marker comes from our own registry, never from the query string.
+  // A missing article (or an unpublished category) leaves this null, and the
+  // step keeps its local fallback — that is the offline behaviour.
+  const requestedStep = (request.nextUrl.searchParams.get("step") ?? "").trim();
+  const stepPageKey = requestedStep ? setupStepPageKey(requestedStep) : null;
+  const inlineHelp =
+    page && stepPageKey && page.key === stepPageKey
+      ? await inlineStepHelp(requestedStep as WizardStep)
+      : null;
+
   return NextResponse.json({
     entry: entry ? { section: entry.section, label: known?.label ?? page?.label ?? "", url: entry.url } : null,
     guide,
     relatedGuides: visibleRelated,
+    inlineHelp,
   });
 });
+
+/**
+ * The published excerpt for one wizard step, or null.
+ *
+ * Reads the article attached to the `setup` section (the wizard's one guide),
+ * then selects the paragraph whose bold heading is the step's marker. A read
+ * failure is null rather than a 500: the step's own fallback copy is enough to
+ * keep the owner moving.
+ */
+async function inlineStepHelp(
+  step: WizardStep,
+): Promise<{ guide: { slug: string; title: string }; lines: string[] } | null> {
+  try {
+    const article = await kbGuideBodyForSection("setup");
+    if (!article) return null;
+    const lines = extractGuideStepLines(article.bodyMarkdown, setupStepHelp(step).marker);
+    if (lines.length === 0) return null;
+    return { guide: { slug: article.slug, title: article.title }, lines };
+  } catch {
+    return null;
+  }
+}

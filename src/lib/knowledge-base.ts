@@ -49,6 +49,10 @@ export const KNOWLEDGE_SECTIONS: readonly KnowledgeSection[] = [
   { key: "inventory", label: "انبار", route: ACCOUNTING_WORKSPACE_HREFS.inventory },
   { key: "reports", label: "گزارش‌ها", route: ACCOUNTING_WORKSPACE_HREFS.reports },
   { key: "settings", label: "تنظیمات", route: "/settings" },
+  // Issue #1239 / ESH-90 — the first-run wizard is itself a learnable surface:
+  // its inline help and the «آموزش» catalogue both read the published
+  // «راه‌اندازی اولیه» guide attached to this section.
+  { key: "setup", label: "راه‌اندازی اولیه", route: "/setup" },
   { key: "ledger", label: "حسابداری", route: "/accounting" },
   { key: "reservations", label: "رزروها", route: ACCOUNTING_WORKSPACE_HREFS.reservations },
   { key: "delivery", label: "ارسال سفارش", route: ACCOUNTING_WORKSPACE_HREFS.delivery },
@@ -223,6 +227,25 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
   ...pageGroup("تنظیمات پلتفرم", [
     ["/settings", "تنظیمات"],
     ["/settings/connections", "اتصال‌های فنی"],
+  ]),
+  // Issue #1239 / ESH-90 — the wizard's own steps, so each one can render its
+  // inline «راهنمای مرحله» and the editor can assign per-step articles.
+  ...pageGroup("راه‌اندازی اولیه", [
+    ["/setup", "شروع راه‌اندازی"],
+    ["/setup/business", "اطلاعات کسب‌وکار"],
+    ["/setup/aec-profile", "پروفایل کسب‌وکار (AEC)"],
+    ["/setup/apps", "انتخاب برنامه‌ها"],
+    ["/setup/app-setup", "راه‌اندازی برنامه‌های انتخاب‌شده"],
+    ["/setup/import", "ورود اطلاعات اولیه"],
+    ["/setup/accounts", "سرفصل حساب‌ها"],
+    ["/setup/costing", "روش قیمت‌گذاری موجودی"],
+    ["/setup/tax", "تنظیم مالیات"],
+    ["/setup/users", "نقش‌ها و کاربران"],
+    ["/setup/menu", "ورود منو"],
+    ["/setup/hardware", "اتصال سخت‌افزار"],
+    ["/setup/backup", "مقصد پشتیبان‌گیری"],
+    ["/setup/opening", "مانده‌های افتتاحیه"],
+    ["/setup/finish", "پایان راه‌اندازی"],
   ]),
 ];
 

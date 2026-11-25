@@ -12,6 +12,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { PERMISSIONS } from "@/lib/permissions";
+import { tourById } from "@/lib/tours";
 
 const mocks = vi.hoisted(() => ({
   requireMember: vi.fn(),
@@ -19,7 +20,7 @@ const mocks = vi.hoisted(() => ({
   loadTourProgress: vi.fn(),
   pathViewer: vi.fn(),
   loadPathProgress: vi.fn(),
-  publishedForPage: vi.fn(),
+  published: vi.fn(),
   findActiveDeviceId: vi.fn(),
   verifyTrustedDevice: vi.fn(),
 }));
@@ -30,8 +31,7 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("@/lib/tour-studio-service", () => ({
-  publishedToursForPage: mocks.publishedForPage,
-  publishedTours: async () => [],
+  publishedTours: mocks.published,
 }));
 
 vi.mock("@/lib/tours-service", async (importOriginal) => {
@@ -93,7 +93,10 @@ beforeEach(() => {
     industry: "cosmetics",
   });
   mocks.loadPathProgress.mockResolvedValue(new Map());
-  mocks.publishedForPage.mockResolvedValue([]);
+  mocks.published.mockResolvedValue([
+    tourById("accounting.products.list"),
+    tourById("crm.directory.first-customer"),
+  ]);
   mocks.findActiveDeviceId.mockResolvedValue(null);
   mocks.verifyTrustedDevice.mockResolvedValue({ trusted: false, reason: "missing" });
 });

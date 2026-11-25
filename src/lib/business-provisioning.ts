@@ -35,7 +35,6 @@ import { ENABLED_INDUSTRIES, INDUSTRIES, INDUSTRY_LABELS, type Industry } from "
 import { industryProfile } from "./industry-profile";
 import { lockChartOfAccounts, recordAccountAudit } from "./accounts-service";
 import { attachmentLevel, type AttachableParent } from "./account-hierarchy";
-import { wizardStepsForIndustry } from "./wizard-steps";
 import { seedPaymentMethods } from "./payment-methods-service";
 import { defaultAttributeTemplateFor } from "./product-attribute-templates";
 import { applyAttributeTemplate } from "./product-attributes-service";
@@ -53,15 +52,30 @@ import { assertDemoDatabase } from "./demo-database";
 import { findLiveDemoSession, type DemoSession } from "./demo-sessions";
 
 /**
- * Platform-created non-F&B tenants retain the console's ready-to-enter path.
- * A food_service tenant cannot be stamped complete by bare provisioning: its
- * normal completion contract requires persisted business preferences, costing,
- * tax and a sellable menu, which provisioning does not manufacture.
+ * Whether platform provisioning should stamp the business wizard complete.
+ *
+ * **Always false (issue #1239 / ESH-90, owner decision 2026-11-02).** The
+ * earlier rule — a non-F&B trade provisioned by the console is "ready to
+ * enter", only food_service walks the wizard — is retired: *every* new
+ * business, whatever its industry, must meet its owner in the existing
+ * `/setup` wizard, because the wizard is also where the owner chooses the
+ * paid apps, sees the published tariffs and records the business profile and
+ * logo. A retail or service tenant that skips it never gets that hand-off.
+ *
+ * The parameter is kept so the two callers (the platform console route and the
+ * platform MCP tool) keep expressing "this is a provisioning decision" rather
+ * than each hard-coding `false`; it is deliberately unused.
+ *
+ * Legitimate ready-to-enter paths are unaffected because they do not go
+ * through this helper at all:
+ *  - the platform's own company workspace passes its own explicit
+ *    `completeSetup` flag to provisioning (src/lib/platform-company.ts);
+ *  - desktop pairing stamps `completedAt` itself from the configuration it
+ *    just imported (src/lib/pairing-apply.ts);
+ *  - a restore brings an already-completed business's own marker back.
  */
-export function shouldCompleteSetupForPlatformProvision(industry?: Industry): boolean {
-  // The canonical wizard defines which industries require a menu; platform
-  // provisioning does not create any menu-backed setup data.
-  return !wizardStepsForIndustry(industry ?? "food_service").includes("menu");
+export function shouldCompleteSetupForPlatformProvision(_industry?: Industry): boolean {
+  return false;
 }
 
 export interface ProvisionBusinessInput {

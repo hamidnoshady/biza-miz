@@ -63,10 +63,12 @@ import {
   SelectField,
   TagList,
   workspaceError,
-  WorkspaceFormDialog,
+  FormActions,
+  WorkspaceFormPanel,
   stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import { useWorkspaceUrlState } from "./use-workspace-url-state";
 import { ProjectCards, ProjectTimeline } from "./project-portfolio";
 import type { WorkspaceIntent } from "./workspace-routes";
 
@@ -130,11 +132,27 @@ export function ProjectsSection({
   const money = useMoney();
   const [templates, setTemplates] = useState<TemplateOption[]>([]);
   const [error, setError] = useState("");
-  const [status, setStatus] = useState<WorkspaceProjectStatus | "">("");
-  const [mine, setMine] = useState(false);
+  // Issue #907 F11 — status, «پروژه‌های من» and the view are URL state: a
+  // shortcut, a reload and back/forward restore the same rows.
+  const [statusParam, setStatusParam] = useWorkspaceUrlState("status", "");
+  const status: WorkspaceProjectStatus | "" = (PROJECT_STATUSES as readonly string[]).includes(
+    statusParam,
+  )
+    ? (statusParam as WorkspaceProjectStatus)
+    : "";
+  const setStatus = (next: WorkspaceProjectStatus | "") => setStatusParam(next);
+  const [mineParam, setMineParam] = useWorkspaceUrlState("mine", "");
+  const mine = mineParam === "true";
+  const setMine = (next: boolean) => setMineParam(next ? "true" : "");
   // Portfolio first (#761 §7): cards to scan, the timeline to see when, the
   // table for the power user.
-  const [view, setView] = useState<"portfolio" | "table" | "timeline">("portfolio");
+  const PROJECT_VIEWS = ["portfolio", "table", "timeline"] as const;
+  type ProjectView = (typeof PROJECT_VIEWS)[number];
+  const [viewParam, setViewParam] = useWorkspaceUrlState("view", "");
+  const view: ProjectView = (PROJECT_VIEWS as readonly string[]).includes(viewParam)
+    ? (viewParam as ProjectView)
+    : "portfolio";
+  const setView = (next: ProjectView) => setViewParam(next === "portfolio" ? "" : next);
   const today = useMemo(() => todayIsoDate(), []);
   const [search, setSearch] = useState("");
   const [creating, setCreating] = useState(false);
@@ -223,7 +241,7 @@ export function ProjectsSection({
                 {PROJECT_STATUS_LABELS[value]}
               </FilterChip>
             ))}
-            <FilterChip selected={mine} onClick={() => setMine((prev) => !prev)}>
+            <FilterChip selected={mine} onClick={() => setMine(!mine)}>
               فقط پروژه‌های من
             </FilterChip>
           </FilterChipRow>
@@ -354,9 +372,12 @@ function NewProjectDialog({
   const [budget, setBudget] = useState("");
   const [tags, setTags] = useState("");
   const [saving, setSaving] = useState(false);
+  // Issue #907 F09 — a refusal is shown inside the open panel, not behind it.
+  const [formError, setFormError] = useState("");
 
   async function submit() {
     if (!name.trim() || saving) return;
+    setFormError("");
     setSaving(true);
     const { ok, data } = await api<{ project: { id: string } }>("/api/workspace/projects", {
       method: "POST",
@@ -376,12 +397,21 @@ function NewProjectDialog({
     });
     setSaving(false);
     if (ok) onCreated();
-    else onError(workspaceError((data as unknown as { error?: string }).error));
+    else {
+      const message = workspaceError((data as unknown as { error?: string }).error);
+      setFormError(message);
+      onError(message);
+    }
   }
 
   return (
-    <WorkspaceFormDialog title="پروژهٔ جدید" width="2xl" onClose={onClose}>
+    <WorkspaceFormPanel title="پروژهٔ جدید" width="2xl" onClose={onClose}>
       <div className="grid gap-3 p-4 sm:grid-cols-2">
+        {formError ? (
+          <div className="sm:col-span-2" role="alert">
+            <ErrorBox>{formError}</ErrorBox>
+          </div>
+        ) : null}
         <Field label="نام پروژه">
           <input
             className={inputClass}
@@ -432,12 +462,16 @@ function NewProjectDialog({
           value={partyId}
           onChange={setPartyId}
           options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+          searchable
+          searchPlaceholder="جست‌وجوی طرف حساب…"
         />
         <PickerField
           label="مسئول پروژه"
           value={ownerUserId}
           onChange={setOwnerUserId}
           options={lookups.members.map((m) => ({ id: m.id, label: m.fullName }))}
+          searchable
+          searchPlaceholder="جست‌وجوی همکار…"
         />
         <DateField label="تاریخ شروع" value={startDate} onChange={setStartDate} />
         <DateField label="تاریخ پایان" value={endDate} onChange={setEndDate} />
@@ -453,12 +487,12 @@ function NewProjectDialog({
           <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
         </Field>
       </div>
-      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+      <FormActions>
         <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
         <PrimaryButton type="button" onClick={submit} disabled={!name.trim() || saving}>
           {saving ? "در حال ذخیره" : "ساخت پروژه"}
         </PrimaryButton>
-      </div>
-    </WorkspaceFormDialog>
+      </FormActions>
+    </WorkspaceFormPanel>
   );
 }

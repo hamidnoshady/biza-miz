@@ -1,25 +1,14 @@
-/**
- * Issue #972 — the universal baseline tour layer.
- *
- * The owner's decision (2026-11-06) is that guidance must not depend on
- * somebody hand-writing a `TOURS` entry per page: a registered page with
- * canonical route and metadata gains basic guidance by itself, an authored
- * tour overrides it rather than competing with it, and nothing the baseline
- * cannot prove is ever highlighted.
- */
+/** Historical baseline generation, progress compatibility and coverage audit. */
 import { describe, expect, it } from "vitest";
 import { KNOWLEDGE_PAGES, type KnowledgePage } from "./knowledge-base";
 import {
   BASELINE_TOUR_PREFIX,
   PAGE_TOUR_REGIONS,
   STUDIO_ONLY_PAGE_KEYS,
-  baselinePageForId,
   baselineTourForPage,
   baselineTourIdForRoute,
   isBaselineTourId,
-  pageTourCandidates,
   regionsForPage,
-  tourDefinitionById,
   type PageTourRegion,
 } from "./tour-baseline";
 import { tourCoverage } from "./tour-coverage";
@@ -27,14 +16,12 @@ import {
   TOURS,
   TOUR_ANCHORS,
   applyTourEvent,
-  tourForViewer,
   tourProgressView,
   toursForPage,
   validateTours,
   type StoredTourProgress,
   type TourDefinition,
   type TourProgressEvent,
-  type TourViewer,
 } from "./tours";
 
 const T1 = "2026-11-06T09:05:00.000Z";
@@ -60,24 +47,6 @@ function run(definition: TourDefinition, events: TourProgressEvent[], from: Stor
 }
 
 describe("automatic baseline tours", () => {
-  it("gives every registered page exactly one tour when no authored tour owns it", () => {
-    for (const page of KNOWLEDGE_PAGES) {
-      const candidates = pageTourCandidates(page.key);
-      const authored = toursForPage(page.key);
-      if (STUDIO_ONLY_PAGE_KEYS.has(page.key)) {
-        expect(candidates, page.key).toEqual([]);
-        continue;
-      }
-      expect(candidates.length, page.key).toBeGreaterThan(0);
-      if (authored.length > 0) {
-        expect(candidates.map((tour) => tour.id), page.key).toEqual(authored.map((tour) => tour.id));
-      } else {
-        expect(candidates, page.key).toHaveLength(1);
-        expect(isBaselineTourId(candidates[0].id), page.key).toBe(true);
-      }
-    }
-  });
-
   it("needs no catalogue entry for a page registered today", () => {
     const tour = baselineTourForPage(NEW_PAGE);
     expect(tour.id).toBe(BASELINE_ID);
@@ -139,163 +108,6 @@ describe("automatic baseline tours", () => {
       TOUR_ANCHORS.accountingSectionNav,
       TOUR_ANCHORS.pageHeader,
     ]);
-  });
-
-  it("keeps an authored tour as the only guide for its page, and refuses a baseline id there", () => {
-    const products = "page:/accounting/products";
-    expect(toursForPage(products).length).toBeGreaterThan(0);
-    expect(pageTourCandidates(products).every((tour) => !isBaselineTourId(tour.id))).toBe(true);
-    expect(tourDefinitionById(baselineTourIdForRoute("/accounting/products"))).toBeUndefined();
-  });
-
-  it("keeps CRM Deals Studio-only, including direct playback by its legacy id", () => {
-    const pageKey = "page:/crm/deals";
-    const studio: TourDefinition = {
-      id: "crm.deals",
-      version: 1,
-      pageKey,
-      route: "/crm/deals",
-      title: "فرصت‌ها",
-      description: "از استودیو",
-      eligibility: {},
-      steps: [{ id: "intro", kind: "explain", title: "شروع", body: "." }],
-    };
-
-    expect(pageTourCandidates(pageKey)).toEqual([]);
-    expect(pageTourCandidates(pageKey, [studio])).toEqual([studio]);
-    expect(tourDefinitionById("crm.deals.list")).toBeUndefined();
-    expect(tourDefinitionById("crm.deals.list", [studio])).toBeUndefined();
-    expect(tourDefinitionById(baselineTourIdForRoute("/crm/deals"))).toBeUndefined();
-  });
-
-  it("keeps CRM Briefs Studio-only, including direct playback by its legacy id", () => {
-    const pageKey = "page:/crm/briefs";
-    const studio: TourDefinition = {
-      id: "crm.briefs.list",
-      version: 2,
-      pageKey,
-      route: "/crm/briefs",
-      title: "بریف کارفرما",
-      description: "از استودیو",
-      eligibility: {},
-      steps: [{ id: "intro", kind: "explain", title: "شروع", body: "." }],
-    };
-
-    expect(STUDIO_ONLY_PAGE_KEYS.has(pageKey)).toBe(true);
-    expect(TOURS.some((tour) => tour.id === "crm.briefs.list")).toBe(false);
-    expect(pageTourCandidates(pageKey)).toEqual([]);
-    expect(pageTourCandidates(pageKey, [studio])).toEqual([studio]);
-    expect(tourDefinitionById("crm.briefs.list")).toBeUndefined();
-    expect(tourDefinitionById("crm.briefs.list", [studio])).toEqual(studio);
-    expect(tourDefinitionById("crm.directory.first-customer")).toBeDefined();
-    expect(tourDefinitionById(baselineTourIdForRoute("/crm/briefs"))).toBeUndefined();
-  });
-
-  it("keeps CRM Proposals Studio-only, including direct playback by its legacy id", () => {
-    const pageKey = "page:/crm/proposals";
-    const studio: TourDefinition = {
-      id: "crm.proposals.list",
-      version: 2,
-      pageKey,
-      route: "/crm/proposals",
-      title: "پیشنهاد قیمت",
-      description: "از استودیو",
-      eligibility: {},
-      steps: [{ id: "intro", kind: "explain", title: "شروع", body: "." }],
-    };
-
-    expect(STUDIO_ONLY_PAGE_KEYS.has(pageKey)).toBe(true);
-    expect(TOURS.some((tour) => tour.id === "crm.proposals.list")).toBe(false);
-    expect(pageTourCandidates(pageKey)).toEqual([]);
-    expect(pageTourCandidates(pageKey, [studio])).toEqual([studio]);
-    expect(tourDefinitionById("crm.proposals.list")).toBeUndefined();
-    expect(tourDefinitionById("crm.proposals.list", [studio])).toEqual(studio);
-    expect(tourDefinitionById(baselineTourIdForRoute("/crm/proposals"))).toBeUndefined();
-  });
-
-  it("keeps CRM Client Campaigns Studio-only, including direct playback by its legacy id", () => {
-    const pageKey = "page:/crm/client-campaigns";
-    const studio: TourDefinition = {
-      id: "crm.client-campaigns.list",
-      version: 2,
-      pageKey,
-      route: "/crm/client-campaigns",
-      title: "کمپین کارفرما",
-      description: "از استودیو",
-      eligibility: {},
-      steps: [{ id: "intro", kind: "explain", title: "شروع", body: "." }],
-    };
-
-    expect(STUDIO_ONLY_PAGE_KEYS.has(pageKey)).toBe(true);
-    expect(TOURS.some((tour) => tour.id === "crm.client-campaigns.list")).toBe(false);
-    expect(pageTourCandidates(pageKey)).toEqual([]);
-    expect(pageTourCandidates(pageKey, [studio])).toEqual([studio]);
-    expect(tourDefinitionById("crm.client-campaigns.list")).toBeUndefined();
-    expect(tourDefinitionById("crm.client-campaigns.list", [studio])).toEqual(studio);
-    expect(tourDefinitionById(baselineTourIdForRoute("/crm/client-campaigns"))).toBeUndefined();
-  });
-
-  it("resolves a baseline id to its page for playback and progress writes", () => {
-    const page = KNOWLEDGE_PAGES.find((candidate) => toursForPage(candidate.key).length === 0)!;
-    const id = baselineTourIdForRoute(page.route);
-    expect(baselinePageForId(id)?.key).toBe(page.key);
-    expect(tourDefinitionById(id)?.pageKey).toBe(page.key);
-    expect(tourDefinitionById("baseline.nowhere")).toBeUndefined();
-    expect(tourDefinitionById("nope")).toBeUndefined();
-  });
-
-  it("is only offered to a viewer when the page itself has no authored catalogue", () => {
-    const viewer: TourViewer = { permissions: new Set(), industry: null };
-    const authored = pageTourCandidates("page:/accounting/products").flatMap(
-      (tour) => tourForViewer(tour, viewer) ?? [],
-    );
-    // The products tour is gated: an ineligible member gets nothing rather than
-    // a baseline describing a screen its instructions are gated on.
-    expect(authored).toEqual([]);
-    const baseline = pageTourCandidates("page:/knowledge").flatMap(
-      (tour) => tourForViewer(tour, viewer) ?? [],
-    );
-    expect(baseline).toHaveLength(1);
-    expect(isBaselineTourId(baseline[0].id)).toBe(true);
-  });
-
-  it("serves a published Studio tour instead of the baseline, and replaces a code tour by id", () => {
-    const published = (pageKey: string, id: string, title: string) => ({
-      id,
-      version: 3,
-      pageKey,
-      route: pageKey.slice("page:".length),
-      title,
-      description: "از استودیو",
-      eligibility: {},
-      steps: [
-        { id: "intro", kind: "explain" as const, title: "شروع", body: "." },
-        { id: "header", kind: "spotlight" as const, anchor: TOUR_ANCHORS.pageHeader, title: "سرصفحه", body: "." },
-      ],
-    });
-
-    // A page that only had the automatic baseline now answers with the tour the
-    // super-admin wrote and published.
-    const edited = pageTourCandidates("page:/knowledge", [published("page:/knowledge", "studio.knowledge", "تور استودیو")]);
-    expect(edited.map((tour) => tour.id)).toEqual(["studio.knowledge"]);
-    expect(edited[0].title).toBe("تور استودیو");
-
-    // A published tour with a code tour's id replaces it, and the page's other
-    // tours (the ledger's and the staff overview's) stay where they were.
-    const overview = pageTourCandidates("page:/accounting/overview", [
-      published("page:/accounting/overview", "accounting.overview.ledger", "نسخهٔ استودیو"),
-    ]);
-    expect(overview.map((tour) => tour.id)).toEqual([
-      "accounting.overview.ledger",
-      "accounting.overview.staff",
-    ]);
-    expect(overview[0].title).toBe("نسخهٔ استودیو");
-    expect(overview[1].title).not.toBe("نسخهٔ استودیو");
-
-    // A published tour of another page never leaks into this one.
-    expect(pageTourCandidates("page:/knowledge", [published("page:/crm/quality", "studio.x", "x")])[0].id).toMatch(
-      /^baseline\./,
-    );
   });
 
   it("records progress with the same rules as any other tour", () => {

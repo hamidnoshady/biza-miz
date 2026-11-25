@@ -120,6 +120,11 @@ describe("route-level skeleton coverage", () => {
       // skeletons the tree before any Sheet can open, so there is no
       // first-fetch region for the Sheet itself to reserve (issue #844).
       "(app)/accounting/menu/item-sheet.tsx",
+      // The wizard step's inline KB excerpt starts from the step's own local
+      // help lines and the fetch only upgrades that copy to the published
+      // article (issue #1239). There is no empty data region to reserve — the
+      // block is complete before the request fires.
+      "setup/step-help.tsx",
     ]);
     const offenders: string[] = [];
     for (const file of walkTsFiles(APP_DIR)) {

@@ -5,8 +5,8 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import type { KitchenWorkflow } from "@/lib/kitchen-workflow";
-import { LoadingSkeleton, SectionCard } from "../page-chrome";
-import { api, errorMessage, inputClass } from "../ui";
+import { LoadingSkeleton, SectionCard } from "@/app/dashboard/page-chrome";
+import { api, errorMessage, inputClass } from "@/app/dashboard/ui";
 
 type Response = {
   workflow?: KitchenWorkflow;
@@ -16,6 +16,17 @@ type Response = {
   error?: string;
 };
 
+/**
+ * «آماده‌سازی و بایگانی سفارش‌های آشپزخانه» — the kitchen half of the
+ * /settings/orders tab.
+ *
+ * The pass's workflow used to live behind a button on the kitchen board; it
+ * is business configuration (how this branch's tickets leave the board), so
+ * it sits beside the other order policy here. One exit is not a setting at
+ * all and is deliberately absent from the form: a ticket whose business day
+ * has passed leaves the board on its own, so there is no manual
+ * «بررسی سفارش‌های قدیمی» pass left to configure.
+ */
 export function KitchenWorkflowSettings() {
   const [workflow, setWorkflow] = useState<KitchenWorkflow>("kitchen_team");
   const [saved, setSaved] = useState<KitchenWorkflow | null>(null);
@@ -74,7 +85,10 @@ export function KitchenWorkflowSettings() {
   }
 
   return (
-    <SectionCard>
+    <SectionCard
+      title="آماده‌سازی و بایگانی سفارش‌های آشپزخانه"
+      description="این شعبه سفارش‌هایش را چگونه آماده می‌کند و صف آشپزخانه چگونه خالی می‌شود. سفارش‌هایی که از روز کاری خود عبور کنند، بدون تنظیم و به‌طور خودکار از صف بایگانی می‌شوند."
+    >
       <h2 className="font-semibold">آماده‌سازی سفارش‌های این شعبه</h2>
       {!error && saved === null ? <LoadingSkeleton rows={3} /> : null}
       <div className="flex flex-wrap items-end gap-2">
@@ -115,6 +129,11 @@ export function KitchenWorkflowSettings() {
       {workflow === "ready_on_send" ? (
         <p className="text-sm text-muted-foreground">اقلام جدید صندوق با وضعیت آماده ثبت می‌شوند. پرداخت در بخش سفارش‌ها انجام می‌شود.</p>
       ) : null}
+      <p className="text-sm text-muted-foreground">
+        بایگانی خودکار با روز کاری این شعبه هم‌گام است: با گذشتن روز کاری سفارش
+        (بستن روز، یا آغاز روز بعد در ساعت تنظیم‌شدهٔ همین شعبه)، اقلام بازماندهٔ
+        آن روز از صف آشپزخانه خارج می‌شوند؛ وضعیت سفارش و پرداخت تغییر نمی‌کند.
+      </p>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
     </SectionCard>
   );

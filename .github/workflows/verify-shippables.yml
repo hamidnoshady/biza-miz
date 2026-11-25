@@ -471,6 +471,22 @@ jobs:
           # on owner instruction (Hamid, 2026-11-23) with ~3.5 MiB of headroom,
           # the same reviewed reason as the moves above: restoring working
           # headroom for real API surface, not relaxing the runaway detector.
+          # 2026-11-24 — PR #1563 (kitchen business-day auto-archive and the
+          # kitchen settings moved into /settings/orders and
+          # /settings/notifications) merged onto a main carrying #1560-#1562
+          # measured 328,389,726 B = 313.177 MiB in 7,112 files (run
+          # 45482652494) against the 312 MiB gate: +1.18 MiB of real surface —
+          # the two new settings-section client chunks and their
+          # client-reference-manifest entries, plus main's own accumulation
+          # since the 2026-11-23 measurement — while the PR's net API surface
+          # shrank by one route (`/api/kitchen/tickets/stale` removed) and the
+          # package delta is zero (node_modules unchanged at 50.56 MiB, no
+          # cache or source-map leakage in the size diagnostics). Budget moves
+          # 312 -> 316 MiB on owner instruction (Hamid, 2026-11-24, "fix ci
+          # failed" on the PR) with ~2.8 MiB of headroom, the same reviewed
+          # reason as the moves above: restoring working headroom for real API
+          # surface, not relaxing the gate — a leak still shows up as tens of
+          # MiB and still trips it.
           # 2026-11-25 — #1110's My Workspace business-type eligibility added one
           # server decision module plus guards on `/workspace`, `/api/workspace`,
           # `/api/aec`, `/api/ai/projects`, `/api/data` and the knowledge routes.

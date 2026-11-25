@@ -20,6 +20,8 @@
  *
  * Requires: a migrated + seeded server (`npm run db:seed`), the same
  * `DATABASE_URL`, and `SEED_OWNER_*` (defaults match scripts/seed.ts).
+ * Publish fixtures into the disposable database before running:
+ * npx tsx scripts/seed-guided-tours-e2e.ts
  *
  * Usage: node scripts/e2e-guided-tours.mjs
  */

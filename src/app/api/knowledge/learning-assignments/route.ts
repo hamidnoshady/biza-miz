@@ -10,7 +10,6 @@ import {
   listAllLearningPathAssignments,
   loadLearningPathProgressForBusiness,
 } from "@/lib/learning-paths-service";
-import { tourDefinitionById } from "@/lib/tour-baseline";
 import { publishedTours } from "@/lib/tour-studio-service";
 import { tourProgressView } from "@/lib/tours";
 import { listAllTourAssignments, loadTourProgressForBusiness } from "@/lib/tours-service";
@@ -47,7 +46,7 @@ export const GET = withTenantScope(async () => {
     const completed = new Set<string>();
     if (!rows) return completed;
     for (const [tourId, stored] of rows) {
-      const definition = tourDefinitionById(tourId, published);
+      const definition = published.find((tour) => tour.id === tourId);
       if (definition && tourProgressView(definition, stored).status === "completed") {
         completed.add(tourId);
       }
@@ -84,7 +83,7 @@ export const GET = withTenantScope(async () => {
   });
 
   const tours = tourAssignments.map((assignment) => {
-    const definition = tourDefinitionById(assignment.tourId, published);
+    const definition = published.find((tour) => tour.id === assignment.tourId);
     if (!definition) {
       return {
         ...assignment,

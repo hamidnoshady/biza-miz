@@ -62,10 +62,12 @@ import {
   SelectField,
   workspaceError,
   LoadMoreFooter,
-  WorkspaceFormDialog,
+  FormActions,
+  WorkspaceFormPanel,
   stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import { useWorkspaceUrlState } from "./use-workspace-url-state";
 import type { WorkspaceIntent } from "./workspace-routes";
 
 interface ContractSummary {
@@ -113,8 +115,26 @@ export function ContractsSection({
 }) {
   const money = useMoney();
   const [error, setError] = useState("");
-  const [status, setStatus] = useState<WorkspaceContractStatus | "">("");
-  const [expiring, setExpiring] = useState(initialExpiring ?? 0);
+  // Issue #907 F11 — «وضعیت» and «انقضا در ۳۰ روز» are URL state, so the
+  // overview's `?expiring=30` link, a reload and back/forward all restore the
+  // same rows instead of the section's mount-time guess.
+  const [statusParam, setStatusParam] = useWorkspaceUrlState("status", "");
+  const status: WorkspaceContractStatus | "" = (CONTRACT_STATUSES as readonly string[]).includes(
+    statusParam,
+  )
+    ? (statusParam as WorkspaceContractStatus)
+    : "";
+  const setStatus = (next: WorkspaceContractStatus | "") => setStatusParam(next);
+  const [expiringParam, setExpiringParam] = useWorkspaceUrlState(
+    "expiring",
+    initialExpiring ? String(initialExpiring) : "",
+  );
+  const expiringNumber = Number(expiringParam);
+  const expiring =
+    Number.isInteger(expiringNumber) && expiringNumber > 0 && expiringNumber <= 365
+      ? expiringNumber
+      : 0;
+  const setExpiring = (next: number) => setExpiringParam(next ? String(next) : "");
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<ContractRow | null>(null);
   const [creating, setCreating] = useState(false);
@@ -387,9 +407,12 @@ function ContractDialog({
   );
   const [notes, setNotes] = useState(contract?.notes ?? "");
   const [saving, setSaving] = useState(false);
+  // Issue #907 F09 — say why the save failed inside the open panel.
+  const [formError, setFormError] = useState("");
 
   async function submit() {
     if (!title.trim() || saving) return;
+    setFormError("");
     setSaving(true);
     const payload = {
       title,
@@ -411,12 +434,21 @@ function ContractDialog({
       : await api("/api/workspace/contracts", { method: "POST", body: JSON.stringify(payload) });
     setSaving(false);
     if (ok) onSaved();
-    else onError(workspaceError((data as unknown as { error?: string }).error));
+    else {
+      const message = workspaceError((data as unknown as { error?: string }).error);
+      setFormError(message);
+      onError(message);
+    }
   }
 
   return (
-    <WorkspaceFormDialog title={contract ? "ویرایش قرارداد" : "قرارداد اجرایی جدید"} width="2xl" onClose={onClose}>
+    <WorkspaceFormPanel title={contract ? "ویرایش قرارداد" : "قرارداد اجرایی جدید"} width="2xl" onClose={onClose}>
       <div className="grid gap-3 p-4 sm:grid-cols-2">
+        {formError ? (
+          <div className="sm:col-span-2" role="alert">
+            <ErrorBox>{formError}</ErrorBox>
+          </div>
+        ) : null}
         <div className="sm:col-span-2">
           <Field label="عنوان قرارداد">
             <input
@@ -466,6 +498,8 @@ function ContractDialog({
           value={partyId}
           onChange={setPartyId}
           options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+          searchable
+          searchPlaceholder="جست‌وجوی طرف قرارداد…"
         />
         <Field label={`مبلغ (${money.unitLabel})`}>
           <input
@@ -495,14 +529,14 @@ function ContractDialog({
           </Field>
         </div>
       </div>
-      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+      <FormActions>
         <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
         {canManage ? (
           <PrimaryButton type="button" onClick={submit} disabled={!title.trim() || saving}>
             {saving ? "در حال ذخیره" : "ذخیره"}
           </PrimaryButton>
         ) : null}
-      </div>
-    </WorkspaceFormDialog>
+      </FormActions>
+    </WorkspaceFormPanel>
   );
 }

@@ -210,6 +210,31 @@ async function assertTransferLocation(
     throw new Error("transfer_location_scope_mismatch");
 }
 
+/**
+ * Issue #1446 — a payment replay that finds its order closed is not a
+ * dependency wait. Nothing can reopen a `completed` or `voided` order, so
+ * deferring it retries forever and leaves the till's books missing the sale
+ * (one row reached 9,761 attempts). A `held` order is different: it can be
+ * resumed, so it stays `order_not_open` and deferred. `order_not_found` also
+ * stays deferred — the order create may still arrive.
+ */
+async function throwIfPaymentOrderSettled(
+  client: PoolClient,
+  locationId: string,
+  orderId: string,
+  error: unknown,
+): Promise<void> {
+  if (syncErrorCode(error) !== "order_not_open") return;
+  const { rows } = await client.query<{ status: string }>(
+    "SELECT status FROM orders WHERE id=$1 AND location_id=$2",
+    [orderId, locationId],
+  );
+  const status = rows[0]?.status;
+  if (status === "completed" || status === "voided") {
+    throw new SyncPayloadError("order_already_settled");
+  }
+}
+
 export async function applySyncDomainHandler(
   context: SyncDomainContext,
 ): Promise<SyncDomainEffect> {
@@ -222,27 +247,33 @@ export async function applySyncDomainHandler(
         PAYMENT_METHODS,
         "invalid_method",
       );
-      const result = await completeOrderPayment({
-        client,
-        businessId,
-        locationId,
-        orderId: requiredString(payload, "orderId"),
-        method,
-        reference: optionalString(payload, "reference"),
-        customerId: optionalString(payload, "customerId"),
-        tipAmount:
-          payload.tipAmount === undefined
-            ? 0
-            : exactInteger(payload.tipAmount, "invalid_tipAmount"),
-        businessDate: optionalString(payload, "businessDate") ?? undefined,
-        receivedBy: actor.userId,
-        idempotencyKey: clientEventId,
-      });
-      return {
-        effectType: "order_payment",
-        effectId: requiredString(payload, "orderId"),
-        result: { amount: result.amount, duplicate: Boolean(result.duplicate) },
-      };
+      const orderId = requiredString(payload, "orderId");
+      try {
+        const result = await completeOrderPayment({
+          client,
+          businessId,
+          locationId,
+          orderId,
+          method,
+          reference: optionalString(payload, "reference"),
+          customerId: optionalString(payload, "customerId"),
+          tipAmount:
+            payload.tipAmount === undefined
+              ? 0
+              : exactInteger(payload.tipAmount, "invalid_tipAmount"),
+          businessDate: optionalString(payload, "businessDate") ?? undefined,
+          receivedBy: actor.userId,
+          idempotencyKey: clientEventId,
+        });
+        return {
+          effectType: "order_payment",
+          effectId: orderId,
+          result: { amount: result.amount, duplicate: Boolean(result.duplicate) },
+        };
+      } catch (error) {
+        await throwIfPaymentOrderSettled(client, locationId, orderId, error);
+        throw error;
+      }
     }
     case "order.payment.completed.v2":
     case "order.payment.completed.v3": {
@@ -269,30 +300,36 @@ export async function applySyncDomainHandler(
         }
         return resolved;
       });
-      const result = await completeSplitOrderPayment({
-        client,
-        businessId,
-        locationId,
-        orderId: requiredString(payload, "orderId"),
-        tenders,
-        customerId: optionalString(payload, "customerId"),
-        tipAmount:
-          payload.tipAmount === undefined
-            ? 0
-            : exactInteger(payload.tipAmount, "invalid_tipAmount"),
-        businessDate: optionalString(payload, "businessDate") ?? undefined,
-        receivedBy: actor.userId,
-        idempotencyKey: clientEventId,
-        // The paying side's own instant and journal date, so a sale synced
-        // after midnight is still on the day it was made (migration 0190).
-        settledAt: validInstant(context.occurredAt),
-        entryDate: isoDate(optionalString(payload, "entryDate")),
-      });
-      return {
-        effectType: "order_payment",
-        effectId: requiredString(payload, "orderId"),
-        result: { amount: result.amount, duplicate: Boolean(result.duplicate) },
-      };
+      const orderId = requiredString(payload, "orderId");
+      try {
+        const result = await completeSplitOrderPayment({
+          client,
+          businessId,
+          locationId,
+          orderId,
+          tenders,
+          customerId: optionalString(payload, "customerId"),
+          tipAmount:
+            payload.tipAmount === undefined
+              ? 0
+              : exactInteger(payload.tipAmount, "invalid_tipAmount"),
+          businessDate: optionalString(payload, "businessDate") ?? undefined,
+          receivedBy: actor.userId,
+          idempotencyKey: clientEventId,
+          // The paying side's own instant and journal date, so a sale synced
+          // after midnight is still on the day it was made (migration 0190).
+          settledAt: validInstant(context.occurredAt),
+          entryDate: isoDate(optionalString(payload, "entryDate")),
+        });
+        return {
+          effectType: "order_payment",
+          effectId: orderId,
+          result: { amount: result.amount, duplicate: Boolean(result.duplicate) },
+        };
+      } catch (error) {
+        await throwIfPaymentOrderSettled(client, locationId, orderId, error);
+        throw error;
+      }
     }
     case "order.state.synced": {
       try {

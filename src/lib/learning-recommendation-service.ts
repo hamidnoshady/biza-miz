@@ -15,7 +15,6 @@ import {
   type LearningCandidate,
   type LearningRecommendation,
 } from "./learning-recommendations";
-import { pageTourCandidates, tourDefinitionById } from "./tour-baseline";
 import { publishedTours } from "./tour-studio-service";
 import { tourForViewer, tourProgressView } from "./tours";
 import { loadTourProgress, tourViewerFor } from "./tours-service";
@@ -59,12 +58,7 @@ export async function learningRecommendationsFor({
   // feed does not need the whole 100-page catalogue, and keeping it narrow is
   // what makes the cache cheap.
   const published = await publishedTours().catch(() => []);
-  const publishedForPage = page
-    ? published.filter((tour) => tour.pageKey === page.key)
-    : [];
-  const pageTourCandidatesList = page
-    ? pageTourCandidates(page.key, publishedForPage)
-    : [];
+  const pageTours = published.filter((tour) => tour.pageKey === page?.key);
 
   const paths = pathsForViewer(
     LEARNING_PATHS,
@@ -73,19 +67,13 @@ export async function learningRecommendationsFor({
 
   // Tours named by the paths' `tour` steps, so a path that has not been opened
   // can still suggest its first real lesson.
-  const pathTourIds = [
-    ...new Set(
-      paths.flatMap((path) =>
-        path.steps.filter((step) => step.kind === "tour").map((step) => step.target),
-      ),
+  const pathTourIds = new Set(
+    paths.flatMap((path) =>
+      path.steps.filter((step) => step.kind === "tour").map((step) => step.target),
     ),
-  ];
-  const pathTours = pathTourIds.flatMap((id) => {
-    const tour = tourDefinitionById(id, published);
-    return tour ? [tour] : [];
-  });
-
-  const candidatesForViewer = [...pageTourCandidatesList, ...pathTours].filter(
+  );
+  const pathTours = published.filter((tour) => pathTourIds.has(tour.id));
+  const candidatesForViewer = [...pageTours, ...pathTours].filter(
     (tour) => !excludeWorkspace || !tour.route.startsWith("/workspace"),
   );
   const viewer = await tourViewerFor(businessId, permissions, candidatesForViewer);

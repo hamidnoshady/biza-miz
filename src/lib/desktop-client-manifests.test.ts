@@ -138,6 +138,9 @@ describe("desktop client-reference manifest compaction", () => {
     // then 677 -> 725 MB with the staged-runtime gate's 300 MiB move (issue #902 / PR #1152),
     // which keeps this payload at the same ~420 MiB above that gate.
     expect(workflow).toContain("if ($unpacked -gt 725MB)");
-    expect(workflow).toContain("if ($exe.Length -gt 175MB)");
+    // The installer baseline moved 175 -> 176 MiB on owner instruction (2026-11-25,
+    // PR #1563) for the first measured crossing of the release baseline — see the
+    // budget comment in the workflow.
+    expect(workflow).toContain("if ($exe.Length -gt 176MB)");
   });
 });
