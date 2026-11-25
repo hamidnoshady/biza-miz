@@ -52,10 +52,12 @@ import {
   DateCell,
   LoadMoreFooter,
   workspaceError,
-  WorkspaceFormDialog,
+  FormActions,
+  WorkspaceFormPanel,
   stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import { useWorkspaceUrlState } from "./use-workspace-url-state";
 import {
   WorkspaceEntityDrawer,
   type WorkspaceEntityKind,
@@ -157,8 +159,23 @@ export function ApprovalsSection({
   projectId?: string;
 }) {
   const [error, setError] = useState("");
-  const [status, setStatus] = useState<WorkspaceApprovalStatus | "all">("pending");
-  const [inbox, setInbox] = useState<Inbox>(initialInbox);
+  // Issue #907 F11 — the inbox the overview links to (`?mine=true`) is URL
+  // state, not a value read once at mount; the same goes for the status chips.
+  const [statusParam, setStatusParam] = useWorkspaceUrlState("status", "pending");
+  const status: WorkspaceApprovalStatus | "all" = (APPROVAL_STATUSES as readonly string[]).includes(
+    statusParam,
+  )
+    ? (statusParam as WorkspaceApprovalStatus)
+    : statusParam === "all"
+      ? "all"
+      : "pending";
+  const setStatus = (next: WorkspaceApprovalStatus | "all") => setStatusParam(next);
+  const [inboxParam, setInboxParam] = useWorkspaceUrlState(
+    "inbox",
+    initialInbox === "all" ? "" : initialInbox,
+  );
+  const inbox: Inbox = inboxParam === "mine" || inboxParam === "requested" ? inboxParam : "all";
+  const setInbox = (next: Inbox) => setInboxParam(next === "all" ? "" : next);
   const [deciding, setDeciding] = useState<{ row: ApprovalRow; decision: Decision } | null>(null);
   // What is being approved, opened in the shared drawer (#761 §14).
   const [viewing, setViewing] = useState<WorkspaceEntityRef | null>(null);
@@ -385,7 +402,7 @@ function DecisionDialog({
   }
 
   return (
-    <WorkspaceFormDialog title={<>{DECISION_LABELS[decision]} درخواست</>} width="lg" onClose={onClose}>
+    <WorkspaceFormPanel title={<>{DECISION_LABELS[decision]} درخواست</>} width="lg" onClose={onClose}>
       <div className="flex flex-col gap-3 p-4">
         <p className="text-sm text-muted-foreground">
           {APPROVAL_SUBJECT_LABELS[row.subjectType]}: {row.subjectTitle || row.title}
@@ -408,12 +425,12 @@ function DecisionDialog({
         </Field>
         <p className="text-xs text-muted-foreground">{DECISION_EFFECTS[decision]}</p>
       </div>
-      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+      <FormActions>
         <SecondaryButton onClick={onClose}>انصراف</SecondaryButton>
         <PrimaryButton type="button" onClick={submit} disabled={saving}>
           {saving ? "در حال ثبت…" : `ثبت ${DECISION_LABELS[decision]}`}
         </PrimaryButton>
-      </div>
-    </WorkspaceFormDialog>
+      </FormActions>
+    </WorkspaceFormPanel>
   );
 }

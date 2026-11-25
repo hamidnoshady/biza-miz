@@ -10,7 +10,7 @@
  */
 
 import type { WorkspaceIntent } from "./workspace-routes";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDaysIcon, ChevronLeftIcon, ChevronRightIcon, PlusIcon } from "lucide-react";
 import {
   EmptyState,
@@ -48,10 +48,11 @@ import {
 } from "@/lib/workspace-shared";
 import {
   DateField,
+  FormActions,
   PickerField,
   SelectField,
   workspaceError,
-  WorkspaceFormDialog,
+  WorkspaceFormPanel,
 } from "./workspace-ui";
 import type { WorkspaceLookups } from "./use-workspace-lookups";
 import { WorkspaceEntityDrawer, type WorkspaceEntityRef } from "./workspace-entity-drawer";
@@ -112,11 +113,17 @@ export function CalendarSection({
   const from = jalaliToIsoDate(year, month, 1);
   const to = jalaliToIsoDate(year, month, monthLength);
 
+  // Issue #907 F12 — a fast month change must not let the previous month's
+  // response land on the new grid. A generation counter is enough: only the
+  // newest request may write state, and an older one is simply ignored.
+  const requestSeq = useRef(0);
   const load = useCallback(() => {
     if (!from || !to) return;
+    const seq = ++requestSeq.current;
     const params = new URLSearchParams({ from, to });
     if (projectId) params.set("projectId", projectId);
     api<{ entries: CalendarEntry[] }>(`/api/workspace/calendar?${params}`).then(({ ok, data }) => {
+      if (seq !== requestSeq.current) return;
       if (ok) setEntries(data.entries);
       else setError(workspaceError((data as unknown as { error?: string }).error));
     });
@@ -361,18 +368,26 @@ function EventDialog({
   const [description, setDescription] = useState(event?.description ?? "");
   const [projectId, setProjectId] = useState(event?.projectId ?? defaultProjectId ?? "");
   const [saving, setSaving] = useState(false);
+  // Issue #907 F09 — the refusal is shown in the open panel.
+  const [formError, setFormError] = useState("");
 
   async function remove() {
     if (!event || saving) return;
+    setFormError("");
     setSaving(true);
     const { ok, data } = await api(`/api/workspace/calendar?id=${event.refId}`, { method: "DELETE" });
     setSaving(false);
     if (ok) onSaved();
-    else onError(workspaceError((data as unknown as { error?: string }).error));
+    else {
+      const message = workspaceError((data as unknown as { error?: string }).error);
+      setFormError(message);
+      onError(message);
+    }
   }
 
   async function submit() {
     if (!title.trim() || !eventDate || saving) return;
+    setFormError("");
     setSaving(true);
     const payload = JSON.stringify({
       title,
@@ -389,12 +404,21 @@ function EventDialog({
       : await api("/api/workspace/calendar", { method: "POST", body: payload });
     setSaving(false);
     if (ok) onSaved();
-    else onError(workspaceError((data as unknown as { error?: string }).error));
+    else {
+      const message = workspaceError((data as unknown as { error?: string }).error);
+      setFormError(message);
+      onError(message);
+    }
   }
 
   return (
-    <WorkspaceFormDialog title={event ? "رویداد" : "رویداد جدید"} width="xl" onClose={onClose}>
+    <WorkspaceFormPanel title={event ? "رویداد" : "رویداد جدید"} width="xl" onClose={onClose}>
       <div className="grid gap-3 p-4 sm:grid-cols-2">
+        {formError ? (
+          <div className="sm:col-span-2" role="alert">
+            <ErrorBox>{formError}</ErrorBox>
+          </div>
+        ) : null}
         <div className="sm:col-span-2">
           <Field label="عنوان">
             <input
@@ -456,7 +480,7 @@ function EventDialog({
           </Field>
         </div>
       </div>
-      <div className="flex justify-end gap-2 border-t border-border/80 p-4">
+      <FormActions>
         {event && canEdit ? (
           <SecondaryButton onClick={remove} disabled={saving}>
             حذف رویداد
@@ -472,7 +496,7 @@ function EventDialog({
             {saving ? "در حال ذخیره" : event ? "ذخیرهٔ تغییرات" : "ثبت رویداد"}
           </PrimaryButton>
         ) : null}
-      </div>
-    </WorkspaceFormDialog>
+      </FormActions>
+    </WorkspaceFormPanel>
   );
 }

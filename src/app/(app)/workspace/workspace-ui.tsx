@@ -11,13 +11,18 @@
  * that is not already in `page-chrome.tsx`.
  */
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/app/dashboard/page-chrome";
 import { Field, inputClass, errorMessageOrRaw, SecondaryButton } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { formatJalali } from "@/lib/jalali";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { formatJalali, todayIsoDate } from "@/lib/jalali";
 import { toPersianDigits } from "@/lib/digits";
 import {
   CONTRACT_STATUS_LABELS,
@@ -200,6 +205,32 @@ export function PriorityBadge({ priority }: { priority: WorkspacePriority }) {
  * ------------------------------------------------------------------------- */
 
 /**
+ * The business's calendar day, kept fresh while the page stays open.
+ *
+ * Issue #907 F08: a value frozen at mount by `useMemo` is wrong twice over —
+ * it read a UTC slice while every service query uses Tehran's day, and a tab
+ * left open across midnight kept saying «امروز» for yesterday. One minute is
+ * granular enough for a date label and cheap enough to always run.
+ */
+export function useWorkspaceToday(): string {
+  const [today, setToday] = useState(() => todayIsoDate());
+  useEffect(() => {
+    const tick = () => setToday(todayIsoDate());
+    // Recompute on return to the tab: a background tab's timer can be throttled.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    const id = window.setInterval(tick, 60_000);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+  return today;
+}
+
+/**
  * A Shamsi date with an urgency colour and a relative hint («۳ روز مانده»,
  * «۲ روز گذشته»). Stored and passed as ISO/Gregorian throughout; `formatJalali`
  * is the only thing that converts, at the point of display, which is the rule
@@ -214,7 +245,7 @@ export function DateCell({
   relative?: boolean;
   className?: string;
 }) {
-  const today = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const today = useWorkspaceToday();
   if (!date) return <span className="text-muted-foreground">—</span>;
 
   const tone = deadlineTone(date, today);
@@ -304,7 +335,17 @@ export function SelectField<T extends string>({
   );
 }
 
-/** A labelled `<select>` over `{id, label}` rows — people, projects, parties. */
+/**
+ * A labelled `<select>` over `{id, label}` rows — people, projects, parties.
+ *
+ * `searchable` (issue #907 F10) puts a filter above the select. A business can
+ * have hundreds of parties, and scrolling a native select to find one is the
+ * defect the audit recorded; filtering keeps the native control — and its
+ * keyboard behaviour, its RTL rendering and its screen-reader announcement —
+ * rather than replacing it with a hand-rolled listbox. The current selection
+ * always stays in the list, even when it does not match the filter, so opening
+ * a form never silently clears a field.
+ */
 export function PickerField({
   label,
   value,
@@ -312,6 +353,8 @@ export function PickerField({
   options,
   placeholder = "— انتخاب کنید —",
   hint,
+  searchable,
+  searchPlaceholder = "جست‌وجو…",
 }: {
   label: string;
   value: string;
@@ -319,21 +362,47 @@ export function PickerField({
   options: ReadonlyArray<{ id: string; label: string }>;
   placeholder?: string;
   hint?: string;
+  searchable?: boolean;
+  searchPlaceholder?: string;
 }) {
+  const [filter, setFilter] = useState("");
+  const visible = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!searchable || !needle) return options;
+    return options.filter(
+      (option) => option.id === value || option.label.toLowerCase().includes(needle),
+    );
+  }, [filter, options, searchable, value]);
+
   return (
     <Field label={label} hint={hint}>
-      <select
-        className={inputClass}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        <option value="">{placeholder}</option>
-        {options.map((option) => (
-          <option key={option.id} value={option.id}>
-            {option.label}
-          </option>
-        ))}
-      </select>
+      <div className="flex flex-col gap-1.5">
+        {searchable ? (
+          <input
+            type="search"
+            className={inputClass}
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder={searchPlaceholder}
+            aria-label={`${searchPlaceholder} ${label}`}
+          />
+        ) : null}
+        <select
+          className={inputClass}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          <option value="">{placeholder}</option>
+          {visible.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        {searchable && visible.length === 0 ? (
+          <span className="text-xs text-muted-foreground">موردی با این نام پیدا نشد.</span>
+        ) : null}
+      </div>
     </Field>
   );
 }
@@ -361,24 +430,29 @@ export const stackedTableClass = [
  * Form dialog
  * ------------------------------------------------------------------------- */
 
-const DIALOG_WIDTH = { lg: "sm:max-w-lg", xl: "sm:max-w-xl", "2xl": "sm:max-w-2xl" } as const;
+const PANEL_WIDTH = { lg: "sm:max-w-lg", xl: "sm:max-w-xl", "2xl": "sm:max-w-2xl" } as const;
 
 /**
- * The one create/edit/decide dialog shell every section uses (#761 §24) — the
- * platform's Radix `Dialog`, so it is a labelled modal that traps focus,
- * closes on Escape and hands focus back to whatever opened it — a button or a
- * table row (there is no `DialogTrigger`, so Radix alone would drop focus on
- * <body>). A click outside does NOT close it: a half-filled form must not
- * vanish on a stray tap.
+ * The one create/edit/decide panel every section uses.
+ *
+ * Issue #907 F05 and the newer Bizamiz direction: complex create/edit forms
+ * open in a right-side offcanvas panel rather than a centred modal. It is the
+ * platform's Radix `Sheet` — a labelled dialog that traps focus, closes on
+ * Escape and hands focus back to whatever opened it (there is no trigger, so
+ * Radix alone would drop focus on <body>). A click outside does NOT close it:
+ * a half-filled form must not vanish on a stray tap.
+ *
+ * The body scrolls as one column; the action footer pins to its bottom through
+ * `FormActions`, so «ذخیره» never leaves the viewport and never clips «بستن».
  */
-export function WorkspaceFormDialog({
+export function WorkspaceFormPanel({
   title,
   width = "2xl",
   onClose,
   children,
 }: {
   title: ReactNode;
-  width?: keyof typeof DIALOG_WIDTH;
+  width?: keyof typeof PANEL_WIDTH;
   onClose: () => void;
   children: ReactNode;
 }) {
@@ -386,8 +460,9 @@ export function WorkspaceFormDialog({
     typeof document === "undefined" ? null : (document.activeElement as HTMLElement | null),
   );
   return (
-    <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogContent
+    <Sheet open onOpenChange={(next) => (next ? undefined : onClose())}>
+      <SheetContent
+        side="right"
         aria-describedby={undefined}
         onInteractOutside={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => {
@@ -396,14 +471,41 @@ export function WorkspaceFormDialog({
             opener.focus();
           }
         }}
-        className={cn("gap-0 p-0", DIALOG_WIDTH[width])}
+        className={cn(
+          "w-full max-w-none gap-0 p-0 sm:w-[92vw]",
+          PANEL_WIDTH[width],
+        )}
       >
-        <DialogHeader className="border-b border-border/80 p-4 pe-12">
-          <DialogTitle className="text-base font-semibold">{title}</DialogTitle>
-        </DialogHeader>
-        {children}
-      </DialogContent>
-    </Dialog>
+        <SheetHeader className="shrink-0 border-b border-border/80 p-4 pe-12">
+          <SheetTitle className="text-base font-semibold">{title}</SheetTitle>
+        </SheetHeader>
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+/**
+ * Backwards-compatible name for the same panel. New call sites use
+ * `WorkspaceFormPanel`; naming it a dialog in one section and a panel in the
+ * next would be the duplication this module exists to prevent.
+ */
+export const WorkspaceFormDialog = WorkspaceFormPanel;
+
+/**
+ * The panel's action row (issue #907 F05).
+ *
+ * `PrimaryButton` is full width by default, which is right for a form's main
+ * action but wrong beside a second button: in RTL the primary grew until the
+ * close button sat outside the panel. On a phone the actions stack full width;
+ * from `sm` up they shrink to their labels and sit together at the trailing
+ * edge. Pinning to the bottom keeps them reachable while the form scrolls.
+ */
+export function FormActions({ children }: { children: ReactNode }) {
+  return (
+    <div className="sticky bottom-0 mt-auto flex flex-col gap-2 border-t border-border/80 bg-card p-4 [&>button]:w-full sm:flex-row sm:justify-end sm:[&>button]:w-auto">
+      {children}
+    </div>
   );
 }
 

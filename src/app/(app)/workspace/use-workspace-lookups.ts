@@ -43,6 +43,13 @@ export interface WorkspaceLookups {
    * exists is a screen that has already fetched.
    */
   agencyCommercial?: true;
+  /**
+   * Issue #907 F10 — a picker has to be able to say «در حال بارگذاری» and «خطا»
+   * instead of showing an empty list that looks like "nothing exists". These
+   * two travel with the lists because they describe the same read.
+   */
+  loading?: boolean;
+  error?: string;
 }
 
 export const EMPTY_LOOKUPS: WorkspaceLookups = {
@@ -54,9 +61,16 @@ export function useWorkspaceLookups(enabled = true): WorkspaceLookups {
   const [lookups, setLookups] = useState<WorkspaceLookups>(EMPTY_LOOKUPS);
   useEffect(() => {
     if (!enabled) return;
+    setLookups((prev) => ({ ...prev, loading: true, error: undefined }));
+    let live = true;
     api<WorkspaceLookups>("/api/workspace/lookups").then(({ ok, data }) => {
-      if (ok) setLookups(data);
+      if (!live) return;
+      if (ok) setLookups({ ...data, loading: false });
+      else setLookups((prev) => ({ ...prev, loading: false, error: "خطا در بارگذاری فهرست‌های انتخابی" }));
     });
+    return () => {
+      live = false;
+    };
   }, [enabled]);
   return lookups;
 }

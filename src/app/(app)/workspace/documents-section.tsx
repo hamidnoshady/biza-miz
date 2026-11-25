@@ -53,10 +53,12 @@ import {
   TagList,
   workspaceError,
   LoadMoreFooter,
-  WorkspaceFormDialog,
+  FormActions,
+  WorkspaceFormPanel,
   stackedTableClass,
 } from "./workspace-ui";
 import { usePagedList } from "./use-paged-list";
+import { useWorkspaceUrlState } from "./use-workspace-url-state";
 import type { WorkspaceIntent } from "./workspace-routes";
 
 interface DocumentSummary {
@@ -101,7 +103,14 @@ export function DocumentsSection({
   projectId?: string;
 }) {
   const [error, setError] = useState("");
-  const [status, setStatus] = useState<WorkspaceDocumentStatus | "">("");
+  // Issue #907 F11 — the status filter is URL state, not a mount-time value.
+  const [statusParam, setStatusParam] = useWorkspaceUrlState("status", "");
+  const status: WorkspaceDocumentStatus | "" = (DOCUMENT_STATUSES as readonly string[]).includes(
+    statusParam,
+  )
+    ? (statusParam as WorkspaceDocumentStatus)
+    : "";
+  const setStatus = (next: WorkspaceDocumentStatus | "") => setStatusParam(next);
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<DocumentRow | null>(null);
   const [creating, setCreating] = useState(false);
@@ -332,6 +341,8 @@ function DocumentDialog({
   const [tags, setTags] = useState(document?.tags.join("، ") ?? "");
   const [contracts, setContracts] = useState<Array<{ id: string; title: string }>>([]);
   const [saving, setSaving] = useState(false);
+  // Issue #907 F09 — the reason a save failed is shown in the open panel.
+  const [formError, setFormError] = useState("");
 
   // The Media Library is the file store; this dialog only references what is
   // already uploaded (the id/name list comes with the shared lookups) rather
@@ -348,6 +359,7 @@ function DocumentDialog({
 
   async function submit() {
     if (!title.trim() || saving) return;
+    setFormError("");
     setSaving(true);
     const payload = {
       title,
@@ -367,7 +379,11 @@ function DocumentDialog({
       : await api("/api/workspace/documents", { method: "POST", body: JSON.stringify(payload) });
     setSaving(false);
     if (ok) onSaved();
-    else onError(workspaceError((data as unknown as { error?: string }).error));
+    else {
+      const message = workspaceError((data as unknown as { error?: string }).error);
+      setFormError(message);
+      onError(message);
+    }
   }
 
   /**
@@ -394,12 +410,21 @@ function DocumentDialog({
     });
     setSaving(false);
     if (ok) onSaved();
-    else onError(workspaceError((data as unknown as { error?: string }).error));
+    else {
+      const message = workspaceError((data as unknown as { error?: string }).error);
+      setFormError(message);
+      onError(message);
+    }
   }
 
   return (
-    <WorkspaceFormDialog title={document ? "ویرایش سند" : "ثبت سند"} width="2xl" onClose={onClose}>
+    <WorkspaceFormPanel title={document ? "ویرایش سند" : "ثبت سند"} width="2xl" onClose={onClose}>
       <div className="grid gap-3 p-4 sm:grid-cols-2">
+        {formError ? (
+          <div className="sm:col-span-2" role="alert">
+            <ErrorBox>{formError}</ErrorBox>
+          </div>
+        ) : null}
         <div className="sm:col-span-2">
           <Field label="عنوان سند">
             <input
@@ -418,6 +443,8 @@ function DocumentDialog({
             options={media.map((m) => ({ id: m.id, label: m.fileName }))}
             placeholder="— بدون فایل —"
             hint="بارگذاری فایل در بخش «رسانه» انجام می‌شود."
+            searchable
+            searchPlaceholder="جست‌وجوی فایل…"
           />
           {mediaAssetId ? (
             <a
@@ -465,6 +492,8 @@ function DocumentDialog({
           value={partyId}
           onChange={setPartyId}
           options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+          searchable
+          searchPlaceholder="جست‌وجوی طرف حساب…"
         />
         <Field label="برچسب‌ها" hint="با «،» جدا کنید">
           <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
@@ -479,7 +508,7 @@ function DocumentDialog({
           </Field>
         </div>
       </div>
-      <div className="flex flex-wrap justify-end gap-2 border-t border-border/80 p-4">
+      <FormActions>
         <SecondaryButton onClick={onClose}>بستن</SecondaryButton>
         {document && canManage ? (
           <SecondaryButton onClick={saveAsNewVersion} disabled={saving}>
@@ -491,7 +520,7 @@ function DocumentDialog({
             {saving ? "در حال ذخیره" : "ذخیره"}
           </PrimaryButton>
         ) : null}
-      </div>
-    </WorkspaceFormDialog>
+      </FormActions>
+    </WorkspaceFormPanel>
   );
 }

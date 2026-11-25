@@ -51,6 +51,11 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     // people/parties/media queries are gated, the role list and the cockpit are
     // not, and the projects list is the caller's own projects either way.
     const pickers = owner.access?.canManage === true;
+    // Issue #907 F10 — a member who may record contracts but not administer the
+    // workspace saw an empty «طرف قرارداد» picker: the whole set was gated on
+    // `workspace.manage`. The party picker answers to contract management too,
+    // because naming the counterparty is part of recording the contract.
+    const partyPickers = pickers || owner.access?.canManageContracts === true;
     const none = { rows: [] as never[] };
     const [members, parties, projects, media, participantRoles] = await Promise.all([
       pickers
@@ -61,7 +66,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
             [owner.businessId],
           )
         : none,
-      pickers
+      partyPickers
         ? query<{ id: string; name: string }>(
             `SELECT id, name FROM parties
               WHERE business_id = $1 AND is_active AND merged_into_id IS NULL

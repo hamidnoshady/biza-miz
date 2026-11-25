@@ -278,7 +278,11 @@ export function ProjectDetail({ projectId, canRecordVendorCost = false, canPickV
       {error ? <ErrorBox>{error}</ErrorBox> : null}
 
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {/* Issue #907 F13 — the cockpit names the project it belongs to. The
+              page heading is the shared «پروندهٔ پروژه»; without this line two
+              open tabs of two projects were indistinguishable. */}
+          <h2 className="w-full truncate text-lg font-semibold sm:w-auto">{project.name}</h2>
           <ProjectStatusBadge status={project.status} />
           <PriorityBadge priority={project.priority} />
           {role ? (

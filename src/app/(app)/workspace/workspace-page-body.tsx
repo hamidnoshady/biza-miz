@@ -51,17 +51,22 @@ export async function WorkspacePageBody({ section }: { section?: WorkspaceSectio
 
   return (
     <PageShell className="max-w-[1500px]">
+      {/*
+        Issue #907 F13 — the heading names the section that is actually open.
+        Every section used to say «میز کار من», so the page title never told the
+        reader where they were; the module name stays as a quiet qualifier. The
+        long shared subtitle is gone: it repeated the same sentence on all ten
+        screens and, on a phone, pushed the section's own description off the
+        first screen.
+      */}
       <PageHeader
-        title="میز کار من"
-        description={
-          <>
-            {WORKSPACE_SECTION_META[activeSection].description}
-            <span className="hidden sm:inline">
-              {" "}
-              پروژه‌ها، وظایف، اسناد و قراردادهای اجرایی، به‌هم‌پیوسته با مشتریان و حسابداری.
-            </span>
-          </>
+        title={
+          <span className="flex flex-wrap items-baseline gap-x-2">
+            {WORKSPACE_SECTION_META[activeSection].label}
+            <span className="text-sm font-normal text-muted-foreground">میز کار من</span>
+          </span>
         }
+        description={WORKSPACE_SECTION_META[activeSection].description}
         actions={<KnowledgeHelpButton section="projects" />}
       />
       <WorkspaceCommandBar permissions={permissions} section={activeSection} />

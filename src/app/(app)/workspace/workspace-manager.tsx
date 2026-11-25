@@ -13,6 +13,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { PERMISSIONS } from "@/lib/permissions";
+import { ErrorBox } from "@/app/dashboard/ui";
 import { useWorkspaceLookups } from "./use-workspace-lookups";
 import { type WorkspaceIntent, type WorkspaceSection } from "./workspace-routes";
 import { OverviewSection } from "./overview-section";
@@ -80,6 +81,9 @@ export function WorkspaceManager({
 
   return (
     <div className="space-y-6">
+      {/* Issue #907 F10 — a failed picker read is said out loud instead of
+          leaving every «انتخاب کنید» list mysteriously empty. */}
+      {lookups.error ? <ErrorBox>{lookups.error}</ErrorBox> : null}
       {activeSection === "overview" ? <OverviewSection /> : null}
       {activeSection === "projects" ? (
         <ProjectsSection lookups={lookups} canManage={canManage} {...create} />
