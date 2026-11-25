@@ -30,6 +30,8 @@ export const WIZARD_STEPS = [
   "costing",
   "tax",
   "users",
+  // Legacy "menu" remains in the vocabulary for old progress markers and
+  // existing /api/setup/menu clients, but is no longer a wizard page.
   "menu",
   "hardware",
   "backup",
@@ -154,6 +156,9 @@ export function setupShapeForIndustry(industry: Industry): SetupShape {
 export function wizardStepsForIndustry(industry: Industry): WizardStep[] {
   const shape = setupShapeForIndustry(industry);
   return WIZARD_STEPS.filter((step) => {
+    // #1580: the menu editor lives inside the single optional import step.
+    // Keep the legacy id in WIZARD_STEPS for saved markers/API compatibility.
+    if (step === "menu") return false;
     if (AEC_ONLY_STEPS.includes(step)) return shape === "aec";
     if (FOOD_SERVICE_ONLY_STEPS.includes(step)) return shape === "food_service";
     return true;
