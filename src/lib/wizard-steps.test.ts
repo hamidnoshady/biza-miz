@@ -35,7 +35,6 @@ const FNB_ORDER = [
   "costing",
   "tax",
   "users",
-  "menu",
   "hardware",
   "backup",
   "opening",
@@ -72,7 +71,7 @@ describe("wizardStepsForIndustry", () => {
     // F&B does not walk AEC's operating-profile step: the two shapes differ by
     // exactly that one step in this direction.
     expect(wizardStepsForIndustry("food_service")).toEqual(
-      WIZARD_STEPS.filter((step) => step !== "aec_profile"),
+      WIZARD_STEPS.filter((step) => step !== "aec_profile" && step !== "menu"),
     );
   });
 
@@ -167,6 +166,7 @@ describe("wizardStepsForIndustry", () => {
       expect(requiredStepsForIndustry(industry), industry).not.toContain("import");
     }
     expect(OPTIONAL_STEPS).toContain("import");
+    expect(wizardStepsForIndustry("food_service")).not.toContain("menu");
   });
 
   it("derives required steps as everything that is not optional", () => {
@@ -181,7 +181,6 @@ describe("wizardStepsForIndustry", () => {
       "accounts",
       "costing",
       "tax",
-      "menu",
     ]);
     expect(requiredStepsForIndustry("jewelry")).toEqual(["business", "accounts", "tax"]);
     // AEC's own step is optional too: skipping it keeps the default operating
@@ -216,7 +215,7 @@ describe("wizardStepsForIndustry", () => {
 
 describe("WIZARD_STEPS", () => {
   it("stays in one canonical order with no duplicates", () => {
-    expect(WIZARD_STEPS).toEqual(ALL_STEPS);
+    expect(WIZARD_STEPS.filter((step) => step !== "menu")).toEqual(ALL_STEPS);
     expect(new Set(WIZARD_STEPS).size).toBe(WIZARD_STEPS.length);
   });
 });
