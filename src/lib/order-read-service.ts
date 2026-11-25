@@ -207,6 +207,14 @@ export interface OrderDetailItem extends Record<string, unknown> {
   created_at: Date;
   /** Exact kitchen send time, used to label incremental print rounds. */
   sent_to_kitchen_at?: Date | string | null;
+  /**
+   * The quantity a customer return may draw against (#1567). Retail-invoice
+   * lines store `quantity = 1` and keep the real count in
+   * `retail_snapshot.quantity`; this resolves the same effective quantity the
+   * return service and its DB trigger enforce. Equals `quantity` for every
+   * line without a snapshot.
+   */
+  returnable_quantity?: string | null;
 }
 
 export interface OrderDetailModifier extends Record<string, unknown> {
@@ -249,7 +257,10 @@ export async function getOrderDetail(locationId: string, id: string): Promise<Or
 
   const [{ rows: items }, { rows: modifiers }, { rows: payments }] = await Promise.all([
     query<OrderDetailItem>(
-      "SELECT id, menu_item_id, name_snapshot, unit_price, quantity, status, note, void_reason, created_at, sent_to_kitchen_at FROM order_items WHERE order_id = $1 ORDER BY created_at",
+      "SELECT id, menu_item_id, name_snapshot, unit_price, quantity, status, note, void_reason, created_at, sent_to_kitchen_at, " +
+        "(CASE WHEN jsonb_typeof(retail_snapshot -> 'quantity') = 'string' AND (retail_snapshot ->> 'quantity') ~ '^[0-9]+(\\.[0-9]+)?$' " +
+        "THEN (retail_snapshot ->> 'quantity')::numeric ELSE quantity::numeric END)::text AS returnable_quantity " +
+        "FROM order_items WHERE order_id = $1 ORDER BY created_at",
       [id],
     ),
     query<OrderDetailModifier>(
