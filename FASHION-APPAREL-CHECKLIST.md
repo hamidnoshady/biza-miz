@@ -68,34 +68,38 @@ Phase-2 evidence: scoped `tsc` (14 files, `tsconfig.fashion-check.json`) exit 0 
 - **Stale `item_stock.total_value_rial` (all retail trades, pre-existing on main).** Non-batch writers change `item_stock.quantity` without the carrying value: sales (`accessories-service`, `trade-goods-service`, `cosmetics-service`, `retail-online-sale-service`), `shipItemTransfer`, supplier returns, void/reversal restocks and the new customer-return restock (which mirrors the void pattern). The warehouse **issue** document values non-batch relief as `total_value_rial × qty / quantity`, so after any sale or transfer it over-relieves. Repro: receive 10 @ 50,000 → sell 4 → issue 1 damaged → relieved **83,333** (not 50,000); 5 on hand worth 250,000 but GL 1374 = 216,667. Needs one owner-approved fix across the item-stock writers.
 - **Product-form opening quantity writes stock with no journal entry.** `createProductRecord` → `writeOpeningValues` → `receiveStock` puts quantity on `item_stock` without posting, so inventory exists off the books; conflicts with the epic's "product creation alone does not silently post stock". Shared across retail trades and UI-visible — needs a product decision (post an opening-balance entry, or route through a receipt).
 - **Sell-through by collection uses current tags.** `merchandising-service.sellThroughByCollection` joins live `items.collection/season`, so re-tagging moves past sales between collections in that report (posted facts are untouched). Phase-5 item.
+- **Trade sales reports ignore customer returns.** `variantSalesAnalysis` (variant_sales / brand_sales) and `sellThroughByCollection` read only `<trade>.sale_revenue` / `sale_cogs` events (+ online lines). Repro (fashion): sell 3 M @100,000 (cost 50,000), return 1 → report still says qty 3, revenue 300,000, COGS 150,000, margin 150,000; ledger says 200,000 / 100,000 / 100,000. Shared report SQL for every trade-goods trade.
+- **Markdown write-down is measured at retail, not cost.** `merchandising-service.applyMarkdown` credits inventory `quantity × (oldPrice − newPrice)`. E.g. cost 50,000, price 100,000 → 70,000 on 5 units writes off 150,000 although NRV is still above cost (no write-down due); a deep cut can push the inventory account below the stock's cost. Shared accessories/cosmetics/fashion accounting — needs Hamid's review.
+- **Connector payload:** `sanitizeProductPatch` bounds description length but does not refuse an inline `data:` (base64) URI inside it — the epic's lightweight-payload rule says media must travel as URLs.
+- **Catalogue import is single-axis.** A size × colour grid cannot be imported as two typed attributes (see 4.3).
 - Earlier: `trade-reports-service.ts` `SALE_EVENT_PREFIX.tools_fittings="tools"` vs emitted `tools_fittings.sale_revenue`.
 
-## Phase 4 — Omnichannel (P1)
+## Phase 4 — Omnichannel (P1) — verified except 4.3 (single-axis import)
 
 | # | Requirement | Code locations | Tests | Status |
 |---|---|---|---|---|
-| 4.1 | Woo/Eshobe parent-variant mapping for fashion | `retail-account-codes.ts` entry (done) + sync services (family-driven) | sync tests | [~] accounts wired; scenario tests pending |
-| 4.2 | Lightweight connector payload rule | existing outbox design (family-driven) | `printing/connector-payload.test.ts` exists | [ ] audit |
-| 4.3 | Import templates (size×color grid) via #1235/Data Transfer | data catalogue (auto via product-workspace set) | data tests | [~] eligibility auto; fashion template pending |
-| 4.4 | Online order import/returns/conflict/idempotency | existing ingest engines | — | [ ] verify |
+| 4.1 | Woo/Eshobe parent-variant mapping for fashion | canonical `integrations/sync-service.ts` (family-driven via `isRetailCatalogueIndustry`), `integration_mappings`, `outbox-policy.effectivePushSwitches` (field ownership) | `integration/fashion-omnichannel.integration.test.ts` 4.1: a سایز × رنگ variable product → 1 non-sellable `variant_parent` + 6 sellable `variant_child` SKUs, each with BOTH typed attributes, unique combinations, parent link; re-sync updates in place (no duplicate/orphan rows); price ownership explicit — store price applies only on a store-owned connection | [x] verified |
+| 4.2 | Lightweight connector payload rule | `woo-ops-service.sanitizeProductPatch` whitelist (`PRODUCT_UPDATE_FIELDS`), description bounds (`product-content.ts` 1,000 / 20,000), outbox merge per remote id; images travel as WordPress media URLs, never in outbox rows | `fashion-omnichannel` 4.2: `images` (base64), `meta_data` blob and `type` dropped; over-long description refused; two edits → one merged row `{regular_price, stock_quantity, __parentRemoteId}` < 200 bytes | [x] verified for fashion. Gap reported (see *Noticed*): an inline `data:` URI inside a ≤20,000-char description is not refused |
+| 4.3 | Import templates (size×color grid) via #1235/Data Transfer | reviewed catalogue import `data-transfer/catalogue-{profile,plan,service}.ts`, `/api/data/catalogue` (fashion eligible via `isProductWorkspaceIndustry`) | — | [~] fashion can import styles + variants on **one** axis per run (`parent_sku` / `parent_title` / `option` + run `axis`). A two-axis size×colour grid lands as one combined attribute («M / مشکی»), not typed سایز + رنگ. Extending the shared importer (second option column, plan/service/route/UI) is a cross-trade change → follow-up for decision |
+| 4.4 | Online order import/returns/conflict/idempotency | canonical `webhook-ingest-service.ts` (inbox unique delivery id + order mapping + advisory locks), `ingestRetailRefund`, cancellation stock-only path, `RETAIL_ACCOUNT_CODES.fashion_apparel` | `fashion-omnichannel` 4.4: order for M/مشکی relieves exactly that SKU (siblings untouched), posts 4584 −1,800,000 / 5184 800,000 / 1374 −800,000; same delivery retried + order re-sent → 1 order, 1 COGS entry; partial refund (restock) → +1 on the same SKU and COGS reversed 400,000, re-delivered refund ignored; cancellation restores 3 units once; ledger balanced | [x] verified |
 
-## Phase 5 — Retail intelligence (P1)
+## Phase 5 — Retail intelligence (P1) — verified, with reported report/markdown gaps
 
 | # | Requirement | Code locations | Tests | Status |
 |---|---|---|---|---|
-| 5.1 | Collections/seasons/clearance/category-variant discounts | merchandising + promotions (shared) | — | [ ] |
-| 5.2 | Replenishment/aging/sell-through by size-color, margins on posted COGS | `retail-stock-service`, `merchandising-service`, `trade-reports-service` | — | [~] maps wired; fashion runs via 1.10 |
+| 5.1 | Collections/seasons/clearance/category-variant discounts | `item-brands-service.updateItemProfile` (collection/season), `merchandising-service` (`sellThroughByCollection`, `listMarkdownCandidates`, `applyMarkdown`), `/api/merchandising/*` (fashion wired in Phase 1), POS line discounts | `integration/fashion-intelligence.integration.test.ts` 5.1: sell-through grouped by collection/season off `fashion_apparel.sale_revenue`, branch-scoped; slow XL listed as markdown candidate (parent never), markdown posts Dr 5170 / Cr 1374 balanced | [x] verified, with two reported gaps: markdown write-down amount uses retail price, not cost (shared, accounting review); sell-through/variant reports ignore returns and use current tags |
+| 5.2 | Replenishment/aging/sell-through by size-color, margins on posted COGS | `industry-reports-service.variantSalesAnalysis`, `retail-stock-service` `lowStockReport` / `deadStockReport` via `trade-reports-service` (`SALE_EVENT_PREFIX.fashion_apparel`) | `fashion-intelligence` 5.2: per size/colour qty, net revenue after discount, COGS and margin; report COGS == ledger 5184; dead stock (90-day rule) values never-sold S at cost 250,000; low stock lists sold-out M; parent never appears | [x] verified for sales; returns not netted (see *Noticed*) |
 | 5.3 | CRM/loyalty/messaging reuse | core modules (in profile) | — | [x] inherited |
-| 5.4 | Branch performance/profitability reports | shared reports (auto) | `reports.test.ts` | [~] |
+| 5.4 | Branch performance/profitability reports | same trade reports, branch-scoped by `location_id` | `fashion-intelligence` 5.4: main and branch each see only their own sales/stock (variant sales, dead/low stock, sell-through) | [x] verified |
 
-## Phase 6 — Specialized operations (P2)
+## Phase 6 — Specialized operations (P2) — not started; needs design decisions
 
 | # | Requirement | Status |
 |---|---|---|
-| 6.1 | Tailoring: measurements (privacy), fittings, custom orders, job progress | [ ] |
-| 6.2 | Garment production: materials, BOM, cut/sew stages, WIP, costing | [ ] |
-| 6.3 | Wholesale size packs, consignment, subcontractors | [ ] |
-| 6.4 | Advisory AI merchandising only (no autonomous postings) | [ ] |
+| 6.1 | Tailoring: measurements (privacy), fittings, custom orders, job progress | [ ] not started — new domain (personal measurement data needs a privacy/retention design). Nearest reusable engines: `repairs-service` (job lifecycle), CRM parties. Needs product design + its own issue |
+| 6.2 | Garment production: materials, BOM, cut/sew stages, WIP, costing | [ ] not started — reuse candidate `production-service` (formulas, runs, reversal, exact costing; ledger posts are `always_approve` in MCP). Cut/sew stages and WIP accounts are not modelled there yet → design decision |
+| 6.3 | Wholesale size packs, consignment, subcontractors | [ ] not started — `consignment-service` today covers `tracking: 'weight'` (gold) items only; size packs (pre-packs as a parent → child ratio) have no engine. Needs design |
+| 6.4 | Advisory AI merchandising only (no autonomous postings) | [~] fashion AI lanes have **no** `autopilotCategory` (never run by an unattended tick); markdown/sell-through are read/advisory routes; MCP `fashion_apparel.item.sell` is `risk: low, approval: mode` — identical to the other trade-goods sells, so on an `apply`-mode MCP connection a sale posts without the approval queue. Whether fashion should step up to `always_approve` is Hamid's call (AI rules = high-risk area) |
 
 ## Phase 7 — Final verification
 
