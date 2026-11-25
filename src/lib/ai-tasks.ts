@@ -103,6 +103,13 @@ export function resolveTenantTaskFeatures(
   options?: {
     industry?: Industry | string | null;
     usableApps?: Partial<Record<"accounting" | "crm" | "growth" | "website", boolean>> | null;
+    /**
+     * Issue #1110 — the resolved Workspace availability (industry + activation +
+     * deployment + permission). Absent means "not resolved" and preserves the
+     * old feature-flag-only behaviour; `false` removes every Workspace task,
+     * focus and suggestion.
+     */
+    workspaceAvailable?: boolean;
   },
 ): Partial<Record<AiTaskFeatureKey, boolean>> {
   const raw = rawFeatures ?? {};
@@ -139,7 +146,7 @@ export function resolveTenantTaskFeatures(
     growth: raw.growth !== false && growthAppUsable,
     website: raw.website !== false && websiteAppUsable,
     integrations: raw.integrations !== false && websiteAppUsable,
-    workspace: raw.workspace !== false,
+    workspace: options?.workspaceAvailable !== false && raw.workspace !== false,
   };
 }
 

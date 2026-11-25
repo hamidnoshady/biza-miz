@@ -129,6 +129,12 @@ beforeAll(async () => {
         [id, planKey],
       );
     }
+    // Issue #1110 — `otherBusinessId` activates My Workspace below, so it must
+    // be a project-based trade; the default fixture industry is food_service.
+    await db.query(
+      `UPDATE businesses SET industry = 'architecture_construction' WHERE id = $1`,
+      [otherBusinessId],
+    );
     await db.query(
       `INSERT INTO billing_plan_meter_allowances
          (plan_key, meter_key, included_quantity, overage_enabled, reset_period)

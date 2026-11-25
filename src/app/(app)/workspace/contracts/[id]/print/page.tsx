@@ -2,6 +2,7 @@ import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
+import { requireWorkspacePageAccess } from "@/lib/workspace-page-access";
 import { PageShell } from "@/app/dashboard/page-chrome";
 import { ContractDocumentSheet } from "@/components/contracts/contract-document-sheet";
 import {
@@ -38,6 +39,7 @@ export default async function ContractPrintPage({
   if (!session) redirect("/login");
   const member = await memberAccessFor(session);
   if (!member?.isActive) redirect("/dashboard");
+  await requireWorkspacePageAccess(session.businessId, member.permissions);
   if (!member.permissions.has(PERMISSIONS.workspaceView)) redirect("/dashboard");
 
   const owner = {

@@ -87,10 +87,11 @@ export const MODULE_KEYS = [
   // Phase 35 — module keys for the app ecosystem and the phases that build on
   // it. `crm` (Phase 36), `website` (Phase 36b/reversal) and `messaging`
   // (Phase 37's SMS/email campaigns, /growth/messaging + /api/messaging) are
-  // wired into `CORE_MODULES` below. There is deliberately no `workspace` key: the ecosystem
-  // shell stopped being a gated module when its flag retired — the chat home
-  // and the rail are the product's one shell now, for every trade, so there
-  // is nothing left for such a key to gate.
+  // wired into `CORE_MODULES` below. There is deliberately no `workspace` key:
+  // the ecosystem shell stopped being a gated module when its flag retired.
+  // My Workspace is neither an app key nor a module; issue #1110 decides it
+  // from the business type (plus activation, deployment and permission) in
+  // `workspace-eligibility.ts` / `workspace-access.ts`.
   "crm",
   "website",
   "messaging",

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { getKbArticleBySlug } from "@/lib/knowledge-service";
+import { workspaceAccessFor } from "@/lib/workspace-access";
+import { isWorkspaceKnowledgeSection } from "@/lib/workspace-eligibility";
 
 interface Ctx {
   params: Promise<{ slug: string }>;
@@ -12,7 +14,7 @@ interface Ctx {
  * video, images and code blocks.
  */
 export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
-  const { error } = await requireMember();
+  const { session, membership, error } = await requireMember();
   if (error) return error;
 
   const { slug } = await ctx.params;
@@ -24,6 +26,14 @@ export const GET = withTenantScope(async (_request: NextRequest, ctx: Ctx) => {
   }
   const article = await getKbArticleBySlug(decoded);
   if (!article) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+  // Issue #1110 — a My Workspace guide is not disclosed to a business that
+  // does not have the feature, even by a direct slug.
+  if (
+    article.sectionKeys.some(isWorkspaceKnowledgeSection) &&
+    !(await workspaceAccessFor(session.businessId, membership.permissions)).available
+  ) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
   return NextResponse.json({ article });

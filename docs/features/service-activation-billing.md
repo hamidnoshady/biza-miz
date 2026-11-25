@@ -32,7 +32,11 @@ Deliberately **not** services:
 - the website app's two managers (Eshobe CMS and WordPress/Woo) — they are one
   app, one switch, one tariff;
 - the My Workspace shell, navigation, billing, account/security/settings,
-  customer export and login — those are never sold or hidden by this layer;
+  customer export and login — those are never sold or hidden by *this* layer.
+  (Issue #1110 is a separate axis: a business type that does not have My
+  Workspace at all does not get the shell either. See
+  `src/lib/workspace-eligibility.ts` and `src/lib/workspace-access.ts`; the
+  activation state still only governs an otherwise-eligible tenant.)
 - the AI chat home. Interactive assistant turns stay token/credit metered exactly
   as before; only *background-enabled* agents/routines carry an availability
   tariff, and a suggestion card that merely opens a chat turn never does.
@@ -167,7 +171,8 @@ workers, tools, scheduler and pages", not merely displayed. The app API half liv
 `app-gate-service.ts` (one indexed read), called from the shared guard chain in
 `src/lib/auth.ts` — right after app availability, alongside feature and module
 checks. Workspace routes are outside that app-path registry, so their shared
-`workspaceOwner` guard receives each request and gates mutations by capability
+`workspaceOwner` guard first applies issue #1110's business-type/service/
+deployment/permission decision and then gates mutations by capability
 (`documents` or `projects`). Data-transfer imports are likewise mapped from the
 entity registry to their owning service; the queue leaves disabled-service jobs
 queued and continues with other eligible work. Holoo outbound sends/pulls,

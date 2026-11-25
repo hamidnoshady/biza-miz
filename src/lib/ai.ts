@@ -18,6 +18,7 @@ import type { AutopilotCategory } from "./ai-autopilot";
 // time, so the two modules never form a runtime cycle.
 import type { AiRuntimeMode } from "./ai-runtime-modes";
 import { GENUI_SOURCE_IDS } from "./ai-genui";
+import { isWorkspaceAiActionEndpoint, isWorkspaceScopedReadTool } from "./ai-action-service";
 
 export type AiProvider = "litellm";
 
@@ -3706,6 +3707,16 @@ export interface PromptContext {
    * never gets it (its action list is its own).
    */
   projectScoped?: boolean;
+  /**
+   * Issue #1110 — whether «میز کار من» is available to this business and member.
+   *
+   * False (an ineligible industry, an inactive Workspace service, an
+   * unsupported deployment or a member without `workspace.view`) removes the
+   * Workspace/AEC prompt inventory, the project-scoped actions and the
+   * Workspace read tools. Omitted means "not resolved" and keeps the previous
+   * behaviour for platform/test callers; tenant callers always supply it.
+   */
+  workspaceAiAvailable?: boolean;
 }
 
 const WIZARD_STEP_LABELS: Record<string, string> = {
@@ -3871,11 +3882,23 @@ export function appContextLines(ctx: PromptContext): string[] {
       "برای سؤال‌هایی مثل «حساب‌هایم را بررسی کن»، «اشتباهی هست؟» یا «چه چیزی جا افتاده؟» حتماً run_accounting_review را صدا بزن و دقیقاً همان یافته‌ها را با درجهٔ اهمیت و پیشنهاد اصلاحشان گزارش کن. هرگز از خودت مورد اضافه نکن و هرگز نگو حسابی مشکل دارد مگر این ابزار گفته باشد.",
       "کاربر می‌تواند کارهای تکرارشونده را به «همکار هوشمند» بسپارد (مثلاً «هر شب با بستن شیفت، ماندهٔ نان را ضایعات بزن» یا «هر روز صبح حساب‌ها را بررسی کن»). با list_coworker_jobs می‌توانی کارهای فعلی و تعداد اجراهای منتظر تأیید را ببینی؛ برای ساختن کار جدید کاربر را به بخش «همکار هوشمند» در صفحهٔ هوش مصنوعی راهنمایی کن.",
       "برای پیام‌رسانی به مشتریان: با list_message_templates قالب‌ها و با list_message_campaigns وضعیت کمپین‌ها را می‌بینی. برای ساختن کمپین جدید، اول templateId را از list_message_templates و segmentId را از list_customer_segments بگیر، سپس propose_action از نوع messaging.campaign.create بساز؛ این کار فقط یک پیش‌نویس می‌سازد و هیچ پیامی نمی‌فرستد — ارسال را خود کاربر از صفحهٔ رشد انجام می‌دهد.",
+    );
+    if (ctx.workspaceAiAvailable === false) {
+      // Issue #1110 — an unavailable Workspace is invisible to the assistant:
+      // no feature inventory, no tool names, no project screens, no upsell.
+      lines.push(
+        "این کسب‌وکار «میز کار من» ندارد. هرگز «میز کار من»، پروژه‌های اجرایی، وظایف، اسناد، قراردادهای اجرایی یا تأییدهای آن را پیشنهاد نکن، لینک یا کارت نساز و ابزار آن را صدا نزن. اگر کاربر صریحاً دربارهٔ آن پرسید، کوتاه بگو این بخش برای این کسب‌وکار در دسترس نیست و گفت‌وگو را به کارهای دیگر همین کسب‌وکار برگردان. واژهٔ عمومی «پروژه» در گفت‌وگوی عادی ممنوع نیست؛ ممنوعیت دربارهٔ محصول «میز کار من» و صفحه‌ها و ابزارهای آن است.",
+      );
+    } else {
+      lines.push(
       "«میز کار من» جایی است که پروژه‌ها، وظایف، اسناد، قراردادهای اجرایی و تأییدها نگهداری می‌شوند. برای «وضعیت پروژهٔ فلان چیست» از get_workspace_project_status، برای «کارهای امروزِ من» از list_workspace_tasks با mine=true، برای «چه قراردادهایی ماه آینده منقضی می‌شوند» از list_expiring_contracts با withinDays=۳۰ و برای «چه چیزی منتظر تأیید من است» از list_workspace_approvals با mine=true استفاده کن. اگر چند پروژه هم‌نام بودند، ابزار فهرست نامزدها را برمی‌گرداند؛ حدس نزن و از کاربر بپرس کدام را می‌خواهد.",
       "تقسیم مسئولیت قراردادها را رعایت کن: قراردادهای اجرایی پروژه (پیمانکار، تأمین‌کننده، مشاور، پیمانکار جزء) در میز کار هستند و با list_expiring_contracts خوانده می‌شوند؛ قراردادهای رابطه‌ای با مشتری در پروندهٔ همان مشتری در CRM هستند. اگر کاربر دنبال قرارداد فروش یا خدماتِ یک مشتری بود، او را به پروندهٔ مشتری در CRM راهنمایی کن و نگو چنین قراردادی وجود ندارد.",
       "عدد هزینهٔ پروژه که get_workspace_project_status می‌دهد از اسناد حسابداری همان پروژه خوانده می‌شود، نه از برآورد؛ آن را به‌عنوان رقم قطعی دفتر گزارش کن و با بودجه مقایسه کن.",
       "در کسب‌وکارهای مهندسی عمران، معماری و پیمانکاری دوازده ابزار ویژه هم داری: برای «وضعیت مالی/تجاری پروژه» و «چقدر جلو یا عقب است» از get_aec_project_financial_health، برای «چه کاری عقب افتاده است» از list_delayed_project_activities، برای «برآمین در برابر هزینهٔ واقعی» یا «مغایرت متره» از get_boq_variance، برای «آخرین بازنگری نقشهٔ فلان رشته» یا «چه نقشه‌هایی پیش‌نویس مانده‌اند» از get_latest_drawing_revision، برای «RFIهای بی‌پاسخ این هفته» از list_pending_rfis با dueWithinDays، برای «چه سابمیتال‌هایی منتظر تأیید هستند» از list_pending_submittals، برای «چه چیزی در کارگاه باز است»، «نقص‌های عقب‌افتاده» یا «بازرسی‌های سررسیدشده» از list_site_issues (با kind یا severity یا overdueOnly)، برای «چه تغییرات و دستور کارهایی داریم» یا «چقدر تغییرات تأیید شده است» از list_change_orders (با status)، برای «صورت‌وضعیت‌ها چطور است» یا «چقدر گواهی شده است» از list_payment_certificates (با status) و برای «حاشیهٔ پروژه چقدر است»، «ریسک تجاری چیست» یا «چقدر از قرارداد مانده است» از list_project_commercial_risks استفاده کن؛ برای «چه تحویلی دیر شده»، «تأخیر تأمین» یا «چه سفارش خریدی معطل مانده» از list_procurement_delays استفاده کن؛ و برای «چه چیزی تا ماه بعد موعد دارد»، «نقاط عطف پیش رو» یا «چه فازی نزدیک پایان است» از list_upcoming_milestones (با withinDays). پیشرفت فیزیکی در این کسب‌وکارها دو عدد است — برنامه‌ای و گزارش‌شده — و اختلاف همین دو، عقب‌ماندگی واقعی را نشان می‌دهد؛ هر دو را بگو.",
       "در همین کسب‌وکارها هزینهٔ واقعی همیشه از حسابداری می‌آید. مبلغ برآمین یک عدد برنامه‌ای است و رقم واقعی یک سند مالی؛ آن دو را با هم مقایسه کن اما هرگز جای هم نگذار، و اگر برآمینی تأیید نشده باشد صریح بگو که عدد برآمین در دست نیست.",
+      );
+    }
+    lines.push(
       "برای افزودن مشتری یا تأمین‌کننده از party.customer.create یا party.supplier.create استفاده کن و فقط نام و اطلاعات تماس را پر کن؛ کد حسابداری، درصد مالیات و اطلاعات بانکی را نگذار. برای ثبت دریافت وجه از مشتری، اول با find_customers شناسهٔ مشتری را پیدا کن و سپس ar.receipt.record را با مبلغ ریالی و روش (نقد/بانک) پیشنهاد بده.",
       "برای هر تغییر در داده‌ها هرگز مستقیم اقدام نکن؛ فقط ابزار propose_action را با نوع مجاز و payload کامل صدا بزن. کاربر خودش با دکمهٔ تأیید آن را اجرا می‌کند (human-in-the-loop).",
       "قبل از پیشنهاد، اطلاعات لازم را با پرسیدن سؤال از کاربر کامل کن؛ فیلدها را با حدس‌های نامطمئن پر نکن.",
@@ -3944,7 +3967,14 @@ export function toolCatalogueLines(ctx: PromptContext): string[] {
           ctx.projectScoped && !ctx.agent
         ? PROJECT_ACTION_TYPES
         : BASE_ACTION_TYPES;
-  const scopedTypes = ctx.mode === "wizard" ? wizardActionTypesForIndustry(types, ctx.industry) : types;
+  const scopedTypes = (ctx.mode === "wizard" ? wizardActionTypesForIndustry(types, ctx.industry) : types)
+    // Issue #1110 — an unavailable Workspace offers no project/task/document
+    // action in the propose catalogue either.
+    .filter(
+      (type) =>
+        ctx.workspaceAiAvailable !== false ||
+        !isWorkspaceAiActionEndpoint(ACTION_CATALOG[type].endpoint),
+    );
   if (scopedTypes.length > 0) {
     const catalog = scopedTypes
       .map((t) => `- ${t}: ${ACTION_CATALOG[t].label} — payload: ${ACTION_CATALOG[t].payloadHint}`)
@@ -4049,6 +4079,13 @@ export interface ToolDefinitionsOptions {
    * Ignored for a scoped custom agent (an agent's action list is its own).
    */
   projectScoped?: boolean;
+  /**
+   * Issue #1110 — false when «میز کار من» is unavailable (ineligible industry,
+   * inactive service, unsupported deployment or missing permission). Removes
+   * every Workspace/AEC read tool and every Workspace action from the
+   * catalogue the model may call. Omitted keeps the previous behaviour.
+   */
+  workspaceAiAvailable?: boolean;
 }
 
 export const KNOWLEDGE_TOOL_NAME = "search_business_knowledge";
@@ -4078,7 +4115,18 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
   // applied to the enum the model can choose from, so a hand-crafted response
   // naming a step this business does not walk is not even a legal value.
   const industryScoped = (types: ActionType[]): ActionType[] =>
-    mode === "wizard" ? wizardActionTypesForIndustry(types, opts.industry) : types;
+    (mode === "wizard" ? wizardActionTypesForIndustry(types, opts.industry) : types).filter(
+      (type) =>
+        opts.workspaceAiAvailable !== false ||
+        !isWorkspaceAiActionEndpoint(ACTION_CATALOG[type].endpoint),
+    );
+  // Issue #1110 — the read catalogue loses the Workspace and AEC reads when the
+  // area is unavailable. Filtering here is an affordance, not the authorization:
+  // the executor re-checks on every call (see `runWorkspaceReadTool`'s caller).
+  const tenantReadTools = (tools: OpenAiTool[]): OpenAiTool[] =>
+    opts.workspaceAiAvailable === false
+      ? tools.filter((tool) => !isWorkspaceScopedReadTool(tool.function.name))
+      : tools;
   const readTools: OpenAiTool[] = [
     {
       type: "function",
@@ -6052,8 +6100,8 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
   });
   // The default enum excludes project-scoped actions (they need an ambient
   // project the plain turn does not have); a project turn adds them back below.
-  const proposeTool = proposeToolFor(BASE_ACTION_TYPES);
-  const projectProposeTool = proposeToolFor(PROJECT_ACTION_TYPES);
+  const proposeTool = proposeToolFor(industryScoped(BASE_ACTION_TYPES));
+  const projectProposeTool = proposeToolFor(industryScoped(PROJECT_ACTION_TYPES));
 
   // Phase E — the structured input protocol. When the assistant needs the user
   // to CHOOSE or FILL IN something before it can continue, it asks with a typed
@@ -6334,9 +6382,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     return [readTools[0], proposeToolFor(industryScoped(BASE_ACTION_TYPES)), requestInputTool];
   }
   if (mode === "dashboard") {
-    const base = opts.hasAttachment
-      ? [...readTools, receiptTool]
-      : [...readTools];
+    const base = tenantReadTools(opts.hasAttachment ? [...readTools, receiptTool] : [...readTools]);
     if (opts.retrieval) base.push(knowledgeTool());
     if (opts.browserNavigation) base.push(...browserNavigationTools);
 
@@ -6363,7 +6409,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
     // project-scoped actions (the model still never names the project id).
     if (opts.actionTypes?.length === 0) return [...base, requestInputTool];
     const propose = opts.actionTypes
-      ? proposeToolFor(opts.actionTypes)
+      ? proposeToolFor(industryScoped(opts.actionTypes))
       : opts.projectScoped
         ? projectProposeTool
         : proposeTool;
@@ -6372,7 +6418,7 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
   if (mode === "floor") return floorReadTools;
   if (mode === "proactive") return [];
   if (mode === "autopilot") {
-    const types = opts.actionTypes ?? [];
+    const types = industryScoped(opts.actionTypes ?? []);
     return types.length === 0 ? [] : [proposeToolFor(types)];
   }
   // Issue #984 — Support AI. Four fixed tools, ticket-scoped, served by the

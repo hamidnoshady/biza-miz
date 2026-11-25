@@ -5,6 +5,7 @@ import { pageTourCandidates, STUDIO_ONLY_PAGE_KEYS } from "@/lib/tour-baseline";
 import { publishedToursForPage } from "@/lib/tour-studio-service";
 import { tourForViewer, tourSummary } from "@/lib/tours";
 import { loadTourProgress, tourViewerFor } from "@/lib/tours-service";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 
 /**
  * The tours a member may start from the «آموزش» button of one page (issue
@@ -30,6 +31,13 @@ export const GET = withTenantScope(async (request: NextRequest) => {
 
   const page = knowledgePage((request.nextUrl.searchParams.get("page") ?? "").trim());
   if (!page) return NextResponse.json({ error: "unknown_page" }, { status: 400 });
+  // Issue #1110 — no Workspace tour for an unavailable Workspace.
+  if (
+    page.route.startsWith("/workspace") &&
+    !(await workspaceAccessFor(guard.session.businessId, guard.membership.permissions)).available
+  ) {
+    return NextResponse.json({ tours: [] });
+  }
 
   // A console lookup failure degrades to the code catalogue, exactly like the
   // article half of the modal: the button never breaks because the database is

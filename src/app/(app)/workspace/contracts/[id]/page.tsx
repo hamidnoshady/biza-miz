@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { memberAccessFor } from "@/lib/member-access";
 import { PERMISSIONS } from "@/lib/permissions";
+import { requireWorkspacePageAccess } from "@/lib/workspace-page-access";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { WorkspaceCommandBar } from "../../workspace-command-bar";
 import { ContractWorkspace } from "./contract-workspace";
@@ -28,6 +29,7 @@ export default async function ContractDetailPage({
 
   const member = await memberAccessFor(session);
   if (!member?.isActive) redirect("/dashboard");
+  await requireWorkspacePageAccess(session.businessId, member.permissions);
   if (!member.permissions.has(PERMISSIONS.workspaceView)) redirect("/dashboard");
 
   return (

@@ -38,6 +38,22 @@ vi.mock("../service-activation/app-gate-service", () => ({
   appServiceActivationState: mocks.appServiceActivationState,
   appServiceCommercialRestriction: mocks.appServiceCommercialRestriction,
 }));
+// Issue #1110 — the server resolves Workspace availability before building the
+// catalogue. These tests exercise the connector's read/write authorization, not
+// the business-type policy (which has its own unit suite), so the decision is
+// pinned to "unavailable" and the workspace tools stay out of the fixtures.
+vi.mock("../workspace-access", () => ({
+  workspaceAccessFor: vi.fn(async () => ({
+    available: false,
+    eligible: false,
+    serviceEnabled: true,
+    deploymentSupported: true,
+    permitted: false,
+    reason: "BUSINESS_TYPE_UNSUPPORTED",
+    industry: "food_service",
+    industryReason: "INDUSTRY_INELIGIBLE",
+  })),
+}));
 
 const AUTH: McpAuthentication = {
   connectionId: "connection-1",

@@ -34,6 +34,7 @@
  * Client-safe: imports types only, plus the industry list.
  */
 import { INDUSTRIES, hasSellableCatalogue, isRetailCatalogueIndustry, type Industry } from "./industries";
+import { WORKSPACE_ELIGIBLE_INDUSTRIES } from "./workspace-eligibility";
 import { hasCapability, hasModule, industryProfile } from "./industry-profile";
 import { KNOWLEDGE_PAGES } from "./knowledge-base";
 import { PRODUCT_WORKSPACE_INDUSTRIES } from "./product-workspace";
@@ -1349,7 +1350,9 @@ export const TOURS: readonly TourDefinition[] = [  {
     title: "از میز کار من تا مرکز آموزش",
     description:
       "نقشهٔ کوتاه پلتفرم: میز کار، برنامه‌های کسب‌وکار، تنظیمات و مرکز آموزش — و اینکه از کجا یادگیری را ادامه دهید.",
-    eligibility: {},
+    // Issue #1110 — this tour only exists for business types whose work is
+    // project-based. An ineligible trade is never offered it, anywhere.
+    eligibility: { industries: WORKSPACE_ELIGIBLE_INDUSTRIES },
     steps: [
       {
         id: "welcome",
@@ -3554,7 +3557,10 @@ export const TOURS: readonly TourDefinition[] = [  {
     route: "/workspace/projects",
     title: "پروندهٔ پروژه",
     description: "کارها، زمان و هزینهٔ پروژه در یک جا.",
-    eligibility: { permissions: [PERMISSIONS.workspaceView] },
+    eligibility: {
+      permissions: [PERMISSIONS.workspaceView],
+      industries: WORKSPACE_ELIGIBLE_INDUSTRIES,
+    },
     steps: [
       {
         id: "welcome",

@@ -8,6 +8,7 @@ import { memberAccessFor } from "@/lib/member-access";
 import { effectivePermissions, parseOverrides } from "@/lib/permissions";
 import { visibleSettingsTabs, type SettingsTabKey } from "@/lib/settings-tabs";
 import { settingsTabHref } from "@/lib/settings-routes";
+import { workspaceAccessFor } from "@/lib/workspace-access";
 import { KnowledgeHelpButton } from "@/app/dashboard/knowledge-help";
 import { PageHeader, PageShell } from "@/app/dashboard/page-chrome";
 import { SettingsManager } from "./settings-manager";
@@ -54,6 +55,12 @@ export async function SettingsPageBody({ section }: { section?: SettingsTabKey |
   ]);
   if (!member?.isActive) redirect("/dashboard");
   const industry = bizRows[0]?.industry ?? "food_service";
+  // Issue #1110 — settings sections that describe My Workspace (the project
+  // notification group; service activation via its own API) follow the same
+  // decision as the rail, so an ineligible business is not offered switches for
+  // a feature it does not have.
+  const workspaceAvailable = (await workspaceAccessFor(session.businessId, member.permissions))
+    .available;
 
   const tabs = visibleSettingsTabs(member.permissions, {
     role: member.role,
@@ -97,6 +104,7 @@ export async function SettingsPageBody({ section }: { section?: SettingsTabKey |
         industry={industry}
         role={member.role}
         permissions={[...member.permissions]}
+        workspaceAvailable={workspaceAvailable}
       />
     </PageShell>
   );
