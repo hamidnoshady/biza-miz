@@ -23,7 +23,8 @@ import {
   type AutopilotCategory,
   type AutopilotCategorySetting,
 } from "./ai-autopilot";
-import { AUTOPILOT_EXECUTORS, AUTOPILOT_REVERTERS, executorTargetLocation } from "./ai-autopilot-executors";
+import { AUTOPILOT_REVERTERS, executorTargetLocation } from "./ai-autopilot-executors";
+import { runAiExecutor } from "./ai-human-approval";
 import { autopilotAmountContext } from "./ai-amount-context";
 import { createAiActionAudit } from "./ai-action-audit";
 import { runAgentTurn, accruedUsageOf } from "./ai-service";
@@ -544,9 +545,14 @@ export async function applyOrDeferProposal(input: {
     return { outcome: "deferred", auditId, reasonCode: serviceGate.error, reasonFa };
   }
 
-  const executor = meta.executor ? AUTOPILOT_EXECUTORS[meta.executor] : null;
-  if (!executor) throw new Error("autopilot_executor_missing");
-  const result = await executor({ businessId, authorizedByUserId: authority.userId, operationId: auditId, payload: proposal.payload });
+  if (!meta.executor) throw new Error("autopilot_executor_missing");
+  const result = await runAiExecutor({
+    actionType: proposal.type,
+    businessId,
+    authorizedByUserId: authority.userId,
+    payload: proposal.payload,
+    auditId,
+  });
 
   await query(
     `UPDATE ai_action_audit

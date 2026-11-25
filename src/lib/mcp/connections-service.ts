@@ -27,6 +27,7 @@ import {
   type McpGrants,
 } from "./grants";
 import { mcpWriteRegistryEntry } from "./registry";
+import { aiApprovalPayloadHash } from "../ai-approval-hash";
 import { reconcileStaleMcpClaims } from "./write-service";
 
 export type McpConnectionOrigin = "token" | "oauth";
@@ -493,6 +494,13 @@ export interface McpPendingAction {
   /** Issue #883 step-up — the action's risk tier from the registry, so the
    * owner sees why an apply-mode connector still queued this one. */
   risk: "low" | "high";
+  /** GH #1567 F7 — hash of the stored payload; the approval sends it back so
+   * the human approves exactly what this list showed. */
+  payloadHash: string;
+  /** GH #1567 F7 — sale/refund/payment/posting/stock/purchase, or null. */
+  approvalClass: string | null;
+  /** GH #1567 F7 — after this the proposal lapses undecided. */
+  approvalExpiresAt: string | null;
   /** How long the row has sat un-decided, for the "stale" hint. */
   createdAt: string;
 }
@@ -515,9 +523,12 @@ export async function listMcpPendingActions(
     proposal_payload: Record<string, unknown>;
     prior_state: Record<string, unknown> | null;
     created_at: string;
+    approval_class: string | null;
+    approval_expires_at: string | null;
   }>(
     `SELECT a.id, a.mcp_connection_id, c.name AS connection_name, a.action_type,
-            a.action_title, a.action_summary, a.proposal_payload, a.prior_state, a.created_at
+            a.action_title, a.action_summary, a.proposal_payload, a.prior_state, a.created_at,
+            a.approval_class, a.approval_expires_at
        FROM ai_action_audit a
        LEFT JOIN mcp_connections c ON c.id = a.mcp_connection_id AND c.business_id = a.business_id
       WHERE a.business_id = $1 AND a.source = 'mcp' AND a.status = 'proposed'
@@ -536,6 +547,9 @@ export async function listMcpPendingActions(
       title: row.action_title,
       summary: row.action_summary,
       payload: row.proposal_payload ?? {},
+      payloadHash: aiApprovalPayloadHash(row.action_type, row.proposal_payload ?? {}),
+      approvalClass: row.approval_class,
+      approvalExpiresAt: row.approval_expires_at,
       priorState: row.prior_state ?? null,
       revertible: meta?.revertible ?? false,
       risk: mcpWriteRegistryEntry(row.action_type)?.risk ?? "low",

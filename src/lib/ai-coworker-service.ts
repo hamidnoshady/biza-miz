@@ -31,7 +31,9 @@ import {
   type AutopilotCategory,
   type AutopilotCategorySetting,
 } from "./ai-autopilot";
-import { AUTOPILOT_EXECUTORS, executorTargetLocation } from "./ai-autopilot-executors";
+import { executorTargetLocation } from "./ai-autopilot-executors";
+import { requiresHumanApproval } from "./ai-approval-policy";
+import { recordHumanApproval, runAiExecutor } from "./ai-human-approval";
 import { isDeferrableDenial, verifyUnattendedAuthority } from "./ai-unattended-authority";
 import { autopilotAmountContext } from "./ai-amount-context";
 import {
@@ -669,6 +671,11 @@ async function applyAction(input: {
   action: ProposedAction;
   authorizedBy: string | null;
   authorizedByName: string;
+  /**
+   * GH #1567 F7 — true only on the hub's approve click, where
+   * `authorizedBy` is the human who just said yes to this exact action.
+   */
+  humanApproved?: boolean;
 }): Promise<ApplyOutcome> {
   const meta = ACTION_CATALOG[input.action.type];
   const auditId = await createAiActionAudit({
@@ -684,13 +691,23 @@ async function applyAction(input: {
     [auditId, input.businessId, meta.autopilotCategory ?? null],
   );
 
-  const executor = meta.executor ? AUTOPILOT_EXECUTORS[meta.executor] : null;
-  if (!executor) {
+  if (!meta.executor) {
     await query(
       `UPDATE ai_action_audit SET status = 'failed', result = $3::jsonb WHERE id = $1 AND business_id = $2`,
       [auditId, input.businessId, JSON.stringify({ error: "coworker_executor_missing" })],
     );
     return { status: "failed", auditId, error: "coworker_executor_missing" };
+  }
+
+  // GH #1567 F7 — a coworker job never executes a financial/stock write on
+  // its own: the row stays 'proposed' for a human to approve in the hub.
+  const gated = requiresHumanApproval(input.action.type);
+  if (gated && !input.humanApproved) {
+    await query(
+      `UPDATE ai_action_audit SET deferred_reason = 'human_approval_required' WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
+      [auditId, input.businessId],
+    );
+    return { status: "pending", auditId, error: "human_approval_required" };
   }
 
   // Issue #812 §13 — the same central authority gate the autopilot path uses.
@@ -728,17 +745,45 @@ async function applyAction(input: {
     return { status: "pending", auditId, error: serviceGate.error };
   }
 
-  const result = await executor({
+  if (gated && !authority.userId) {
+    return { status: "failed", auditId, error: "human_approval_required" };
+  }
+  if (gated && authority.userId) {
+    // The approving human's click is recorded against this row's stamped
+    // payload, then spent exactly once by runAiExecutor below.
+    await query(
+      `UPDATE ai_action_audit SET status = 'processing' WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
+      [auditId, input.businessId],
+    );
+    const approval = await recordHumanApproval({
+      businessId: input.businessId,
+      auditId,
+      approverUserId: authority.userId,
+      presentedPayloadHash: null,
+      requirePresentedHash: false,
+    });
+    if (!approval.ok) {
+      await query(
+        `UPDATE ai_action_audit SET status = 'failed', result = $3::jsonb WHERE id = $1 AND business_id = $2`,
+        [auditId, input.businessId, JSON.stringify({ error: approval.error })],
+      );
+      return { status: "failed", auditId, error: approval.error };
+    }
+  }
+
+  const result = await runAiExecutor({
+    actionType: input.action.type,
     businessId: input.businessId,
     authorizedByUserId: authority.userId,
     payload: input.action.payload,
+    auditId,
   });
 
   await query(
     `UPDATE ai_action_audit
         SET status = $3, result = $4::jsonb, prior_state = $5::jsonb,
             applied_at = CASE WHEN $3 = 'applied' THEN now() ELSE applied_at END
-      WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
+      WHERE id = $1 AND business_id = $2 AND status IN ('proposed', 'processing')`,
     [
       auditId,
       input.businessId,
@@ -1257,6 +1302,7 @@ export async function decideCoworkerRun(input: {
         // they are the one saying yes to this specific write.
         authorizedBy: input.actorUserId,
         authorizedByName: actorName,
+        humanApproved: true,
       });
       await query(
         `UPDATE ai_coworker_run_actions

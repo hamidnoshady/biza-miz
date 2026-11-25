@@ -20,7 +20,7 @@ export const POST = withTenantScope(
     if (error) return error;
     const { id } = await context.params;
 
-    let body: { decision?: unknown };
+    let body: { decision?: unknown; payloadHash?: unknown };
     try {
       body = await request.json();
     } catch {
@@ -35,13 +35,25 @@ export const POST = withTenantScope(
       auditId: id,
       decision: body.decision,
       deciderUserId: session.sub,
+      // GH #1567 F7 — the hash of the payload the approver was shown.
+      presentedPayloadHash:
+        typeof body.payloadHash === "string" && /^[0-9a-f]{64}$/.test(body.payloadHash) ? body.payloadHash : null,
     });
     if (!result.ok) {
       // approver_forbidden: the decider's *current* permissions do not cover
       // the queued action's domain permission, so the row went back to the
       // queue for a privileged approver rather than being executed or lost.
       const status =
-        result.error === "not_found" ? 404 : result.error === "approver_forbidden" ? 403 : 400;
+        result.error === "not_found"
+          ? 404
+          : result.error === "approver_forbidden"
+            ? 403
+            : result.error === "approval_stale" ||
+                result.error === "approval_binding_required" ||
+                result.error === "approval_expired" ||
+                result.error === "approval_payload_mismatch"
+              ? 409
+              : 400;
       return NextResponse.json({ error: result.error }, { status });
     }
     return NextResponse.json(

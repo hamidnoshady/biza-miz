@@ -6,7 +6,9 @@ import {
   claimAiActionAudit,
   finishAiActionAudit,
   getAiActionAuditStatus,
+  releaseAiActionAudit,
 } from "@/lib/ai-action-audit";
+import { HUMAN_APPROVAL_REFUSAL_FA, recordHumanApproval } from "@/lib/ai-human-approval";
 import { PERMISSIONS } from "@/lib/permissions";
 import { aiConsentSessionKey, hasAiSessionConsent } from "@/lib/ai-session-consent";
 
@@ -24,7 +26,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const session = guard.session;
   const canManage = guard.membership.permissions.has(PERMISSIONS.aiManage);
 
-  const body = (await request.json().catch(() => null)) as { auditId?: unknown; approval?: unknown } | null;
+  const body = (await request.json().catch(() => null)) as { auditId?: unknown; approval?: unknown; payloadHash?: unknown } | null;
   const auditId = typeof body?.auditId === "string" ? body.auditId.trim() : "";
   if (!auditId || auditId.length > 100) {
     return NextResponse.json({ error: "bad_request", message: "شناسهٔ پیشنهاد معتبر نیست." }, { status: 400 });
@@ -63,6 +65,36 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       result: { reason: "permission_denied" },
     });
     return NextResponse.json({ error: "forbidden", message: "دسترسی لازم برای اجرای این پیشنهاد را ندارید." }, { status: 403 });
+  }
+
+  // GH #1567 F7 — this click IS the human approval of a financial/stock
+  // proposal (including ones an autopilot, automation or coworker job held
+  // back). Record it against the stored payload, refuse an expired proposal
+  // or a row whose payload no longer matches its stamp, and — when the card
+  // sent the hash it displayed — refuse a stale screen.
+  const approval = await recordHumanApproval({
+    businessId: session.businessId,
+    auditId,
+    approverUserId: session.sub,
+    presentedPayloadHash:
+      typeof body?.payloadHash === "string" && /^[0-9a-f]{64}$/.test(body.payloadHash) ? body.payloadHash : null,
+    requirePresentedHash: false,
+  });
+  if (!approval.ok) {
+    if (approval.error === "approval_stale" || approval.error === "approval_binding_required") {
+      await releaseAiActionAudit(session.businessId, auditId);
+    } else {
+      await finishAiActionAudit({
+        businessId: session.businessId,
+        id: auditId,
+        status: "failed",
+        result: { reason: approval.error },
+      });
+    }
+    return NextResponse.json(
+      { error: approval.error, message: HUMAN_APPROVAL_REFUSAL_FA[approval.error] },
+      { status: 409 },
+    );
   }
 
   const payload = claimed.payload && typeof claimed.payload === "object" && !Array.isArray(claimed.payload)

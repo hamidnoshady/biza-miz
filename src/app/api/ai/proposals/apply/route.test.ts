@@ -15,8 +15,14 @@ vi.mock("@/lib/auth", async (importOriginal) => {
 });
 vi.mock("@/lib/ai-action-audit", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/ai-action-audit")>();
-  return { ...actual, claimAiActionAudit: vi.fn(), finishAiActionAudit: vi.fn(), getAiActionAuditStatus: vi.fn() };
+  return { ...actual, claimAiActionAudit: vi.fn(), finishAiActionAudit: vi.fn(), getAiActionAuditStatus: vi.fn(), releaseAiActionAudit: vi.fn() };
 });
+
+vi.mock("@/lib/ai-human-approval", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/ai-human-approval")>();
+  return { ...actual, recordHumanApproval: vi.fn() };
+});
+import { recordHumanApproval } from "@/lib/ai-human-approval";
 
 const SESSION = { businessId: "biz-1", sub: "user-1" };
 
@@ -56,6 +62,7 @@ beforeEach(() => {
     error: null,
   } as never);
   vi.mocked(audit.finishAiActionAudit).mockResolvedValue(true);
+  vi.mocked(recordHumanApproval).mockResolvedValue({ ok: true, gated: false });
   vi.stubGlobal(
     "fetch",
     vi.fn().mockResolvedValue({ ok: true, json: async () => ({ receipt: { id: "receipt-1" } }) }),
@@ -102,5 +109,23 @@ describe("POST /api/ai/proposals/apply idempotency", () => {
     expect(response.status).toBe(200);
     const [, init] = vi.mocked(fetch).mock.calls[0];
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ displayName: "مشتری تازه" });
+  });
+
+  it("GH #1567 F7 — a gated proposal whose stored payload no longer binds never reaches its route", async () => {
+    vi.mocked(audit.claimAiActionAudit).mockResolvedValue(claim("ar.receipt.record", { customerId: "customer-1", method: "cash", amount: 100_000 }));
+    vi.mocked(recordHumanApproval).mockResolvedValue({ ok: false, error: "approval_payload_mismatch" });
+    const response = await POST(applyRequest("audit-1"));
+    expect(response.status).toBe(409);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(audit.finishAiActionAudit).toHaveBeenCalled();
+  });
+
+  it("GH #1567 F7 — a stale screen goes back to the queue instead of failing", async () => {
+    vi.mocked(audit.claimAiActionAudit).mockResolvedValue(claim("ar.receipt.record", { customerId: "customer-1", method: "cash", amount: 100_000 }));
+    vi.mocked(recordHumanApproval).mockResolvedValue({ ok: false, error: "approval_stale" });
+    const response = await POST(applyRequest("audit-1"));
+    expect(response.status).toBe(409);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(audit.releaseAiActionAudit).toHaveBeenCalledWith("biz-1", "audit-1");
   });
 });

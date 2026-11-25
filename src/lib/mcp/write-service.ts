@@ -45,7 +45,9 @@ import { query } from "../db";
 import { ACTION_CATALOG, type ActionType, type AutopilotExecutorKey, type ProposedAction } from "../ai";
 import { aiActionServiceGate } from "../ai-service-activation";
 import { aiActionPermission } from "../ai-capabilities";
-import { AUTOPILOT_EXECUTORS, executorTargetLocation } from "../ai-autopilot-executors";
+import { executorTargetLocation } from "../ai-autopilot-executors";
+import { requiresHumanApproval } from "../ai-approval-policy";
+import { recordHumanApproval, runAiExecutor, type HumanApprovalRefusal } from "../ai-human-approval";
 import { verifyUnattendedAuthority } from "../ai-unattended-authority";
 import { resolveBranchRef } from "../branch-service";
 import { createAiActionAudit } from "../ai-action-audit";
@@ -465,7 +467,10 @@ export async function performMcpWrite(input: {
    * same as on any apply connection. (Nothing here ever takes an
    * approve-mode write and applies it; step-up only ADDS the human back.)
    */
-  const registryStepUp = mcpWriteRegistryEntry(input.actionType)?.approval === "always_approve";
+  // GH #1567 F7 — every financial/stock write is a step-up, in every trade.
+  const registryStepUp =
+    mcpWriteRegistryEntry(input.actionType)?.approval === "always_approve" ||
+    requiresHumanApproval(input.actionType);
   // Hash BEFORE the row lands so the durable and replay comparisons agree
   // even if a later edit normalizes payloads at store time (A5).
   const payloadHash = input.idempotencyKey
@@ -652,12 +657,11 @@ async function executeClaimedProposal(input: {
 }): Promise<McpWriteOutcome> {
   const meta = ACTION_CATALOG[input.actionType];
   const executorKey: AutopilotExecutorKey | undefined = meta.executor;
-  const executor = executorKey ? AUTOPILOT_EXECUTORS[executorKey] : null;
 
   // An action with no executor should never have reached here — `tools.ts`
   // only exposes ones that have one — so this is a guard against a future
   // catalogue edit, not an expected branch.
-  if (!executor) {
+  if (!executorKey) {
     await failClaimedProposal(input.businessId, input.auditId, "mcp_executor_missing");
     return {
       status: "failed",
@@ -713,10 +717,14 @@ async function executeClaimedProposal(input: {
     };
   }
 
-  const result = await executor({
+  // GH #1567 F7 — the executor boundary: a gated action runs only by spending
+  // the human approval recorded on this row (payload, approver, freshness).
+  const result = await runAiExecutor({
+    actionType: input.actionType,
     businessId: input.businessId,
     authorizedByUserId: input.authorizedByUserId,
     payload: input.payload,
+    auditId: input.auditId,
   });
 
   await finalizeClaimedProposal(
@@ -749,7 +757,7 @@ export type McpDecision = "approve" | "reject";
 export type DecidePendingResult =
   | { ok: true; decision: "approve"; outcome: McpWriteOutcome }
   | { ok: true; decision: "reject" }
-  | { ok: false; error: "not_found" | "unknown_action" | "approver_forbidden" };
+  | { ok: false; error: "not_found" | "unknown_action" | "approver_forbidden" | HumanApprovalRefusal };
 
 /**
  * An owner's verdict on a queued MCP write.
@@ -789,6 +797,11 @@ export async function decideMcpPendingAction(input: {
   auditId: string;
   decision: McpDecision;
   deciderUserId: string;
+  /**
+   * GH #1567 F7 — the payload hash the approval screen showed. Required to
+   * approve a financial/stock write: the human approves what they saw.
+   */
+  presentedPayloadHash?: string | null;
 }): Promise<DecidePendingResult> {
   if (input.decision === "reject") {
     const { rowCount } = await query(
@@ -910,6 +923,25 @@ export async function decideMcpPendingAction(input: {
   if (refusal) {
     await releaseClaimToProposed(input.businessId, input.auditId);
     return { ok: false, error: "approver_forbidden" };
+  }
+
+  // GH #1567 F7 — record the human approval, bound to the stored payload
+  // hash, the hash the approver was shown, the approver and the deadline.
+  const approval = await recordHumanApproval({
+    businessId: input.businessId,
+    auditId: input.auditId,
+    approverUserId: input.deciderUserId,
+    presentedPayloadHash: input.presentedPayloadHash ?? null,
+    requirePresentedHash: true,
+  });
+  if (!approval.ok) {
+    if (approval.error === "approval_stale" || approval.error === "approval_binding_required") {
+      // The screen is out of date: the row goes back for a fresh review.
+      await releaseClaimToProposed(input.businessId, input.auditId);
+    } else {
+      await failClaimedProposal(input.businessId, input.auditId, approval.error);
+    }
+    return { ok: false, error: approval.error };
   }
 
   const outcome = await executeClaimedProposal({

@@ -98,7 +98,7 @@ async function buildInstructions(
   const canWrite = hasMcpScope(auth.scopes, MCP_SCOPES.write);
   const writeLine = canWrite
     ? auth.writeMode === "apply"
-      ? "This connection MAY write, and a write tool takes effect immediately unless its description states it always awaits human approval. Confirm every figure with the person before you call one."
+      ? "This connection MAY write, and a write tool takes effect immediately unless its description states it always awaits human approval. Every sale, refund, payment, posting, stock or purchase write always waits for a human to approve the exact request in the app, even on this connection — when one is queued, say it is waiting for their approval, never that it is done. Confirm every figure with the person before you call one."
       : "This connection MAY write, but every write waits in an approval list inside the app and changes nothing until a human approves it. Never tell the user a change has been made — say it is waiting for their approval."
     : "This connection is READ-ONLY. There are no write tools. If the user asks for a change, explain what they should do in the app; do not claim you have done it.";
 

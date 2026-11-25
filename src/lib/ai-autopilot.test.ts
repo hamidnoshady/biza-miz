@@ -123,10 +123,10 @@ describe("evaluateAutopilotProposal — gates", () => {
     expect(verdict).toMatchObject({ decision: "needs_confirmation", reasonCode: "daily_limit_reached" });
   });
 
-  it("defers a proposal carrying more lines than the per-run item cap", () => {
+  it("defers a proposal carrying more lines than the per-run item cap (the F7 human gate answers first)", () => {
     const lines = Array.from({ length: 9 }, (_, i) => ({ inventoryItemId: `i${i}`, countedQty: 1 }));
     const verdict = evaluate("inventory.adjustment.propose", { lines }, inventory, { documentValueRial: 10 });
-    expect(verdict).toMatchObject({ decision: "needs_confirmation", reasonCode: "too_many_items" });
+    expect(verdict).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
   });
 });
 
@@ -175,49 +175,29 @@ describe("evaluateAutopilotProposal — pricing", () => {
 });
 
 describe("evaluateAutopilotProposal — money", () => {
-  it("applies a discount inside both caps", () => {
-    const verdict = evaluate(
-      "order.discount.apply",
-      { orderId: "o1", discount: { type: "percent", value: 5 } },
-      money,
-      { orderSubtotalRial: 2_000_000 },
-    );
-    expect(verdict.decision).toBe("auto_apply");
-  });
-
-  it("defers a small percentage of a large bill that breaches the Rial cap", () => {
-    const verdict = evaluate(
-      "order.discount.apply",
-      { orderId: "o1", discount: { type: "percent", value: 5 } },
-      money,
-      { orderSubtotalRial: 500_000_000 },
-    );
-    expect(verdict).toMatchObject({ decision: "needs_confirmation", reasonCode: "amount_over_cap" });
-  });
-
-  it("defers a small amount discount that breaches the percent cap", () => {
-    const verdict = evaluate(
-      "order.discount.apply",
-      { orderId: "o1", discount: { type: "amount", value: 90_000 } },
-      money,
-      { orderSubtotalRial: 100_000 },
-    );
-    expect(verdict).toMatchObject({ decision: "needs_confirmation", reasonCode: "amount_over_cap" });
-  });
-
-  it("defers a discount without a known order subtotal", () => {
-    const verdict = evaluate("order.discount.apply", { orderId: "o1", discount: { type: "percent", value: 5 } }, money);
-    expect(verdict).toMatchObject({ decision: "needs_confirmation", reasonCode: "missing_context" });
-  });
-
-  it("applies an expense under the cap and defers one over it", () => {
+  // GH #1567 F7 (owner decision): a discount or an expense moves money, so
+  // autopilot never applies one — however small, whatever the caps.
+  it("defers every discount and expense to a human, even inside both caps", () => {
+    for (const subtotal of [2_000_000, 500_000_000, undefined]) {
+      expect(
+        evaluate(
+          "order.discount.apply",
+          { orderId: "o1", discount: { type: "percent", value: 5 } },
+          money,
+          subtotal === undefined ? {} : { orderSubtotalRial: subtotal },
+        ),
+      ).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
+    }
     expect(
-      evaluate("expense.categorize", { accountId: "a", paymentAccountId: "b", amount: 400_000, memo: "x" }, money)
-        .decision,
-    ).toBe("auto_apply");
-    expect(
-      evaluate("expense.categorize", { accountId: "a", paymentAccountId: "b", amount: 9_000_000, memo: "x" }, money),
-    ).toMatchObject({ decision: "needs_confirmation", reasonCode: "amount_over_cap" });
+      evaluate("order.discount.apply", { orderId: "o1", discount: { type: "amount", value: 90_000 } }, money, {
+        orderSubtotalRial: 100_000,
+      }),
+    ).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
+    for (const amount of [400_000, 9_000_000]) {
+      expect(
+        evaluate("expense.categorize", { accountId: "a", paymentAccountId: "b", amount, memo: "x" }, money),
+      ).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
+    }
   });
 
   it("refuses an unbalanced journal draft even though the draft path would too", () => {
@@ -249,19 +229,11 @@ describe("evaluateAutopilotProposal — money", () => {
 });
 
 describe("evaluateAutopilotProposal — inventory and customer", () => {
-  it("applies an adjustment under the document-value cap and defers one over it", () => {
+  it("defers every stock adjustment to a human, inside or over the cap (F7)", () => {
     const lines = [{ inventoryItemId: "i1", countedQty: 5 }];
-    expect(evaluate("inventory.adjustment.propose", { lines }, inventory, { documentValueRial: 900_000 }).decision).toBe(
-      "auto_apply",
-    );
-    expect(
-      evaluate("inventory.adjustment.propose", { lines }, inventory, { documentValueRial: 90_000_000 }),
-    ).toMatchObject({ decision: "needs_confirmation", reasonCode: "amount_over_cap" });
-  });
-
-  it("defers an inventory document whose value could not be computed", () => {
-    const verdict = evaluate("inventory.adjustment.propose", { lines: [{ inventoryItemId: "i1" }] }, inventory);
-    expect(verdict).toMatchObject({ decision: "needs_confirmation", reasonCode: "missing_context" });
+    for (const context of [{ documentValueRial: 900_000 }, { documentValueRial: 90_000_000 }, {}]) {
+      expect(evaluate("inventory.adjustment.propose", { lines }, inventory, context)).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
+    }
   });
 
   it("applies a plain customer note", () => {

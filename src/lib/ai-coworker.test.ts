@@ -147,9 +147,9 @@ describe("planCoworkerActions — the approval gate", () => {
     expect(plan.decision.decision).toBe("needs_confirmation");
   });
 
-  it("applies unattended when the owner chose 'auto' and the caps admit it", () => {
+  it("never applies waste unattended, even in 'auto' with the caps admitting it (GH #1567 F7)", () => {
     const [plan] = planCoworkerActions({ ...base, approvalMode: "auto", hasAuthorizer: true });
-    expect(plan.decision.decision).toBe("auto_apply");
+    expect(plan.decision).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
   });
 
   it("Phase 38 — holds a website publish even in 'auto' mode with a fully open setting", () => {
@@ -166,7 +166,8 @@ describe("planCoworkerActions — the approval gate", () => {
 
   it("refuses to write unattended with no human's authority behind it", () => {
     const [plan] = planCoworkerActions({ ...base, approvalMode: "auto", hasAuthorizer: false });
-    expect(plan.decision).toMatchObject({ decision: "needs_confirmation", reasonCode: "no_authorizer" });
+    // A stock write is held for a human before the authority is even asked.
+    expect(plan.decision).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
   });
 
   it("cannot be a way around Phase 31's caps — an over-cap action is still held", () => {
@@ -177,7 +178,7 @@ describe("planCoworkerActions — the approval gate", () => {
       // Way past the waste category's default 2,000,000 ﷼ ceiling.
       contextFor: () => ({ documentValueRial: 900_000_000 }),
     });
-    expect(plan.decision).toMatchObject({ decision: "needs_confirmation", reasonCode: "amount_over_cap" });
+    expect(plan.decision).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
   });
 
   it("holds an action whose category the owner never switched on", () => {
@@ -187,7 +188,7 @@ describe("planCoworkerActions — the approval gate", () => {
       hasAuthorizer: true,
       settingFor: () => AUTOPILOT_DEFAULTS.waste,
     });
-    expect(plan.decision).toMatchObject({ decision: "needs_confirmation", reasonCode: "category_disabled" });
+    expect(plan.decision).toMatchObject({ decision: "needs_confirmation", reasonCode: "human_approval_required" });
   });
 
   it("holds an action that has no unattended executor at all", () => {
@@ -197,10 +198,12 @@ describe("planCoworkerActions — the approval gate", () => {
       hasAuthorizer: true,
       actions: [
         {
-          type: "menu.item.create",
-          title: "آیتم جدید",
+          // menu.item.create is now human-gated (F7) and would answer first;
+          // a table merge is ungated and has no unattended executor.
+          type: "table.merge",
+          title: "ادغام میز",
           summary: "",
-          payload: { categoryId: "c1", name: "چای", price: 100_000 },
+          payload: { sourceOrderId: "o1", targetOrderId: "o2" },
         },
       ],
       settingFor: () => null,

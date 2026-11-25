@@ -84,7 +84,22 @@ interface PendingAction {
   title: string;
   summary: string;
   createdAt: string;
+  /** GH #1567 F7 — the approval is bound to exactly this payload. */
+  payload?: Record<string, unknown>;
+  payloadHash?: string;
+  approvalClass?: string | null;
+  approvalExpiresAt?: string | null;
 }
+
+/** GH #1567 F7 — why a financial/stock request always waits for a human. */
+const APPROVAL_CLASS_LABEL: Record<string, string> = {
+  sale: "فروش",
+  refund: "استرداد",
+  payment: "پرداخت",
+  posting: "ثبت در دفاتر",
+  stock: "موجودی انبار",
+  purchase: "خرید",
+};
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -330,11 +345,20 @@ export function McpPanel() {
     setBusy(true);
     const { ok, data } = await api<{ outcome?: { status: string; message: string } }>(
       `/api/connections/mcp/pending/${action.id}`,
-      { method: "POST", body: JSON.stringify({ decision }) },
+      { method: "POST", body: JSON.stringify({ decision, payloadHash: action.payloadHash }) },
     );
     setBusy(false);
     if (!ok) {
-      setMessage({ kind: "error", text: "ثبت این تصمیم ممکن نشد." });
+      const code = (data as { error?: string } | null)?.error;
+      setMessage({
+        kind: "error",
+        text:
+          code === "approval_expired"
+            ? "مهلت تأیید این درخواست گذشته است؛ چیزی ثبت نشد."
+            : code === "approval_stale" || code === "approval_binding_required"
+              ? "این درخواست از زمان نمایش تغییر کرده است؛ فهرست تازه شد، دوباره بررسی کنید."
+              : "ثبت این تصمیم ممکن نشد.",
+      });
     } else if (decision === "reject") {
       setMessage({ kind: "ok", text: "درخواست رد شد و چیزی تغییر نکرد." });
     } else {
@@ -398,10 +422,26 @@ export function McpPanel() {
                     <StatusBadge tone="neutral">{action.connectionName}</StatusBadge>
                   ) : null}
                   <span className="text-xs text-muted-foreground">{formatDateTime(action.createdAt)}</span>
+                  {action.approvalClass ? (
+                    <StatusBadge tone="danger">
+                      تأیید انسانی الزامی — {APPROVAL_CLASS_LABEL[action.approvalClass] ?? action.approvalClass}
+                    </StatusBadge>
+                  ) : null}
+                  {action.approvalExpiresAt ? (
+                    <span className="text-xs text-muted-foreground">مهلت تأیید: {formatDateTime(action.approvalExpiresAt)}</span>
+                  ) : null}
                 </div>
                 <p dir="ltr" className="mt-1 break-all text-start text-xs text-muted-foreground">
                   {action.summary}
                 </p>
+                {action.approvalClass && action.payload ? (
+                  <details className="mt-1 text-xs">
+                    <summary className="cursor-pointer text-muted-foreground">جزئیات دقیق آنچه ثبت می‌شود</summary>
+                    <pre dir="ltr" className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-muted/50 p-2 text-start">
+                      {JSON.stringify(action.payload, null, 2)}
+                    </pre>
+                  </details>
+                ) : null}
                 {canManage ? (
                   <div className="mt-2 flex gap-2">
                     <Button type="button" size="xs" onClick={() => decide(action, "approve")} disabled={busy}>
