@@ -212,7 +212,32 @@ export interface DesktopBusinessBridge {
   current(): Promise<{ status: DesktopBusinessStatus | null; multiBusiness: boolean }>;
   /** Stops this business's local runtime and relaunches into the picker; the page goes away with it. */
   change(): Promise<{ ok: true }>;
+  /**
+   * #1572 — the identity this profile's own enrollment just committed. Optional
+   * while an older shell serves a newer web runtime. The shell fills only the
+   * active profile's still-empty fields and refuses to rewrite a set tenant id.
+   */
+  recordIdentity?(identity: DesktopBusinessIdentity): Promise<DesktopBusinessIdentityResult>;
 }
+
+/** Non-secret identity of the business a saved profile turned out to be. */
+export interface DesktopBusinessIdentity {
+  businessId: string;
+  businessSubdomain: string | null;
+  cloudOrigin: string | null;
+}
+
+export type DesktopBusinessIdentityResult =
+  | { ok: true; changed: boolean }
+  | {
+      ok: false;
+      error:
+        | "no_active_profile"
+        | "profile_not_found"
+        | "invalid_identity"
+        | "identity_conflict";
+      field?: string;
+    };
 
 /**
  * Issue #984 — `status` reports install presence for truthful UI states;

@@ -246,6 +246,13 @@ export async function POST(request: NextRequest) {
     /** False only when the business is paired but its Owner could not be signed in: go to /login. */
     signedIn: token !== null,
     slug: applied.businessSlug,
+    // #1572 — the desktop shell fills a saved business's empty identity fields
+    // from here; a browser ignores them. None of this is secret: the tenant id
+    // and subdomain are already in the signed session, and the origin is the
+    // Cloud this install was just paired with.
+    businessId: applied.businessId,
+    businessSubdomain: applied.businessSubdomain,
+    cloudOrigin: new URL(remoteUrl).origin,
     ownerUserId: applied.ownerUserId,
     activationPending,
     // Hybrid replicates supported cloud login material on purpose

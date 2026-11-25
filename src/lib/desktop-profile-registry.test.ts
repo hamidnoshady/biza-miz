@@ -32,6 +32,18 @@ const registryModule = require("../../electron/profile-registry.js") as {
   createProfile: (input?: Record<string, unknown>, now?: Date) => Profile;
   addProfile: (registry: Registry, input: Record<string, unknown>, now?: Date) => { ok: boolean; error?: string; profile?: Profile; registry?: Registry };
   removeProfile: (registry: Registry, id: string) => { ok: boolean; removed?: Profile; registry?: Registry };
+  recordProfileIdentity: (
+    registry: Registry,
+    id: string,
+    identity: Record<string, unknown>,
+  ) => {
+    ok: boolean;
+    changed?: boolean;
+    error?: string;
+    field?: string;
+    profile?: Profile;
+    registry?: Registry;
+  };
   selectProfile: (registry: Registry, id: string, now?: Date) => { ok: boolean; registry?: Registry; profile?: Profile };
   planLegacyImport: (installRoot: string, registry: Registry, fsImpl?: unknown) => { needed: boolean; reason?: string; entries?: Array<{ key: string; name: string; source: string }> };
   importLegacyInstall: (options: Record<string, unknown>) => {
@@ -363,6 +375,85 @@ describe("legacy single-business install migration", () => {
     expect(result.ok).toBe(false);
     expect(result.rolledBack).toBe(false);
     expect(result.rollbackFailures?.length).toBeGreaterThan(0);
+  });
+});
+
+describe("business identity backfill (#1572)", () => {
+  const identity = {
+    businessId: UUID_C,
+    businessSubdomain: "cafe-alefba",
+    cloudOrigin: "https://app.example.com",
+  };
+
+  it("names an added profile once its enrollment proves the business", () => {
+    const registry = seeded(1);
+    const profileId = registry.profiles[0].id;
+    // A profile created from the picker holds no identity at all.
+    expect(registry.profiles[0].businessId).toBeNull();
+    expect(registry.profiles[0].businessSubdomain).toBeNull();
+    expect(registry.profiles[0].cloudOrigin).toBeNull();
+
+    const result = registryModule.recordProfileIdentity(registry, profileId, identity);
+    expect(result.ok).toBe(true);
+    expect(result.changed).toBe(true);
+    expect(result.profile).toMatchObject(identity);
+
+    // Written through the same validating writer, so it survives a relaunch.
+    registryModule.writeRegistry(root, result.registry as Registry);
+    const reread = registryModule.readRegistry(root);
+    expect(reread.state).toBe("ok");
+    expect(reread.registry?.profiles[0]).toMatchObject(identity);
+  });
+
+  it("changes nothing when the same identity is reported again", () => {
+    const registry = seeded(1);
+    const profileId = registry.profiles[0].id;
+    const first = registryModule.recordProfileIdentity(registry, profileId, identity);
+    expect(first.ok).toBe(true);
+    const again = registryModule.recordProfileIdentity(first.registry as Registry, profileId, identity);
+    expect(again.ok).toBe(true);
+    expect(again.changed).toBe(false);
+  });
+
+  it("never rewrites a tenant id it already holds", () => {
+    const registry = seeded(1);
+    const profileId = registry.profiles[0].id;
+    const filled = registryModule.recordProfileIdentity(registry, profileId, identity);
+
+    const conflict = registryModule.recordProfileIdentity(filled.registry as Registry, profileId, {
+      businessId: UUID_B,
+      businessSubdomain: identity.businessSubdomain,
+      cloudOrigin: identity.cloudOrigin,
+    });
+    expect(conflict.ok).toBe(false);
+    expect(conflict.error).toBe("identity_conflict");
+    expect(conflict.field).toBe("businessId");
+    expect(conflict.registry).toBeUndefined();
+  });
+
+  it("refuses a report carrying a credential or an unknown field", () => {
+    const registry = seeded(1);
+    const profileId = registry.profiles[0].id;
+    expect(registryModule.recordProfileIdentity(registry, profileId, { ...identity, password: "hunter2" }).error)
+      .toBe("invalid_identity");
+    expect(registryModule.recordProfileIdentity(registry, profileId, { ...identity, extra: "value" }).error)
+      .toBe("invalid_identity");
+  });
+
+  it("refuses shapes the registry itself would not accept", () => {
+    const registry = seeded(1);
+    const profileId = registry.profiles[0].id;
+    for (const bad of [
+      { ...identity, businessId: "not-a-uuid" },
+      { ...identity, cloudOrigin: "http://app.example.com" },
+      { ...identity, businessSubdomain: "not a subdomain" },
+    ]) {
+      expect(registryModule.recordProfileIdentity(registry, profileId, bad).error).toBe("invalid_identity");
+    }
+  });
+
+  it("reports an unknown profile instead of inventing one", () => {
+    expect(registryModule.recordProfileIdentity(seeded(1), UUID_B, identity).error).toBe("profile_not_found");
   });
 });
 

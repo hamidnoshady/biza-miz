@@ -86,6 +86,12 @@ contextBridge.exposeInMainWorld("businessSuiteDesktop", Object.freeze({
   business: Object.freeze({
     current: () => ipcRenderer.invoke("desktop:business-current"),
     change: () => ipcRenderer.invoke("desktop:business-switch"),
+    /**
+     * #1572 follow-up — the identity this profile's own enrollment committed.
+     * The main process decides which profile it belongs to (the one that is
+     * running) and only fills fields it does not already hold.
+     */
+    recordIdentity: (identity) => ipcRenderer.invoke("desktop:business-identity", identity),
   }),
 }));
 

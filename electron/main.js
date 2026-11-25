@@ -2,7 +2,7 @@
 // The application server remains loopback-only; explicitly enabled phones and
 // tablets use the separate HTTPS gateway in gateway-manager.js.
 "use strict";
-const { authorizeGatewayInvocation } = require("./gateway-ipc-authorization");
+const { assertGatewaySender, authorizeGatewayInvocation } = require("./gateway-ipc-authorization");
 
 const { app, BrowserWindow, dialog, ipcMain, Notification, session, shell, safeStorage } = require("electron");
 const path = require("node:path");
@@ -36,6 +36,7 @@ const {
   profileDataDir,
   profileHasData,
   readRegistry,
+  recordProfileIdentity,
   registryPath,
   removeProfile,
   selectProfile,
@@ -389,6 +390,32 @@ function runDesktopShell() {
       app.relaunch();
       app.exit(0);
       return { ok: true };
+    });
+
+    // #1572 follow-up — the identity the running business's own enrollment just
+    // proved. The renderer never names a profile: this fills the *active* one,
+    // only where a field is still empty, and a disagreement with a stored tenant
+    // id is refused rather than written (a profile's business is immutable).
+    handleIpc("desktop:business-identity", async (event, payload) => {
+      assertGatewaySender(event, mainWindow, mainAppUrl);
+      const profileId = profileManager?.activeProfile?.id ?? null;
+      if (!profileId) return { ok: false, error: "no_active_profile" };
+      const current = readRegistry(installRoot);
+      if (current.state !== "ok") throw new Error("profile_registry_unreadable");
+      const result = recordProfileIdentity(current.registry, profileId, payload);
+      if (!result.ok) {
+        logger.warn("Desktop business identity was not recorded", {
+          profileId,
+          error: result.error,
+          field: result.field ?? null,
+        });
+        return result;
+      }
+      if (result.changed) {
+        writeRegistry(installRoot, result.registry);
+        logger.info("Desktop business identity recorded", { profileId });
+      }
+      return { ok: true, changed: result.changed };
     });
 
     // Desktop updates: manual and background downloads share this one engine.

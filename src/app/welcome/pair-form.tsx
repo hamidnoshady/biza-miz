@@ -7,6 +7,7 @@ import {
   classifyConnectionCode,
   normalizeServerAddress,
 } from "@/lib/connection-code";
+import { recordDesktopBusinessIdentity } from "@/lib/desktop-business-identity";
 import { toLatinDigits } from "@/lib/digits";
 
 /** Every failure this flow can produce, in the owner's language. */
@@ -152,8 +153,18 @@ export function PairForm({ onBack }: { onBack: () => void }) {
       requiresOfflineCredential?: boolean;
       identitySyncPending?: boolean;
       signedIn?: boolean;
+      businessId?: string;
+      businessSubdomain?: string;
+      cloudOrigin?: string;
     };
     if (res.ok) {
+      // #1572 — the saved-business record was created without an identity; this
+      // is the moment the business is proven. No-op in a browser.
+      recordDesktopBusinessIdentity({
+        businessId: data.businessId,
+        businessSubdomain: data.businessSubdomain ?? null,
+        cloudOrigin: data.cloudOrigin ?? null,
+      });
       // Paired, but the server could not open the Owner's session (#854
       // follow-up: no cookie without a revocable record). The offline-PIN step
       // needs that session, so the Owner signs in first.

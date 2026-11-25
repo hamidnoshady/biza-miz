@@ -400,6 +400,67 @@ function removeProfile(registry, profileId) {
   };
 }
 
+/**
+ * The identity a running business reports about itself, normalized to the same
+ * closed shapes the registry already stores. Returns `null` for anything it
+ * cannot prove, including a credential-shaped key smuggled into the payload.
+ */
+function normalizeReportedIdentity(input) {
+  if (!isRecord(input)) return null;
+  for (const key of Object.keys(input)) {
+    if (FORBIDDEN_KEYS.includes(key.toLowerCase())) return null;
+    if (!["businessId", "businessSubdomain", "cloudOrigin"].includes(key)) return null;
+  }
+  if (!isProfileId(input.businessId)) return null;
+  const businessSubdomain = normalizeSubdomain(input.businessSubdomain);
+  if (businessSubdomain === undefined) return null;
+  const cloudOrigin = normalizeCloudOrigin(input.cloudOrigin);
+  if (cloudOrigin === undefined) return null;
+  return { businessId: input.businessId, businessSubdomain, cloudOrigin };
+}
+
+/**
+ * Fill in an added profile's business identity once its own enrollment/pairing
+ * has proven it. `businessId`, `businessSubdomain` and `cloudOrigin` are null
+ * when the picker created the profile — the setup wizard runs later, inside
+ * that profile's data root, and only then does the business exist to name.
+ *
+ * **Fill-only, by design.** A set `businessId` is never rewritten: the whole
+ * point of one profile per business is that its tenant is immutable, and a
+ * silent repoint would point a saved business's name at another tenant. A
+ * report that disagrees with a stored value is refused as `identity_conflict`
+ * and nothing is written — re-pairing is an explicit decision, not a side
+ * effect of a login. The record still goes through `validateProfile` on write,
+ * so the registry stays non-secret whatever the caller sends.
+ */
+function recordProfileIdentity(registry, profileId, identity) {
+  const index = registry.profiles.findIndex((profile) => profile.id === profileId);
+  if (index === -1) return { ok: false, error: "profile_not_found" };
+  const reported = normalizeReportedIdentity(identity);
+  if (!reported) return { ok: false, error: "invalid_identity" };
+
+  const current = registry.profiles[index];
+  const next = { ...current };
+  let changed = false;
+  for (const key of ["businessId", "businessSubdomain", "cloudOrigin"]) {
+    const value = reported[key];
+    if (value === null) continue;
+    if (current[key] === null) {
+      next[key] = value;
+      changed = true;
+      continue;
+    }
+    if (current[key] !== value) return { ok: false, error: "identity_conflict", field: key };
+  }
+  if (!changed) return { ok: true, changed: false, profile: current, registry };
+
+  const validated = validateProfile(next);
+  if (!validated) return { ok: false, error: "invalid_identity" };
+  const profiles = registry.profiles.slice();
+  profiles[index] = validated;
+  return { ok: true, changed: true, profile: validated, registry: { ...registry, profiles } };
+}
+
 /** Mark a profile as the last one used, which is what the picker highlights. */
 function selectProfile(registry, profileId, now = new Date()) {
   const index = registry.profiles.findIndex((profile) => profile.id === profileId);
@@ -558,6 +619,7 @@ module.exports = {
   createProfile,
   addProfile,
   removeProfile,
+  recordProfileIdentity,
   selectProfile,
   planLegacyImport,
   importLegacyInstall,
