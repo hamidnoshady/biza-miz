@@ -22,7 +22,7 @@ describe("platform reporting wire boundary", () => {
   it.each(["dateFrom=2026-02-30", "dateFrom=2026-03-02&dateTo=2026-03-01", "businessId=other", "locationId=invalid", "previousAsOfDate=2026-04-01&dateTo=2026-03-01"])("rejects filters %s", (s) => expect(() => parseReportOptions(new URLSearchParams(s))).toThrow());
   it("keeps ISO dates on the wire", () => expect(parseReportOptions(new URLSearchParams("dateFrom=2026-03-21&dateTo=2026-04-01"))).toEqual({ dateFrom: "2026-03-21", dateTo: "2026-04-01", compare: false }));
   it.each(["support", "engineer", "owner"] as const)("grants dedicated report reads to %s", (role) => expect(platformCan(role, "business.reports.read")).toBe(true));
-  it.each(["jewelry", "watch", "accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery"] as const)("keeps food-only reports out of %s", (industry) => {
+  it.each(["jewelry", "watch", "accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery", "fashion_apparel"] as const)("keeps food-only reports out of %s", (industry) => {
     expect(standardReportsFor(industry).some((r) => r.key === "food_cost_variance")).toBe(false);
     expect(reportViewsFor(industry).some((r) => r.key === "v_table_turnover")).toBe(false);
   });

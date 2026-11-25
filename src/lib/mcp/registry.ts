@@ -710,6 +710,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "haberdashery.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "haberdashery.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "haberdashery.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  // Issue #1567 — fashion's lanes are the same shared trade-goods routes,
+  // classified exactly like the three verticals above.
+  { actionType: "fashion_apparel.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "fashion_apparel.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "fashion_apparel.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   // Batch AP — data-transfer config records are mode/low like every config
   // lane (template/schedule deletes included). Import run/retry is a mass
   // write of tenant rows from a staged file → forced approval every time.
@@ -892,6 +897,7 @@ export function mcpModuleForWriteAction(actionType: string): McpModuleKey {
   if (actionType.startsWith("cosmetics.")) return "cosmetics";
   if (actionType.startsWith("wholesale.")) return "wholesale";
   if (actionType.startsWith("haberdashery.")) return "haberdashery";
+  if (actionType.startsWith("fashion_apparel.")) return "fashion_apparel";
   if (actionType.startsWith("tools_fittings.")) return "tools_fittings";
   if (actionType.startsWith("accessories.")) return "accessories";
   if (
@@ -1028,8 +1034,8 @@ export function mcpTenantEnabledModules(
 
 /**
  * Check whether a tool's owning module is enabled for the tenant.
- * `list_trade_goods_items` is shared across the three trade-goods verticals
- * (`wholesale`, `tools_fittings`, `haberdashery`).
+ * `list_trade_goods_items` is shared across the trade-goods verticals
+ * (`wholesale`, `tools_fittings`, `haberdashery`, `fashion_apparel`).
  */
 export function mcpIsToolModuleEnabled(
   module: McpModuleKey,
@@ -1040,7 +1046,8 @@ export function mcpIsToolModuleEnabled(
     return (
       enabledModules.has("wholesale") ||
       enabledModules.has("tools_fittings") ||
-      enabledModules.has("haberdashery")
+      enabledModules.has("haberdashery") ||
+      enabledModules.has("fashion_apparel")
     );
   }
   return enabledModules.has(module);

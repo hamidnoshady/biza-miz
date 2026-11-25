@@ -3447,8 +3447,9 @@ const accessoriesItemSell: AutopilotExecutor = async (ctx) => {
 };
 
 // ── Issue #883 package 2, batch AO — trade-goods verticals ───────────────
-// wholesale / tools_fittings / haberdashery share one route implementation
-// (trade-goods-routes.ts), so they share one executor family: item-create is
+// wholesale / tools_fittings / haberdashery (and fashion since issue #1567)
+// share one route implementation (trade-goods-routes.ts), so they share one
+// executor family: item-create is
 // the same two-shape builder as the cosmetics/accessories lanes, stock-update
 // adds the opening-cost branch, and the sell factory brands its sale with
 // the trade — exactly the routes' transaction and error envelopes.
@@ -3504,6 +3505,9 @@ const toolsFittingsStockUpdate = tradeGoodsStockExecutor();
 const haberdasheryItemCreate: AutopilotExecutor = createVariantItem;
 const haberdasheryItemSell = tradeGoodsSellExecutor("haberdashery");
 const haberdasheryStockUpdate = tradeGoodsStockExecutor();
+const fashionApparelItemCreate: AutopilotExecutor = createVariantItem;
+const fashionApparelItemSell = tradeGoodsSellExecutor("fashion_apparel");
+const fashionApparelStockUpdate = tradeGoodsStockExecutor();
 
 // ── Issue #883 package 2, batch AS — barcode bulk mint ─────────────────────
 // Mirrors POST /api/inventory/barcodes/bulk: one transaction, idempotent, the
@@ -8561,6 +8565,9 @@ export const AUTOPILOT_EXECUTORS: Record<AutopilotExecutorKey, AutopilotExecutor
   haberdasheryItemCreate,
   haberdasheryItemSell,
   haberdasheryStockUpdate,
+  fashionApparelItemCreate,
+  fashionApparelItemSell,
+  fashionApparelStockUpdate,
   dataScheduleCreate,
   dataScheduleUpdate,
   dataScheduleRun,

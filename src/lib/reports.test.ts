@@ -573,6 +573,16 @@ describe("standardReportsFor", () => {
     // Batch expiry is a cosmetics capability, not every trade-goods shop's.
     expect(haberdashery).not.toContain("near_expiry_batches");
 
+    // Issue #1567 — a fashion shop is a product-workspace/trade-goods trade,
+    // so it inherits exactly the same variant, low-stock and dead-stock
+    // reports — and none of the F&B or cosmetics-only ones.
+    const fashion = standardReportsFor("fashion_apparel").map((r) => r.key);
+    expect(fashion).toContain("variant_sales");
+    expect(fashion).toContain("low_stock");
+    expect(fashion).toContain("dead_stock");
+    expect(fashion).not.toContain("near_expiry_batches");
+    expect(fashion).not.toContain("food_cost_variance");
+
     // The warehouse reports follow the `stock` module, which F&B has no part
     // of — its equivalent is the recipe-costed inventory store.
     expect(standardReportsFor("food_service").map((r) => r.key)).not.toContain("low_stock");

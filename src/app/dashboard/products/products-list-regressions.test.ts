@@ -274,7 +274,7 @@ describe("the section stays industry-agnostic", () => {
   it("addresses only the apiBase it was handed", () => {
     expect(SECTION).toContain("ProductsListSection({ apiBase, canEditStock, canEditMeta, canManageStore }");
     expect(SECTION).toContain("apiBase: string;");
-    for (const industryPath of ["/api/cosmetics", "/api/accessories", "/api/wholesale", "/api/tools-fittings", "/api/haberdashery"]) {
+    for (const industryPath of ["/api/cosmetics", "/api/accessories", "/api/wholesale", "/api/tools-fittings", "/api/haberdashery", "/api/fashion"]) {
       expect(SECTION, `must not hard-code ${industryPath}`).not.toContain(industryPath);
     }
   });

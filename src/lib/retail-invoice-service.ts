@@ -395,6 +395,13 @@ const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["
   wholesale: ["stocked"],
   tools_fittings: ["stocked"],
   haberdashery: ["stocked"],
+  // Issue #1567 — a fashion shop sells its stocked variants (one style's
+  // size/colour children) through the ordinary retail line, exactly like the
+  // other trade-goods trades: the line names the variant, decrements its
+  // `item_stock` quantity and posts through the trade's own registered
+  // `fashion_apparel.sale_revenue`/`sale_cogs` rules. No bespoke line kind —
+  // a garment has no serial number and no weight dimension.
+  fashion_apparel: ["stocked"],
 };
 
 export class RetailInvoiceError extends Error {}

@@ -56,6 +56,20 @@ export const MODULE_KEYS = [
   "wholesale",
   "tools_fittings",
   "haberdashery",
+  // Issue #1567 — the fashion trade's own gate (پوشاک، کیف، کفش و مد): the
+  // `/api/fashion` data routes bound to the shared trade-goods handlers.
+  // Like `automotive`/`jewelry`/`watch` it is a gate over the shared
+  // `items`/`item_stock` primitives — one style (variant parent) with
+  // independently sellable size/colour children — so the module gates a
+  // route namespace and never a second stock engine. The trade's catalogue
+  // *page* is the products workspace (`/accounting/products`, anchored on
+  // `stock`), not a page of its own; the module exists so the availability
+  // guard can refuse `/api/fashion` with the rest of operations and so the
+  // profile's module set names the trade explicitly. The key equals the
+  // industry key on purpose: `tenant-navigation.ts` derives the products
+  // group's `module` straight from `industry`, so every product-workspace
+  // trade's module has always matched its industry key.
+  "fashion_apparel",
   // Issue #839 — the automotive trade's own manager («خودروها»: vehicle stock,
   // acquisition, expenses, holds and sales). Like `jewelry`/`watch` it is a
   // trade page over the shared `items`/`item_serials` primitives, so the
@@ -593,6 +607,52 @@ export const INDUSTRY_PROFILES: Record<Industry, IndustryProfile> = {
     // capabilities, and `repairs` is a workshop this trade does not have.
     capabilities: [],
   },
+  /**
+   * Issue #1567 — Clothing, Footwear & Fashion (پوشاک، کیف، کفش و مد).
+   *
+   * The retail-counter shape, exactly like the trade-goods trades beside it:
+   * the whole commercial platform (`CORE_MODULES`), the retail invoice screen
+   * (`pos` + `retail_invoice`), stock in `items`/`item_stock` (`stock`) and
+   * the trade's own `/api/fashion` route namespace (`fashion_apparel`,
+   * bound to the shared `tradeGoods*` handlers — no second catalogue or
+   * ledger). Its
+   * catalogue door is the products workspace (`/accounting/products`,
+   * anchored on `stock`), so a fashion tenant gets the size×color variant
+   * board, barcodes, price lists and reports every variant trade shares.
+   *
+   * What it must never inherit is the café: no `tables`, `waiter`, `kitchen`,
+   * `reservations`, `delivery`, `inventory` or `menu` here, and
+   * `industry-profile.test.ts` asserts that for every non-F&B trade at once.
+   * The F&B feature flags behind those modules are seeded off at provision
+   * time like every other retail profile.
+   *
+   * `capabilities` carries `barcode` because every garment, shoe and bag is
+   * scanned at the counter and printed on a label; `repairs` is deliberately
+   * absent (alterations/tailoring are a later, opt-in P2 wave with their own
+   * privacy controls, and claiming `repairs` would offer this trade the
+   * watchmaker's repair tickets).
+   *
+   * The trade's operating profiles (men's/women's/children's clothing,
+   * footwear, bags, accessories, fabrics, uniforms, wholesale, mixed retail,
+   * tailoring) are presets over suggested attributes, reports and vocabulary —
+   * **never** separate industry keys, and never a second authorization axis:
+   * they live in tenant settings, so the profile change can never alter
+   * historical transactions.
+   *
+   * No `retailDefaults`: the only fields that interface still has are
+   * jewellery's گروه اجرت pair. VAT is a fact about the business, not the
+   * trade — read from `tax.config` through `vat-policy.ts` like every other
+   * line does.
+   */
+  fashion_apparel: {
+    brandTitle: "پوشاک، کیف، کفش و مد",
+    brandSubtitle: "مدیریت تنوع سایز و رنگ، موجودی و فروش",
+    modules: [...CORE_MODULES, "pos", "fashion_apparel", ...RETAIL_STOCK_MODULES],
+    labels: RETAIL_LABELS,
+    salesModel: "retail_invoice",
+    defaultDisabledFeatures: ["inventory", "reservations", "delivery"],
+    capabilities: ["barcode"],
+  },
 };
 
 export function industryProfile(industry: Industry): IndustryProfile {
@@ -806,6 +866,11 @@ const API_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // Phase 42 — the shared products-workspace routes; the handlers re-check
   // the industry set themselves (requireProductWorkspaceForApi).
   ["/api/products", "stock"],
+  // Issue #1567 — the fashion trade's data routes (variant board, stock and
+  // sell endpoints bound to the shared trade-goods handlers). The row exists
+  // so the availability guard can refuse them with the rest of operations;
+  // each handler still keeps its stricter `requireIndustryForApi` check.
+  ["/api/fashion", "fashion_apparel"],
   ["/api/accessories", "accessories"],
   ["/api/cosmetics", "cosmetics"],
   ["/api/wholesale", "wholesale"],

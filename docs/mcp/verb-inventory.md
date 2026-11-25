@@ -5,7 +5,7 @@
 > the registry; the registry test fails while this file and the registry drift.
 
 Current surface: **142 read verbs** (**25** business-wide aggregates —
-visible only to connections consented for every branch) and **287 write verbs**
+visible only to connections consented for every branch) and **290 write verbs**
 (**77** high-risk, forced through the approval queue even on `apply`-mode connections).
 
 ## Read verbs (what `tools/list` may expose subject to grants ∩ permissions)
@@ -431,6 +431,9 @@ visible only to connections consented for every branch) and **287 write verbs**
 | `write_haberdashery_item_create` | `haberdashery.item.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_haberdashery_item_sell` | `haberdashery.item.sell` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_haberdashery_stock_update` | `haberdashery.stock.update` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fashion_apparel_item_create` | `fashion_apparel.item.create` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fashion_apparel_item_sell` | `fashion_apparel.item.sell` | pos | low | connection write_mode | `orders.create` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
+| `write_fashion_apparel_stock_update` | `fashion_apparel.stock.update` | pos | low | connection write_mode | `inventory.adjust` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_data_schedule_create` | `data.schedule.create` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_data_schedule_update` | `data.schedule.update` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |
 | `write_data_schedule_run` | `data.schedule.run` | workspace | low | connection write_mode | `data.export` | registry.test.ts, tools.test.ts, integration/mcp-grants-hardening.integration.test.ts |

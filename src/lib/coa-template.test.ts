@@ -10,6 +10,7 @@ import {
   costOfSalesCodesForIndustry,
   FNB_COA_TEMPLATE,
   HABERDASHERY_COA_TEMPLATE,
+  FASHION_APPAREL_COA_TEMPLATE,
   JEWELRY_COA_TEMPLATE,
   isNonCurrentCode,
   isValidAccountCode,
@@ -208,6 +209,16 @@ const TRADE_REQUIRED_CODES: Record<Industry, readonly string[]> = {
     WELL_KNOWN_CODES.retailInventoryInTransit,
     WELL_KNOWN_CODES.retailCountShortageExpense,
   ],
+  // Issue #1567 — the fashion trade's own finished-goods triple over the
+  // shared retail skeleton, plus the two shared retail accounts every
+  // catalogue trade posts counts through.
+  fashion_apparel: [
+    WELL_KNOWN_CODES.fashionInventory,
+    WELL_KNOWN_CODES.fashionSalesRevenue,
+    WELL_KNOWN_CODES.fashionCogs,
+    WELL_KNOWN_CODES.retailInventoryInTransit,
+    WELL_KNOWN_CODES.retailCountShortageExpense,
+  ],
 };
 
 describe.each(INDUSTRIES)("%s chart of accounts", (industry) => {
@@ -246,7 +257,7 @@ describe.each(INDUSTRIES)("%s chart of accounts", (industry) => {
 });
 
 describe("the retail templates carry no F&B recipe-shaped accounts", () => {
-  it.each(["jewelry", "watch", "accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery"] as const)(
+  it.each(["jewelry", "watch", "accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery", "fashion_apparel"] as const)(
     "%s",
     (industry) => {
       const codes = new Set(coaTemplateForIndustry(industry).map((a) => a.code));
@@ -405,6 +416,9 @@ describe("coaTemplateForIndustry", () => {
     expect(coaTemplateForIndustry("wholesale")).toBe(WHOLESALE_COA_TEMPLATE);
     expect(coaTemplateForIndustry("tools_fittings")).toBe(TOOLS_FITTINGS_COA_TEMPLATE);
     expect(coaTemplateForIndustry("haberdashery")).toBe(HABERDASHERY_COA_TEMPLATE);
+    // Issue #1567 — asserted by identity like the others: the switch must
+    // hand back fashion's own template, not fall through to the café's.
+    expect(coaTemplateForIndustry("fashion_apparel")).toBe(FASHION_APPAREL_COA_TEMPLATE);
     // Issue #1128 — asserted by identity like AEC's: the switch must hand back
     // the trade's own template, not fall through to the café's.
     expect(coaTemplateForIndustry("advertising_agency")).toBe(ADVERTISING_AGENCY_COA_TEMPLATE);
@@ -583,6 +597,7 @@ describe("costOfSalesCodesForIndustry", () => {
     expect(costOfSalesCodesForIndustry("wholesale")).toContain(WELL_KNOWN_CODES.wholesaleCogs);
     expect(costOfSalesCodesForIndustry("tools_fittings")).toContain(WELL_KNOWN_CODES.toolsCogs);
     expect(costOfSalesCodesForIndustry("haberdashery")).toContain(WELL_KNOWN_CODES.haberdasheryCogs);
+    expect(costOfSalesCodesForIndustry("fashion_apparel")).toContain(WELL_KNOWN_CODES.fashionCogs);
   });
 
   it("never lands a trade's cost of sales in another trade's list", () => {

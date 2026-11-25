@@ -11,6 +11,9 @@ const EVENT_PREFIX: Record<string, string> = {
   wholesale: "wholesale",
   tools_fittings: "tools_fittings",
   haberdashery: "haberdashery",
+  // Issue #1567 — the fashion trade's sale events, emitted by the shared
+  // trade-goods sell path as `fashion_apparel.sale_revenue`/`sale_cogs`.
+  fashion_apparel: "fashion_apparel",
 };
 
 /** Sell-through by collection/season, off the same sale events the sales report reads. */

@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1318**. Rows: tenant **122**, platform **25**.
+Route files scanned: **1322**. Rows: tenant **123**, platform **25**.
 
 ## Summary of remaining gaps
 
@@ -42,7 +42,7 @@ Route files scanned: **1318**. Rows: tenant **122**, platform **25**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 62 · partial: 3 · MCP gap: 15 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 27
+Counts — covered: 63 · partial: 3 · MCP gap: 15 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 27
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -168,6 +168,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 15 · backend gap: 0 · n/a (in
 | Verticals | Accessories (mobile/PC sale & repair)<br>_AN close-out: sale rides ordersCreate like checkout and mirrors the MissingLedgerAccountError envelope; specialized variant-sales report route stays report-surface only (no MCP analytics reads)_ | list_accessory_items | accessories.item.create, accessories.stock.update | — | accessories.item.sell | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode | list_accessory_items, accessories.item.create, accessories.stock.update, accessories.item.sell | integration/accessories.integration.test.ts | covered |
 | Verticals | Merchandising (displays, perishables) | (route only) | (route only) | — | — | — | inventory.adjust, inventory.view | — | — | — | n/a (infra) |
 | Verticals | Wholesale (files, payments, reports)<br>_AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only_ | list_trade_goods_items | wholesale.item.create, wholesale.stock.update | — | wholesale.item.sell | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode | list_trade_goods_items, wholesale.item.create, wholesale.stock.update, wholesale.item.sell | integration/wholesale.integration.test.ts | covered |
+| Verticals | Fashion apparel (styles, size/colour variants, stock)<br>_1567 — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only_ | list_trade_goods_items | fashion_apparel.item.create, fashion_apparel.stock.update | — | fashion_apparel.item.sell | — | inventory.adjust, inventory.view, orders.create, reports.view | connection mode | list_trade_goods_items, fashion_apparel.item.create, fashion_apparel.stock.update, fashion_apparel.item.sell | integration/trade-goods.integration.test.ts | covered |
 
 ## Platform realm (pospmcp_) — Superadmin
 

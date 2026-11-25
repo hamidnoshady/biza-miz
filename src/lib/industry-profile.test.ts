@@ -36,6 +36,7 @@ const RETAIL_INDUSTRIES: Industry[] = [
   "tools_fittings",
   "haberdashery",
   "automotive",
+  "fashion_apparel",
 ];
 
 describe("INDUSTRY_PROFILES", () => {
@@ -86,6 +87,7 @@ describe("module sets", () => {
         module === "tools_fittings" ||
         module === "haberdashery" ||
         module === "automotive" ||
+        module === "fashion_apparel" ||
         module === "agency" ||
         module === "stock"
       )
@@ -195,7 +197,7 @@ describe("architecture_construction (issue #799)", () => {
     const forbidden: ModuleKey[] = [
       "orders", "tables", "waiter", "kitchen", "reservations", "delivery",
       "inventory", "menu", "stock", "jewelry", "watch", "accessories", "cosmetics",
-      "wholesale", "tools_fittings", "haberdashery",
+      "wholesale", "tools_fittings", "haberdashery", "fashion_apparel",
     ];
     for (const module of forbidden) {
       expect(hasModule("architecture_construction", module), module).toBe(false);
@@ -248,7 +250,7 @@ describe("advertising_agency (issue #1128)", () => {
     const forbidden: ModuleKey[] = [
       "orders", "tables", "waiter", "kitchen", "reservations", "delivery",
       "inventory", "menu", "stock", "jewelry", "watch", "accessories", "cosmetics",
-      "wholesale", "tools_fittings", "haberdashery", "automotive",
+      "wholesale", "tools_fittings", "haberdashery", "automotive", "fashion_apparel",
     ];
     for (const module of forbidden) {
       expect(hasModule("advertising_agency", module), module).toBe(false);

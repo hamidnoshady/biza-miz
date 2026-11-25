@@ -100,6 +100,7 @@ describe("validateProvisionBody", () => {
       "wholesale",
       "tools_fittings",
       "haberdashery",
+      "fashion_apparel",
     ]) {
       expect(validateProvisionBody({ ...VALID, industry }).input?.industry, industry).toBe(industry);
     }

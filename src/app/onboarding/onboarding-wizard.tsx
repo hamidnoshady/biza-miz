@@ -43,6 +43,7 @@ const BUSINESS_NAME_EXAMPLES: Record<Industry, string> = {
   wholesale: "مثلاً پخش عمدهٔ کالای ایرانی",
   tools_fittings: "مثلاً ابزار و یراق‌آلات صنعت",
   haberdashery: "مثلاً خرازی رنگین‌کمان",
+  fashion_apparel: "مثلاً پوشاک مردانهٔ ایرانیان",
   service_saas: "مثلاً خدمات نرم‌افزاری ابری",
   architecture_construction: "مثلاً دفتر مهندسی و پیمانکاری سازه",
   automotive: "مثلاً نمایشگاه خودرو امید",

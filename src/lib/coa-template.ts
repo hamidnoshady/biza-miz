@@ -282,6 +282,17 @@ export const WELL_KNOWN_CODES = {
   haberdasheryInventory: "1373",
   haberdasherySalesRevenue: "4583",
   haberdasheryCogs: "5183",
+  // Issue #1567 — fashion (پوشاک، کیف، کفش و مد). Garments, shoes and bags
+  // are ordinary finished goods bought and resold, so the trade gets the same
+  // inventory/revenue/COGS triple the other trade-goods trades have, in its
+  // own accounts (1374/4584/5184) so a fashion shop reports its merchandise
+  // asset and gross margin separately from a haberdashery next door. Returns,
+  // markdowns, count shortages and write-downs all stay on the *shared*
+  // retail accounts (4400/5170/5190/4910) — a refund is a refund in every
+  // trade, and inventing a fashion-only one would fork the posting rules.
+  fashionInventory: "1374",
+  fashionSalesRevenue: "4584",
+  fashionCogs: "5184",
   // Phase 27 Wave 8 — the retail trades' in-transit account for inter-branch
   // transfers. F&B's 1350 (inventoryInTransit) is the same code cosmetics
   // uses for its *own* inventory, so the retail trades get their own 1360
@@ -564,6 +575,17 @@ const COST_OF_SALES_CODES_BY_INDUSTRY: Record<Industry, readonly string[]> = {
   ],
   haberdashery: [
     WELL_KNOWN_CODES.haberdasheryCogs,
+    WELL_KNOWN_CODES.inventoryWriteDownExpense,
+    WELL_KNOWN_CODES.periodicPurchases,
+    WELL_KNOWN_CODES.retailCountShortageExpense,
+  ],
+  // Issue #1567 — same finished-goods shape as the other trade-goods trades:
+  // merchandise delivered to customers (1374's own COGS), the write-down of
+  // stock that will not sell, periodic purchases while a period is open, and
+  // unexplained count shortage — all cost of sales, all shared retail
+  // accounts except the trade's own 5184.
+  fashion_apparel: [
+    WELL_KNOWN_CODES.fashionCogs,
     WELL_KNOWN_CODES.inventoryWriteDownExpense,
     WELL_KNOWN_CODES.periodicPurchases,
     WELL_KNOWN_CODES.retailCountShortageExpense,
@@ -1185,6 +1207,77 @@ export const HABERDASHERY_COA_TEMPLATE: TemplateAccount[] = [
   ...SHARED_EXPENSE_ACCOUNTS,
 ];
 
+/**
+ * Issue #1567 — fashion (پوشاک، کیف، کفش و مد) chart of accounts. The
+ * generic retail skeleton plus the trade's own merchandise triple (1374
+ * inventory / 4584 sales revenue / 5184 COGS), because a clothing, footwear
+ * and bags shop's stock is its largest asset and reports its gross margin on
+ * its own — exactly the Phase 38 shape wholesale/tools/haberdashery use.
+ *
+ * Everything fashion-specific about *returns, discounts/markdowns, inventory
+ * adjustments, count shortages and damaged goods* is deliberately NOT a new
+ * account here: 4400 برگشت از فروش, the shared retail write-down (5170),
+ * count-shortage (5190) and surplus-gain (4910) accounts, and the shared
+ * in-transit (1360) already carry those meanings for every retail trade, and
+ * the canonical posting rules post to them. A refund or a markdown in a
+ * fashion shop must land exactly where the same event lands in a
+ * haberdashery — one ledger, one set of rules. Supplier and customer balances
+ * are the shared 2100/1200; tax comes from the business's own tax.config,
+ * never a made-up exemption or rate.
+ *
+ * Fabrics sold by length use the same accounts: a decimal quantity is a
+ * property of `item_stock`, not of the chart.
+ */
+export const FASHION_APPAREL_COA_TEMPLATE: TemplateAccount[] = [
+  { code: "1000", name: "دارایی‌ها", type: "asset" },
+  { code: "1100", name: "صندوق", type: "asset", parentCode: "1000" },
+  { code: "1110", name: "بانک", type: "asset", parentCode: "1000" },
+  { code: "1120", name: "کارت‌خوان (در راه)", type: "asset", parentCode: "1000" },
+  { code: "1200", name: "حساب‌های دریافتنی", type: "asset", parentCode: "1000" },
+  { code: "1220", name: "مالیات بر ارزش افزوده خرید (قابل استرداد)", type: "asset", parentCode: "1000" },
+  { code: "1374", name: "موجودی پوشاک و کالای مد", type: "asset", parentCode: "1000" },
+  { code: "1360", name: "کالای در راه", type: "asset", parentCode: "1000" },
+  { code: "1400", name: "پیش‌پرداخت‌ها", type: "asset", parentCode: "1000" },
+  { code: "1500", name: "اثاثه و تجهیزات", type: "asset", parentCode: "1000" },
+
+  ...RETAIL_ASSET_ACCOUNTS,
+  ...SHARED_ASSET_ACCOUNTS,
+
+  { code: "2000", name: "بدهی‌ها", type: "liability" },
+  { code: "2100", name: "حساب‌های پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2200", name: "مالیات بر ارزش افزوده پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2300", name: "حقوق پرداختنی", type: "liability", parentCode: "2000" },
+  { code: "2410", name: "اعتبار فروشگاهی", type: "liability", parentCode: "2000" },
+  { code: "2420", name: "کارت هدیه", type: "liability", parentCode: "2000" },
+
+  ...SHARED_LIABILITY_ACCOUNTS,
+
+  { code: "3000", name: "حقوق صاحبان سرمایه", type: "equity" },
+  { code: "3100", name: "سرمایه", type: "equity", parentCode: "3000" },
+  { code: "3800", name: "سود (زیان) انباشته", type: "equity", parentCode: "3000" },
+  { code: "3900", name: "تراز افتتاحیه", type: "equity", parentCode: "3000" },
+
+  ...SHARED_EQUITY_ACCOUNTS,
+
+  { code: "4000", name: "درآمدها", type: "revenue" },
+  { code: "4584", name: "فروش پوشاک، کیف و کفش", type: "revenue", parentCode: "4000" },
+  { code: "4900", name: "سایر درآمدها", type: "revenue", parentCode: "4000" },
+  { code: "4400", name: "برگشت از فروش", type: "revenue", parentCode: "4000", isContra: true },
+
+  ...RETAIL_REVENUE_ACCOUNTS,
+  ...SHARED_REVENUE_ACCOUNTS,
+
+  { code: "5000", name: "هزینه‌ها", type: "expense" },
+  { code: "5184", name: "بهای تمام‌شده پوشاک و کالای مد فروخته‌شده", type: "expense", parentCode: "5000" },
+  { code: "5210", name: "پورسانت فروش", type: "expense", parentCode: "5000" },
+  { code: "5300", name: "اجاره", type: "expense", parentCode: "5000" },
+  { code: "5400", name: "آب، برق و گاز", type: "expense", parentCode: "5000" },
+  { code: "5600", name: "بازاریابی و تبلیغات", type: "expense", parentCode: "5000" },
+  { code: "5900", name: "سایر هزینه‌ها", type: "expense", parentCode: "5000" },
+  ...RETAIL_EXPENSE_ACCOUNTS,
+  ...SHARED_EXPENSE_ACCOUNTS,
+];
+
 export const SERVICE_SAAS_COA_TEMPLATE: TemplateAccount[] = [
   // Keep the shared Iranian accounting controls (cheques, payroll, VAT,
   // installments, assets and project materials) while removing hospitality
@@ -1425,6 +1518,10 @@ export function coaTemplateForIndustry(industry: Industry): readonly TemplateAcc
       return TOOLS_FITTINGS_COA_TEMPLATE;
     case "haberdashery":
       return HABERDASHERY_COA_TEMPLATE;
+    // Issue #1567 — the fashion trade's own chart: merchandise inventory,
+    // sales revenue and COGS over the generic retail skeleton.
+    case "fashion_apparel":
+      return FASHION_APPAREL_COA_TEMPLATE;
     case "automotive":
       return AUTOMOTIVE_COA_TEMPLATE;
     // Issue #1128 — the advertising agency's own chart: service revenues and

@@ -99,6 +99,19 @@ const TRADE_SAMPLES: Partial<Record<Industry, Partial<TradeSample>>> = {
     labelCode: "HB-1042",
     labelPrice: 95_000,
   },
+  // Issue #1567 — a fashion shop's preview shows garments and their
+  // size/colour variants rather than the generic «کالای نمونه» rows.
+  fashion_apparel: {
+    invoiceTitle: "فاکتور فروش پوشاک",
+    lines: [
+      { name: "پیراهن مردانهٔ کلاسیک — سایز M / مشکی", quantity: 1, detail: "کد کالا: TS-100 · رنگ مشکی · سایز M", unitPrice: 4_850_000, lineTotal: 4_850_000 },
+      { name: "کفش اسپرت زنانه — سایز ۳۸ / سفید", quantity: 1, detail: "کد کالا: SN-2042 · رنگ سفید · سایز ۳۸", unitPrice: 7_200_000, lineTotal: 7_200_000 },
+    ],
+    discount: 300_000,
+    labelName: "پیراهن مردانهٔ کلاسیک",
+    labelCode: "TS-100",
+    labelPrice: 4_850_000,
+  },
   service_saas: {
     invoiceTitle: "فاکتور خدمات",
     receiptTitle: "رسید دریافت وجه",

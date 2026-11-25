@@ -16,6 +16,8 @@ const INVENTORY_ACCOUNT_CODE: Record<string, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  // Issue #1567 — markdowns relieve the trade's own merchandise inventory.
+  fashion_apparel: WELL_KNOWN_CODES.fashionInventory,
 };
 
 function inventoryCodeFor(industry: string | null): string | null {

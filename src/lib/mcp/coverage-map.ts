@@ -1480,6 +1480,23 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     note: "AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only",
     test: "integration/wholesale.integration.test.ts",
   },
+  {
+    // Issue #1567 — the fashion trade's namespace is the same shared
+    // trade-goods route builder bound per namespace, exactly like the four
+    // verticals above, so its verbs are the same three lanes plus the
+    // trade-goods board read.
+    id: "vertical_fashion",
+    module: "Verticals",
+    entity: "Fashion apparel (styles, size/colour variants, stock)",
+    routes: ["fashion"],
+    ops: {
+      listDetail: ["list_trade_goods_items"],
+      create: ["fashion_apparel.item.create", "fashion_apparel.stock.update"],
+      lifecycle: ["fashion_apparel.item.sell"],
+    },
+    note: "1567 — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only",
+    test: "integration/trade-goods.integration.test.ts",
+  },
 ];
 
 /**

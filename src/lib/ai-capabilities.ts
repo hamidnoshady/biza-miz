@@ -339,6 +339,11 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "haberdashery.item.create": PERMISSIONS.inventoryAdjust,
   "haberdashery.stock.update": PERMISSIONS.inventoryAdjust,
   "haberdashery.item.sell": PERMISSIONS.ordersCreate,
+  // Issue #1567 — fashion's lanes are the same shared trade-goods routes,
+  // so they carry the same guards.
+  "fashion_apparel.item.create": PERMISSIONS.inventoryAdjust,
+  "fashion_apparel.stock.update": PERMISSIONS.inventoryAdjust,
+  "fashion_apparel.item.sell": PERMISSIONS.ordersCreate,
   // Batch AP — data-transfer writes. The engine key is copied from the
   // routes' dataOwner(); the executor additionally re-enforces the route's
   // second key (the entity's own permission + the mapping kind's engine).

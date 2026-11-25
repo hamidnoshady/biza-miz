@@ -118,6 +118,20 @@ const SETUP_SHAPE: Record<Industry, SetupShape> = {
   // opening balances, and its accounts come from
   // `coaTemplateForIndustry("advertising_agency")` on the `accounts` step.
   advertising_agency: "service",
+  // Issue #1567 — the fashion trade walks the retail shape: business →
+  // accounts → tax → users → hardware → backup → opening, with neither F&B's
+  // `costing`/`menu` pair (it has no `inventory_items` recipe store and no
+  // `menu_items`) nor AEC's operating-profile step in this wave (the trade's
+  // operating profiles — men's/women's/children's, footwear, bags, fabrics,
+  // uniforms, wholesale, mixed — are presets chosen in tenant settings until
+  // a persisted, honoured wizard question exists, the same readiness rule
+  // issue #1128 applied to the agency's eight presets). Its catalogue
+  // pointer on the finish page is the products workspace, `/accounting/products`
+  // — see catalogueHrefFor — and its accounts come from
+  // `coaTemplateForIndustry("fashion_apparel")` on the `accounts` step.
+  // `opening` is where a fashion retailer registers its real opening stock
+  // through the canonical opening/receiving documents, never as fake sales.
+  fashion_apparel: "retail",
 };
 
 /**
@@ -186,6 +200,10 @@ export function catalogueHrefFor(industry: Industry): string | null {
     case "wholesale":
     case "tools_fittings":
     case "haberdashery":
+    // Issue #1567 — a fashion shop's catalogue lives in the same products
+    // workspace: one style (parent) with size/colour variant children is
+    // exactly the variant board this door manages.
+    case "fashion_apparel":
       return "/accounting/products";
     case "jewelry":
       return "/accounting/jewelry";

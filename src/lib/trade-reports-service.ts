@@ -52,6 +52,10 @@ const SALE_EVENT_PREFIX: Partial<Record<Industry, string>> = {
   wholesale: "wholesale",
   tools_fittings: "tools",
   haberdashery: "haberdashery",
+  // Issue #1567 — fashion's events carry the trade key as their prefix
+  // (`fashion_apparel.sale_revenue`), exactly as the shared trade-goods sell
+  // path emits them.
+  fashion_apparel: "fashion_apparel",
 };
 
 /** How many days without a sale makes stock "dead" — the warehouse module's own default. */

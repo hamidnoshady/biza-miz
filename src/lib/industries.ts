@@ -72,6 +72,24 @@ export const INDUSTRIES = [
   // project-based in the *Workspace eligibility* sense even though its family
   // is `service`, so the eligibility matrix that issue builds must name it.
   "advertising_agency",
+  // Issue #1567 — Clothing, Footwear & Fashion (پوشاک، کیف، کفش و مد). One
+  // business type covering the whole trade — clothing, footwear, bags &
+  // leather, fashion accessories, fabrics/textiles, uniforms, wholesale
+  // fashion and mixed fashion retail — because which of those a shop stocks
+  // is an *operating profile* inside the industry (see industry-profile.ts),
+  // never a second key with a different chart of accounts. Existing
+  // `accessories` (بدلیجات) and `haberdashery` (خرازی) stay intact; a mixed
+  // `fashion_apparel` tenant may sell their categories too.
+  //
+  // It belongs to the `retail` family (below): a garment, a shoe or a bag is
+  // a priced good sold from `items`/`item_stock` with a retail invoice — one
+  // style (parent) with independently sellable size/colour variants, exactly
+  // the trade-goods shape Phase 38 gave wholesale/tools/haberdashery. So it
+  // registers as a catalogue trade, joins the products workspace's variant
+  // board, and inherits no café module. `hasSellableCatalogue` is therefore
+  // true, the Woo/CMS sync maps its products like any other retail trade,
+  // and its storefront orders import as retail sales.
+  "fashion_apparel",
 ] as const;
 export type Industry = (typeof INDUSTRIES)[number];
 
@@ -101,6 +119,9 @@ export const INDUSTRY_LABELS: Record<Industry, string> = {
   // brand block stays the profile's own copy (industry-profile.ts) and the
   // business's own name stays whatever it registered.
   advertising_agency: "آژانس تبلیغاتی",
+  // Issue #1567 — the English label (used wherever a Latin name is wanted)
+  // is "Clothing, Footwear & Fashion".
+  fashion_apparel: "پوشاک، کیف، کفش و مد",
 };
 
 export function isIndustry(value: string): value is Industry {
@@ -161,6 +182,12 @@ export const RETAIL_CATALOGUE_INDUSTRIES = [
   "tools_fittings",
   "haberdashery",
   "automotive",
+  // Issue #1567 — fashion is a priced-goods catalogue trade: garments, shoes
+  // and bags are `items`/`item_stock` rows sold through the products
+  // workspace's variant board, so it sits here exactly like the trade-goods
+  // trades and the shared engines (storefront sync, order ingest, retail
+  // posting) treat it as retail.
+  "fashion_apparel",
 ] as const;
 export type RetailCatalogueIndustry = (typeof RETAIL_CATALOGUE_INDUSTRIES)[number];
 

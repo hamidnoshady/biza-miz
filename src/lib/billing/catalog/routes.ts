@@ -104,6 +104,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   connections: keys("operations.shared"),
   "tools-fittings": keys("retail.trades"),
   haberdashery: keys("retail.trades"),
+  // Issue #1567 — a fashion shop's counter and variant board are the same
+  // retail capability the other trades bill under: `/api/fashion` is the
+  // shared trade-goods routes under a new segment, not a charged feature.
+  fashion: keys("retail.trades"),
   merchandising: keys("retail.trades"),
   jewelry: keys("retail.trades"),
   watch: keys("retail.trades"),

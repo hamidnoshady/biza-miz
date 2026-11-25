@@ -139,6 +139,10 @@ function variantApiFor(industry: Industry): string | null {
       return "/api/tools-fittings";
     case "haberdashery":
       return "/api/haberdashery";
+    // Issue #1567 — fashion loads its variant board through the same shared
+    // trade-goods handlers; only the URL namespace differs.
+    case "fashion_apparel":
+      return "/api/fashion";
     default:
       return null;
   }
