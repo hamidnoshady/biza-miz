@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { nextPath, prevPath, stepIndex, stepsFor, STEPS } from "./steps";
 import type { WizardStep } from "@/lib/wizard-steps";
 import { useSetupIndustry } from "./industry-context";
+import { SetupStepHelp } from "./step-help";
 import { isNotableApiFailure, recordApiFailure } from "@/lib/error-report";
 
 export interface ApiResult<T> {
@@ -379,6 +380,10 @@ export function StepShell({
           {description}
         </p>
       </header>
+
+      {/* Issue #1239 / ESH-90 — inline help inside the step itself: a published
+          KB excerpt when one resolves, the step's local lines otherwise. */}
+      <SetupStepHelp step={step} />
 
       {children}
 

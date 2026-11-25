@@ -515,6 +515,33 @@ export async function kbGuideForSection(
 }
 
 /**
+ * The published guide that claims a section, **with its Markdown body**.
+ *
+ * The wizard's inline help (issue #1239 / ESH-90) needs the body, not only the
+ * slug and title `kbGuideForSection` returns: it extracts the paragraph for the
+ * current step. Kept as a separate read so no existing caller starts carrying
+ * an article body it never uses.
+ */
+export async function kbGuideBodyForSection(
+  sectionKey: string,
+): Promise<{ slug: string; title: string; bodyMarkdown: string } | null> {
+  const { rows } = await query<{ slug: string; title: string; body_md: string | null }>(
+    `${VISIBLE_CATEGORIES_CTE}
+     SELECT a.slug, a.title, a.body_md
+       FROM knowledge_articles a
+      WHERE a.status = 'published'
+        AND $1 = ANY(a.section_keys)
+        AND ${ARTICLE_IN_VISIBLE_CATEGORY}
+      ORDER BY a.sort_order, a.updated_at DESC
+      LIMIT 1`,
+    [sectionKey],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return { slug: row.slug, title: row.title, bodyMarkdown: row.body_md ?? "" };
+}
+
+/**
  * Other published guides in the same *exact* Knowledge category as the current guide.
  * This keeps a Products help modal within Products (not its parent Inventory
  * category), and works equally for POS, Inventory, and future sections.

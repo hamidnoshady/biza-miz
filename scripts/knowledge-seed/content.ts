@@ -167,7 +167,27 @@ export const SEED_ARTICLES: SeedArticle[] = [
     title: "جادوی راه‌اندازی اولیه، قدم‌به‌قدم",
     summary: "از نام کسب‌وکار تا اولین فروش: شعبه، منو، مالیات، روش‌های پرداخت، چاپگر و موجودی اولیه.",
     category: "getting-started",
-    sectionKeys: [],
+    // Issue #1239 / ESH-90 — the wizard's own steps read this article inline
+    // through the `setup` section, and each step is also a knowledge page so
+    // the editor can point a per-step article at it later.
+    sectionKeys: [
+      "setup",
+      "page:/setup",
+      "page:/setup/business",
+      "page:/setup/aec-profile",
+      "page:/setup/apps",
+      "page:/setup/app-setup",
+      "page:/setup/import",
+      "page:/setup/accounts",
+      "page:/setup/costing",
+      "page:/setup/tax",
+      "page:/setup/users",
+      "page:/setup/menu",
+      "page:/setup/hardware",
+      "page:/setup/backup",
+      "page:/setup/opening",
+      "page:/setup/finish",
+    ],
     tagSlugs: ["quickstart"],
     sortOrder: 20,
     status: "published",

@@ -285,15 +285,14 @@ describe("provisioning with an industry", () => {
     }
   });
 
-  it("treats a console-provisioned agency as a finished setup, because it walks no menu step", async () => {
-    // `shouldCompleteSetupForPlatformProvision` reads the wizard rather than
-    // restating a list: the agency walks the `service` shape (wizard-steps.ts),
-    // so it has no `menu` step and provisioning it is a complete setup, not a
-    // wizard waiting on a café menu the trade will never have.
-    expect(provisioning.shouldCompleteSetupForPlatformProvision("advertising_agency")).toBe(true);
+  it("keeps a console-provisioned agency in setup, because every trade now meets the wizard", async () => {
+    // Issue #1239 / ESH-90 supersedes the old "non-F&B is ready to enter"
+    // shortcut: the wizard is also where apps are chosen and the profile is
+    // recorded, so provisioning never stamps completion.
+    expect(provisioning.shouldCompleteSetupForPlatformProvision("advertising_agency")).toBe(false);
     const { businessId } = await provision("advertising_agency");
-    expect(await completedAt(businessId)).not.toBeNull();
-    expect(await setupState.isSetupComplete(businessId)).toBe(true);
+    expect(await completedAt(businessId)).toBeNull();
+    expect(await setupState.isSetupComplete(businessId)).toBe(false);
   });
 
   it("still defaults to food_service when no industry is named", async () => {
@@ -313,14 +312,14 @@ describe("provisioning with an industry", () => {
     expect(rows[0].industry).toBe("food_service");
   });
 
-  it("keeps a bare console-provisioned F&B business in setup while preserving the other-trade shortcut", async () => {
+  it("keeps console-provisioned businesses of every trade in setup", async () => {
     const foodBusiness = await provision("food_service");
     expect(await completedAt(foodBusiness.businessId)).toBeNull();
     expect(await setupState.isSetupComplete(foodBusiness.businessId)).toBe(false);
 
     const retailBusiness = await provision("jewelry");
-    expect(await completedAt(retailBusiness.businessId)).not.toBeNull();
-    expect(await setupState.isSetupComplete(retailBusiness.businessId)).toBe(true);
+    expect(await completedAt(retailBusiness.businessId)).toBeNull();
+    expect(await setupState.isSetupComplete(retailBusiness.businessId)).toBe(false);
   });
 });
 
