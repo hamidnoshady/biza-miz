@@ -34,19 +34,17 @@ describe("setupReadiness", () => {
       accounts: true,
       costing: true,
       tax: true,
-      menu: true,
     });
   });
 
-  it("does not accept a menu with zero sellable items (issue #808 §3)", () => {
+  it("keeps menu entry optional for Finish; POS retains its separate readiness guard (#1580)", () => {
     const readiness = setupReadiness({
       industry: "food_service",
       ...PRESENT,
       sellableMenuItems: 0,
     });
-    expect(readiness.ready).toBe(false);
-    expect(readiness.steps.menu).toBe(false);
-    expect(readiness.missing.join(" ")).toContain("آیتم فعال");
+    expect(readiness.ready).toBe(true);
+    expect(readiness.steps).not.toHaveProperty("menu");
   });
 
   it("requires costing for F&B only", () => {
@@ -110,7 +108,7 @@ describe("setupReadiness", () => {
     });
     expect(readiness.ready).toBe(false);
     expect(readiness.missing.length).toBe(3); // accounts, costing, tax
-    expect(readiness.steps).toHaveProperty("menu");
+    expect(readiness.steps).not.toHaveProperty("menu");
   });
 });
 
@@ -132,7 +130,7 @@ describe("wizardStepReconciliation", () => {
       readiness,
     );
     expect(diff.done.sort()).toEqual(["costing", "tax"]);
-    expect(diff.undone.sort()).toEqual(["business", "menu"]);
+    expect(diff.undone.sort()).toEqual(["business"]);
   });
 
   it("never touches optional steps", () => {
