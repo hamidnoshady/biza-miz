@@ -14,7 +14,7 @@ export default async function AttributesPage() {
       <SpecialistAttributes industry={specialist.industry} />
     </PageShell>
   );
-  const { canEdit, canManageStore } = await requireProductWorkspace();
+  const { canEdit, canManageStore, industry } = await requireProductWorkspace();
   return (
     <PageShell>
       <PageHeader
@@ -24,7 +24,7 @@ export default async function AttributesPage() {
           : "نمایش ویژگی‌های محصول شعبه و مقدارهای مجاز؛ این دسترسی فقط‌خواندنی است."}
         actions={<KnowledgeHelpButton section="pos" />}
       />
-      <AttributesSection canEdit={canEdit} />
+      <AttributesSection canEdit={canEdit} industry={industry} />
       {canManageStore ? <WooAttributeMapping /> : null}
     </PageShell>
   );

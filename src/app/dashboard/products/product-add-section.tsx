@@ -43,6 +43,8 @@ import {
 import { attributeComparisonKey } from "@/lib/product-attributes";
 import { MediaGalleryField, MediaImageField } from "../media/media-picker";
 import { ProductContentFields } from "./product-content-fields";
+import { VariantMatrixBuilder } from "./variant-matrix-builder";
+import type { MatrixDraftSeed } from "@/lib/variant-matrix-draft";
 import { isProductPublishStatus, type ProductPublishStatus } from "@/lib/product-content";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { PercentInput, PriceInput } from "../number-fields";
@@ -559,6 +561,42 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     }));
     clearFeedback();
     if (movedBarcode) setNotice("بارکد محصول به تنوع اول منتقل شد؛ هر تنوع باید بارکد خودش را داشته باشد.");
+  }
+
+  /**
+   * Appends the size × colour grid (#1567 P0 2.5). Same first-row barcode
+   * hand-off as `addVariantRow`: when the product was still simple, its
+   * barcode moves to the first generated row, never to all of them.
+   */
+  function generateMatrixRows(seeds: MatrixDraftSeed[], meta: { duplicates: number; truncated: number }) {
+    if (seeds.length === 0) return;
+    const wasSimple = form.variants.length === 0;
+    const movedBarcode = wasSimple ? form.barcode : "";
+    setForm((current) => ({
+      ...current,
+      barcode: wasSimple ? "" : current.barcode,
+      autoBarcode: wasSimple ? false : current.autoBarcode,
+      variants: [
+        ...current.variants,
+        ...seeds.map((seed, index) => ({
+          id: uniqueId("variant"),
+          values: { ...seed.values },
+          unresolvedValues: {},
+          sku: "",
+          barcode: wasSimple && index === 0 ? movedBarcode : "",
+          autoBarcode: wasSimple && index === 0 ? current.autoBarcode : false,
+          imageMediaId: null,
+          sellPrice: "",
+          purchasePrice: "",
+          quantity: "",
+        })),
+      ],
+    }));
+    clearFeedback();
+    const parts = [`${toPersianDigits(seeds.length)} تنوع ساخته شد`];
+    if (meta.duplicates > 0) parts.push(`${toPersianDigits(meta.duplicates)} تکراری رد شد`);
+    if (meta.truncated > 0) parts.push(`${toPersianDigits(meta.truncated)} مورد به خاطر سقف ۱۰۰ ردیف ساخته نشد`);
+    setNotice(`${parts.join("؛ ")}.`);
   }
 
   function acknowledgeDefinitionChanges() {
@@ -1223,6 +1261,15 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                         <Link href={accountingProductsHref("attributes")} className="font-semibold underline underline-offset-4">مدیریت ویژگی‌ها</Link>{" "}
                         بروید و سپس این فرم را تازه‌سازی کنید.
                       </div>
+                    ) : null}
+                    {activeDefinitions.length > 0 ? (
+                      <VariantMatrixBuilder
+                        definitions={activeDefinitions}
+                        existing={form.variants.map((variant) => ({ values: variant.values }))}
+                        maxTotal={100}
+                        disabled={busy}
+                        onGenerate={generateMatrixRows}
+                      />
                     ) : null}
                     {form.variants.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-border px-4 py-6 text-center">

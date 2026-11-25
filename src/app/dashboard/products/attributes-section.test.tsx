@@ -135,4 +135,35 @@ describe("AttributesSection", () => {
     expect(screen.getByRole("button", { name: "ویرایش و غیرفعال‌سازی" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "حذف ویژگی" })).toBeNull();
   });
+
+  it("offers the industry's attribute templates only to an editor, and applies one (#1567)", async () => {
+    fetchMock
+      .mockResolvedValueOnce(listResponse())
+      .mockResolvedValueOnce(jsonResponse({ ok: true, created: 3, skipped: 1 }))
+      .mockResolvedValueOnce(listResponse());
+    const user = userEvent.setup();
+    render(<AttributesSection canEdit industry="fashion_apparel" />);
+
+    await user.click(await screen.findByRole("button", { name: "افزودن از قالب" }));
+    await user.click(await screen.findByRole("menuitem", { name: "پوشاک" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    const [, post] = fetchMock.mock.calls[1];
+    expect(post?.method).toBe("POST");
+    expect(JSON.parse(String(post?.body))).toEqual({ templateKey: "fashion_apparel" });
+    // No jest-dom in this project — plain DOM assertions (see expense-section).
+    expect((await screen.findByRole("status")).textContent).toMatch(/۳ ویژگی اضافه شد/);
+  });
+
+  it("shows no template control without edit permission or an industry", async () => {
+    fetchMock.mockResolvedValue(listResponse());
+    const { unmount } = render(<AttributesSection canEdit={false} industry="fashion_apparel" />);
+    await screen.findByText("رنگ");
+    expect(screen.queryByRole("button", { name: "افزودن از قالب" })).toBeNull();
+    unmount();
+
+    render(<AttributesSection canEdit />);
+    await screen.findByText("رنگ");
+    expect(screen.queryByRole("button", { name: "افزودن از قالب" })).toBeNull();
+  });
 });

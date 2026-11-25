@@ -6,6 +6,7 @@
  * authorized it. Renaming/deactivating a definition never rewrites snapshots;
  * hard deletion is allowed only while it is unused.
  */
+import type { PoolClient } from "pg";
 import { query, withTenantTransaction } from "./db";
 import {
   ATTRIBUTE_NAME_MAX_LENGTH,
@@ -14,6 +15,7 @@ import {
   attributeComparisonKey,
   normalizeAttributeText,
 } from "./product-attributes";
+import { invalidTemplateDefinition, type AttributeTemplate } from "./product-attribute-templates";
 import { isUuid } from "./uuid";
 
 export interface AttributeDefinition {
@@ -231,6 +233,54 @@ export async function deleteAttributeDefinition(
     );
     return (rowCount ?? 0) > 0 ? {} : { error: "not_found" };
   }, { locationId });
+}
+
+/**
+ * Applies a per-category attribute template to one branch (#1567 P0 2.2–2.3).
+ *
+ * Every definition the branch does not already own (by normalized name) is
+ * inserted with the template's options; one it does own is left exactly as
+ * the tenant edited it — the same skip-existing rule as chart-of-accounts
+ * seeding. The caller must already be inside a transaction: the name-space
+ * advisory lock is transaction-scoped and a partial application must roll
+ * back with the business, never half-land.
+ */
+export async function applyAttributeTemplate(
+  client: PoolClient,
+  input: { locationId: string; template: AttributeTemplate },
+): Promise<{ created: number; skipped: number }> {
+  const invalid = invalidTemplateDefinition(input.template);
+  if (invalid) throw new Error(invalid);
+
+  // The same lock `createAttributeDefinition` takes, so a template application
+  // and a concurrent «افزودن ویژگی» cannot race each other to a duplicate.
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+    `product_attribute_name:${input.locationId}`,
+  ]);
+  const { rows } = await client.query<{ name: string }>(
+    "SELECT name FROM item_attribute_definitions WHERE location_id = $1",
+    [input.locationId],
+  );
+  const existing = new Set(rows.map((row) => attributeComparisonKey(row.name)));
+
+  let created = 0;
+  let skipped = 0;
+  for (const definition of input.template.attributes) {
+    const name = normalizeAttributeText(definition.name);
+    if (existing.has(attributeComparisonKey(name))) {
+      skipped += 1;
+      continue;
+    }
+    const options = definition.options.map((option) => normalizeAttributeText(option));
+    await client.query(
+      `INSERT INTO item_attribute_definitions (location_id, name, options, is_active)
+       VALUES ($1, $2, $3, true)`,
+      [input.locationId, name, options],
+    );
+    existing.add(attributeComparisonKey(name));
+    created += 1;
+  }
+  return { created, skipped };
 }
 
 function isUniqueViolation(err: unknown): boolean {

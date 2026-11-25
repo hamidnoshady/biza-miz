@@ -37,6 +37,8 @@ import { lockChartOfAccounts, recordAccountAudit } from "./accounts-service";
 import { attachmentLevel, type AttachableParent } from "./account-hierarchy";
 import { wizardStepsForIndustry } from "./wizard-steps";
 import { seedPaymentMethods } from "./payment-methods-service";
+import { defaultAttributeTemplateFor } from "./product-attribute-templates";
+import { applyAttributeTemplate } from "./product-attributes-service";
 import { isMobilePhone, phoneE164 } from "./phone";
 import { generateSecret, generateURI } from "otplib";
 import { provisionMfaEnrolment } from "./mfa-service";
@@ -731,6 +733,18 @@ async function insertBusiness(
   // «نقدی» cannot take money. Seeded rather than implied so the owner can
   // rename and reorder them from day one.
   await seedPaymentMethods(client, businessId, input.industry ?? "food_service");
+
+  // #1567 P0 2.2–2.3 — a new fashion shop opens «ویژگی محصول» with sizes,
+  // colours and brands already in place instead of an empty master. These
+  // are ordinary tenant attribute rows inside the same transaction as the
+  // business: editable, deletable while unused, and never re-seeded over an
+  // edit (skip-existing, like the chart of accounts). Industries without a
+  // default template seed nothing — the catalog decides, not a hardcode
+  // buried here.
+  const provisionAttributeTemplate = defaultAttributeTemplateFor(input.industry ?? "food_service");
+  if (provisionAttributeTemplate) {
+    await applyAttributeTemplate(client, { locationId, template: provisionAttributeTemplate });
+  }
 
   // Phase 25 — features this trade has no use for start off, in the same
   // transaction that creates the business so there is never a window where
