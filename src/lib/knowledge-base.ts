@@ -241,7 +241,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/setup/costing", "روش قیمت‌گذاری موجودی"],
     ["/setup/tax", "تنظیم مالیات"],
     ["/setup/users", "نقش‌ها و کاربران"],
-    ["/setup/menu", "ورود منو"],
+    // Legacy /setup/menu redirects to the unified /setup/import flow (#1580).
     ["/setup/hardware", "اتصال سخت‌افزار"],
     ["/setup/backup", "مقصد پشتیبان‌گیری"],
     ["/setup/opening", "مانده‌های افتتاحیه"],
