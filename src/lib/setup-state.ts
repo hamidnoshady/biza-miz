@@ -103,6 +103,9 @@ export async function requireSetupStepForIndustry(
 ): Promise<NextResponse | null> {
   const industry = await getBusinessIndustry(businessId);
   if (!industry) return null;
+  // #1580: restaurant menu writes still work inside /setup/import even though
+  // "menu" is no longer a separate wizard step. Keep the same industry gate.
+  if (step === "menu" && industry === "food_service") return null;
   if (wizardStepsForIndustry(industry).includes(step)) return null;
   return NextResponse.json({ error: "step_not_in_industry" }, { status: 403 });
 }
