@@ -67,7 +67,11 @@ interface DocumentSummary {
   in_review: number;
   draft: number;
 }
-import type { WorkspaceLookups } from "./use-workspace-lookups";
+import {
+  partyPickerOptions,
+  useWorkspacePartySearch,
+  type WorkspaceLookups,
+} from "./use-workspace-lookups";
 
 export interface DocumentRow {
   id: string;
@@ -336,6 +340,15 @@ function DocumentDialog({
   const statusOwnedByWorkflow = document ? documentStatusIsWorkflowOwned(document.status) : false;
   const [projectId, setProjectId] = useState(document?.projectId ?? defaultProjectId ?? "");
   const [partyId, setPartyId] = useState(document?.partyId ?? "");
+  // Issue #907 F10 — «مشتری / طرف حساب» searches the whole directory on the
+  // server; the selected row is resolved by id so editing never blanks it.
+  const [partyTerm, setPartyTerm] = useState("");
+  const partyMatches = useWorkspacePartySearch(partyTerm, partyId);
+  const partyNote = partyMatches.error
+    ? partyMatches.error
+    : partyMatches.hasMore
+      ? `${toPersianDigits(String(partyMatches.parties.length))} مورد از ${toPersianDigits(String(partyMatches.total))} مورد نمایش داده شد؛ نام را دقیق‌تر کنید.`
+      : undefined;
   const [contractId, setContractId] = useState(document?.contractId ?? "");
   const [mediaAssetId, setMediaAssetId] = useState(document?.mediaAssetId ?? "");
   const [tags, setTags] = useState(document?.tags.join("، ") ?? "");
@@ -491,9 +504,12 @@ function DocumentDialog({
           label="مشتری / طرف حساب"
           value={partyId}
           onChange={setPartyId}
-          options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+          options={partyPickerOptions(lookups.parties, partyMatches, partyId)}
           searchable
           searchPlaceholder="جست‌وجوی طرف حساب…"
+          onSearch={setPartyTerm}
+          searching={partyMatches.loading}
+          searchNote={partyNote}
         />
         <Field label="برچسب‌ها" hint="با «،» جدا کنید">
           <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />
