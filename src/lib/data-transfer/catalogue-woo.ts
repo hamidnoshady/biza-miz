@@ -13,7 +13,7 @@ import { listTerms } from "../integrations/woo-taxonomy-service";
 import { buildMappedWooAttributes } from "../integrations/product-attribute-mappings-service";
 import { inferWooProductType, wooVariationAttributes } from "../integrations/woo-catalogue";
 import { attributeComparisonKey } from "../product-attributes";
-import type { CatalogueRecord } from "./catalogue-plan";
+import { catalogueChildOptions, sameVariantOptions, type CatalogueRecord } from "./catalogue-plan";
 import { catalogueSummary, type CatalogueOwner } from "./catalogue-service";
 
 type Remote = {
@@ -137,8 +137,8 @@ export async function previewCatalogueWoo(owner: CatalogueOwner, runId: string, 
         if (candidates.length !== 1) continue;
         const child = candidates[0];
         const options = child.options;
-        if (options.length !== 1 || attributeComparisonKey(options[0].name) !== attributeComparisonKey(record.family.axis) ||
-            attributeComparisonKey(options[0].option) !== attributeComparisonKey(row.values.option!)) continue;
+        if (!sameVariantOptions(catalogueChildOptions(record.family, row),
+          options.map(option => ({ name: option.name, value: option.option })))) continue;
         variations.push({ sku: row.sku!, id: String(child.id), remoteSku: child.sku, options });
       }
     }

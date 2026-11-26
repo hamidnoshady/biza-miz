@@ -1756,3 +1756,117 @@ describe("party, financial document, inventory, rejected remote edits & cutover 
     expect(Number(itemsCount.rows[0].n)).toBe(0);
   });
 });
+
+describe("GH #1567 F6 — multi-axis size × colour catalogue import", () => {
+  const SIZES = ["S", "M", "L"];
+  const COLOURS = ["مشکی", "سفید", "کرم"];
+  const header = "شناسه کالا,نام کالا,بارکد,شناسه والد,نام والد,گزینه تنوع,گزینه تنوع ۲,مجموعه";
+  /** `styles` × 9 children as a CSV, Persian digits in SKUs, Arabic ي/ك in some cells. */
+  function gridCsv(styles: number, prefix = "MNT") {
+    const lines = [header];
+    for (let s = 1; s <= styles; s += 1) {
+      const parent = `${prefix}-${String(s).padStart(3, "0")}`;
+      SIZES.forEach((size, i) => COLOURS.forEach((colour, j) => {
+        const sku = `${parent}-${size}-${j}`;
+        const body = String(626_000_000_000 + s * 100 + i * 10 + j);
+        const check = (10 - ([...body].reduce((sum, d, k) => sum + Number(d) * (k % 2 ? 3 : 1), 0) % 10)) % 10;
+        const barcode = `${body}${check}`;
+        const shownColour = s % 2 === 0 ? colour.replaceAll("ی", "ي").replaceAll("ک", "ك") : colour;
+        lines.push([s % 3 === 0 ? sku.replace(/\d/g, d => "۰۱۲۳۴۵۶۷۸۹"[Number(d)]) : sku,
+          `مانتو ${s} ${size} ${colour}`, barcode, parent, `مانتو مدل ${s}`, size, shownColour, "پاییز ۱۴۰۵"].join(","));
+      }));
+    }
+    return new TextEncoder().encode(lines.join("\n") + "\n").buffer as ArrayBuffer;
+  }
+  /** Apply is batched (the screen calls it until done); drive it to the end. */
+  async function applyAll(catalogue: typeof import("../src/lib/data-transfer/catalogue-service"),
+    owner: Parameters<typeof catalogue.applyCatalogue>[0], runId: string) {
+    let status = (await catalogue.applyCatalogue(owner, runId, true)).run.status;
+    for (let guard = 0; status === "applying" && guard < 50; guard += 1) {
+      status = (await catalogue.applyCatalogue(owner, runId, true)).run.status;
+    }
+    return status;
+  }
+  const sideEffects = async (businessId: string, locationId: string) => (await db.query<{ stock: string; journals: string; counts: string }>(
+    `SELECT (SELECT count(*) FROM item_stock s JOIN items i ON i.id=s.item_id WHERE i.location_id=$2)::text AS stock,
+            (SELECT count(*) FROM journal_entries WHERE business_id=$1)::text AS journals,
+            (SELECT count(*) FROM item_stock_counts WHERE location_id=$2)::text AS counts`, [businessId, locationId])).rows[0];
+
+  it("acceptance: 100 styles × 9 variants from CSV — one parent per style, 900 children with both axes, unique SKUs/barcodes, no stock or GL, idempotent retry", async () => {
+    const catalogue = await import("../src/lib/data-transfer/catalogue-service");
+    const profile = await import("../src/lib/data-transfer/catalogue-profile");
+    const business = await seedBusiness("fashion_apparel", "Fashion 100x9");
+    const owner = { businessId: business.id, locationId: business.locationId, target: "retail" as const, actor };
+    await db.query("INSERT INTO item_attribute_definitions (location_id,name,options) VALUES ($1,'سایز',ARRAY['S','M','L']),($1,'رنگ',ARRAY['مشکی','سفید','کرم'])", [business.locationId]);
+    const sheet = profile.readCatalogueCsv(gridCsv(100), profile.CATALOGUE_MAX_ROWS);
+    const mapping = profile.suggestCatalogueMapping(sheet.columns);
+    expect(mapping).toMatchObject({ sku: 0, title: 1, barcode: 2, parent_sku: 3, parent_title: 4, option: 5, option_2: 6, collection: 7 });
+    const input = { sheet, mapping, fileName: "grid.csv", sourceName: "fashion-grid", fingerprint: randomUUID(),
+      fallbackBrand: "برند آزمون", axis: "", axes: ["سایز", "رنگ"], duplicateRows: [] };
+    const before = await sideEffects(business.id, business.locationId);
+
+    await asBusiness(owner.businessId, async () => {
+      const runId = await catalogue.stageCatalogue(owner, input);
+      const staged = await catalogue.catalogueItems(owner, runId);
+      expect(staged.filter(item => item.outcome === "create_new")).toHaveLength(100);
+      expect(staged.filter(item => item.outcome === "skipped")).toHaveLength(800);
+      expect(await countItems(business.locationId)).toBe(0);
+      expect(await applyAll(catalogue, owner, runId)).toBe("applied");
+    });
+
+    const items = await db.query<{ kind: string; n: string }>(
+      "SELECT kind, count(*)::text AS n FROM items WHERE location_id=$1 GROUP BY kind ORDER BY kind", [business.locationId]);
+    expect(items.rows).toEqual([{ kind: "variant_child", n: "900" }, { kind: "variant_parent", n: "100" }]);
+    const children = await db.query<{ sku: string; parent_sku: string; axes: Record<string, string>; barcodes: string[] }>(
+      `SELECT c.sku, p.sku AS parent_sku,
+              (SELECT jsonb_object_agg(a.name, a.value) FROM item_variant_attributes a WHERE a.item_id=c.id) AS axes,
+              ARRAY(SELECT b.code FROM item_barcodes b WHERE b.item_id=c.id) AS barcodes
+         FROM items c JOIN items p ON p.id=c.parent_item_id WHERE c.location_id=$1`, [business.locationId]);
+    expect(children.rows).toHaveLength(900);
+    expect(new Set(children.rows.map(row => row.sku)).size).toBe(900);
+    expect(new Set(children.rows.flatMap(row => row.barcodes)).size).toBe(900);
+    expect(children.rows.every(row => Object.keys(row.axes ?? {}).length === 2)).toBe(true);
+    const style3 = children.rows.filter(row => row.parent_sku === "MNT-003");
+    expect(style3.map(row => `${row.axes["سایز"]}/${row.axes["رنگ"]}`).sort()).toEqual(
+      SIZES.flatMap(size => COLOURS.map(colour => `${size}/${colour}`)).sort());
+    // Persian digits normalised in the SKU; Arabic ي/ك matched to the branch's option.
+    expect(style3.some(row => row.sku === "MNT-003-M-1")).toBe(true);
+    expect(children.rows.filter(row => row.parent_sku === "MNT-002").every(row => COLOURS.includes(row.axes["رنگ"]))).toBe(true);
+    // A catalogue import moves no stock and posts nothing.
+    expect(await sideEffects(business.id, business.locationId)).toEqual(before);
+
+    // Retrying the same file (or a re-export of it) converges: nothing new.
+    await asBusiness(owner.businessId, async () => {
+      const retryId = await catalogue.stageCatalogue(owner, { ...input, fingerprint: randomUUID() });
+      const retry = await catalogue.catalogueItems(owner, retryId);
+      expect(retry.filter(item => item.outcome === "already_linked")).toHaveLength(100);
+      expect(await applyAll(catalogue, owner, retryId)).toBe("applied");
+    });
+    expect(await countItems(business.locationId)).toBe(1000);
+    expect(await sideEffects(business.id, business.locationId)).toEqual(before);
+  }, 180_000);
+
+  it("refuses a file whose grid repeats a size × colour cell or loses an axis, and an English two-axis family imports in another trade", async () => {
+    const catalogue = await import("../src/lib/data-transfer/catalogue-service");
+    const profile = await import("../src/lib/data-transfer/catalogue-profile");
+    const business = await seedBusiness("accessories", "Accessories 2-axis");
+    const owner = { businessId: business.id, locationId: business.locationId, target: "retail" as const, actor };
+    await db.query("INSERT INTO item_attribute_definitions (location_id,name,options) VALUES ($1,'Size',ARRAY['S','M']),($1,'Color',ARRAY['Red','Blue'])", [business.locationId]);
+    const csv = (rows: string[]) => profile.readCatalogueCsv(new TextEncoder().encode(
+      ["sku,title,parent_sku,parent_title,option,option_2", ...rows].join("\n")).buffer as ArrayBuffer, 100);
+    const stage = (rows: string[]) => {
+      const sheet = csv(rows);
+      return asBusiness(owner.businessId, () => catalogue.stageCatalogue(owner, {
+        sheet, mapping: profile.suggestCatalogueMapping(sheet.columns), fileName: "bag.csv", sourceName: "bags",
+        fingerprint: randomUUID(), fallbackBrand: "B", axis: "", axes: ["Size", "Color"], duplicateRows: [] }));
+    };
+    await expect(stage(["B-1,a,BAG,Bag,S,Red", "B-2,b,BAG,Bag,S,red"])).rejects.toThrow("catalogue_variant_group_invalid");
+    await expect(stage(["B-1,a,BAG,Bag,S,Red", "B-2,b,BAG,Bag,M,"])).rejects.toThrow("catalogue_variant_group_invalid");
+    expect(await countItems(business.locationId)).toBe(0);
+    const runId = await stage(["B-1,a,BAG,Bag,S,Red", "B-2,b,BAG,Bag,S,Blue", "B-3,c,BAG,Bag,M,Red", "B-4,d,BAG,Bag,M,Blue"]);
+    await asBusiness(owner.businessId, async () => {
+      expect((await catalogue.applyCatalogue(owner, runId, true)).run.status).toBe("applied");
+    });
+    expect(await countItems(business.locationId)).toBe(5);
+  });
+});

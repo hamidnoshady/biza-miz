@@ -14,7 +14,7 @@ import { readBoundedJson } from "@/lib/product-attributes";
 import { toCsv } from "@/lib/data-transfer/csv";
 import { REVIEWED_PRODUCT_CATALOGUE } from "@/lib/data-transfer/registry";
 import {
-  CATALOGUE_MAX_FILE_BYTES, CATALOGUE_MAX_ROWS, readCatalogueWorksheet, parseCatalogueRows, suggestCatalogueMapping, validateCatalogueMapping,
+  CATALOGUE_MAX_AXES, CATALOGUE_MAX_FILE_BYTES, CATALOGUE_MAX_ROWS, readCatalogueCsv, readCatalogueWorksheet, parseCatalogueRows, suggestCatalogueMapping, validateCatalogueMapping,
 } from "@/lib/data-transfer/catalogue-profile";
 import {
   applyCatalogue, catalogueItems, catalogueRuns, catalogueSummary, reviewCatalogueItem, stageCatalogue, type CatalogueOwner,
@@ -74,6 +74,8 @@ const fileOptions = z.object({
   duplicateRows: z.array(z.number().int().min(2).max(CATALOGUE_MAX_ROWS + 1)).max(CATALOGUE_MAX_ROWS).default([]),
   sourceName: z.string().trim().min(1).max(100).default("catalogue"),
   axis: z.string().trim().max(100).default(""),
+  // GH #1567 F6: named variant axes in order (size × colour × …).
+  axes: z.array(z.string().trim().min(1).max(100)).max(CATALOGUE_MAX_AXES).default([]),
   valueMode: z.enum(["catalogue_only", "fill_missing", "update_existing"]).default("catalogue_only"),
   currency: z.enum(["rial", "toman"]).default("rial"),
 });
@@ -103,7 +105,7 @@ async function boundedWorkbook(request: Request) {
   const form = await new Response(Buffer.concat(chunks, size), { headers: { "Content-Type": contentType } }).formData()
     .catch(() => { throw new Error("catalogue_file_invalid"); });
   const file = form.get("file");
-  if (!(file instanceof File) || file.size > CATALOGUE_MAX_FILE_BYTES || !/\.xlsx$/i.test(file.name)) {
+  if (!(file instanceof File) || file.size > CATALOGUE_MAX_FILE_BYTES || !/\.(xlsx|csv)$/i.test(file.name)) {
     throw new Error("catalogue_file_invalid");
   }
   let rawOptions: unknown;
@@ -112,7 +114,10 @@ async function boundedWorkbook(request: Request) {
   const options = fileOptions.safeParse(rawOptions);
   if (!options.success) throw new Error("catalogue_mapping_invalid");
   const bytes = await file.arrayBuffer();
-  const sheet = await readCatalogueWorksheet(bytes, CATALOGUE_MAX_ROWS).catch(error => {
+  const read = /\.csv$/i.test(file.name)
+    ? Promise.resolve().then(() => readCatalogueCsv(bytes, CATALOGUE_MAX_ROWS))
+    : readCatalogueWorksheet(bytes, CATALOGUE_MAX_ROWS);
+  const sheet = await read.catch(error => {
     if (error instanceof Error && error.message.startsWith("catalogue_")) throw error;
     throw new Error("catalogue_file_invalid");
   });

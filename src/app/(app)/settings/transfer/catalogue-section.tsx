@@ -22,11 +22,15 @@ const labels: Record<CatalogueField, string> = {
   brand: "برند", case_dimension: "ابعاد قاب", case_material: "جنس قاب", band_material: "جنس بند",
   band_color: "رنگ بند", drive: "نوع موتور", face: "رنگ صفحه", lock_type: "نوع قفل", case_color: "رنگ قاب",
   case_form: "شکل قاب", price: "قیمت فروش", cost: "بهای خرید", quantity: "موجودی", parent_sku: "شناسه والد",
-  parent_title: "نام والد", option: "مقدار محور تنوع",
+  parent_title: "نام والد", option: "مقدار محور تنوع ۱", option_2: "مقدار محور تنوع ۲", option_3: "مقدار محور تنوع ۳",
 };
+// GH #1567 F6: each mapped option column is one named axis (size × colour × …).
+const optionFields = ["option", "option_2", "option_3"] as const;
 const issueLabels: Record<string, string> = {
   formula: "فرمول قابل تأیید نیست", error: "خطای اکسل", unsafe_number: "عدد خارج از محدوده",
   invalid_identity: "شناسه یا نام نامعتبر", invalid_brand: "نام برند نامعتبر است و ثبت نمی‌شود",
+  duplicate_barcode: "این بارکد در ردیف دیگری با شناسهٔ متفاوت هم آمده است",
+  invalid_barcode: "بارکد نامعتبر است (مثلاً رقم کنترل بارکد ۱۳رقمی)",
   movement_review: "نوع موتور مبهم است و ثبت نمی‌شود",
   dimension_review: "ابعاد نامعتبر است و ثبت نمی‌شود", missing: "بدون مقدار",
   metadata_only: "خارج از ورود اطلاعات این مرحله",
@@ -55,7 +59,7 @@ const errors: Record<string, string> = {
   catalogue_mapping_invalid: "برای هر فیلد یک ستون یکتا انتخاب کنید.",
   catalogue_brand_required: "ستون برند انتخاب نشده است؛ پیش از پیش‌نمایش، نام برند پیش‌فرض را وارد کنید.",
   catalogue_brand_invalid: "نام برند جایگزین نباید خالی یا طولانی‌تر از صد نویسه باشد.",
-  catalogue_variant_group_invalid: "گروه تنوع به والد مشخص، محور معتبر و حداقل دو گزینهٔ یکتا نیاز دارد.",
+  catalogue_variant_group_invalid: "گروه تنوع به والد مشخص، نام یکتا برای هر محور، مقدار برای همهٔ محورها، ترکیب یکتا برای هر ردیف (مثلاً سایز × رنگ)، بارکد یکتا و حداقل دو ردیف نیاز دارد.",
   active_run_exists: "برای این منبع بررسی فعالی وجود دارد. آن را از فهرست بررسی‌ها باز کنید.",
   preview_stale: "داده‌های شعبه تغییر کرده یا مهلت بررسی گذشته است. بررسی را لغو و دوباره پیش‌نمایش بگیرید.",
   catalogue_woo_preview_changed: "وضعیت فروشگاه تغییر کرده است. دوباره پیش‌نمایش بگیرید.",
@@ -163,7 +167,7 @@ export function CatalogueSection() {
   const [columns, setColumns] = useState<string[]>([]);
   const [mapping, setMapping] = useState<CatalogueMapping>({});
   const [fallbackBrand, setFallbackBrand] = useState("");
-  const [axis, setAxis] = useState("");
+  const [axisNames, setAxisNames] = useState<string[]>(["", "", ""]);
   const [source, setSource] = useState("catalogue");
   const [valueMode, setValueMode] = useState<CatalogueValueMode>("fill_missing");
   const [currency, setCurrency] = useState<"rial" | "toman">("rial");
@@ -203,6 +207,12 @@ export function CatalogueSection() {
     }
   }
 
+  /** Axis names for the mapped option columns, in order; `axis` stays for one-axis compatibility. */
+  function axisPayload() {
+    const axes = optionFields.flatMap((field, index) => mapping[field] !== undefined ? [axisNames[index].trim()] : []);
+    return { axis: axes[0] ?? "", axes: axes.filter(Boolean).length === axes.length ? axes : [] };
+  }
+
   function upload(action: "analyse" | "preview" | "stage") {
     const body = new FormData();
     if (file) body.append("file", file);
@@ -211,7 +221,7 @@ export function CatalogueSection() {
       action,
       mapping,
       ...(trimmedFallback ? { fallbackBrand: trimmedFallback } : {}),
-      axis,
+      ...axisPayload(),
       sourceName: source,
       valueMode,
       currency,
@@ -272,7 +282,7 @@ export function CatalogueSection() {
       <SectionCard title="ورود کاتالوگ محصولات از اکسل" description="ابتدا ستون‌ها و ردیف‌های فایل، سپس شناسه‌های شعبه و فروشگاه را بررسی کنید.">
         <InfoBox>این فرایند اطلاعات کاتالوگ را وارد می‌کند. قیمت، بهای خرید و موجودی فقط در حالت انتخاب‌شده و پس از تأیید جداگانه اعمال می‌شوند؛ شمارهٔ سریال واحدها هرگز از فایل ساخته نمی‌شود.</InfoBox>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          <Field label="فایل اکسل"><input className={inputClass} type="file" accept=".xlsx" disabled={busy || !overview}
+          <Field label="فایل اکسل یا CSV"><input className={inputClass} type="file" accept=".xlsx,.csv" disabled={busy || !overview}
             onChange={event => { setFile(event.target.files?.[0] ?? null); setColumns([]); changeMapping({}); setRun(null); setItem(null); resetWoo(); }} /></Field>
           <Field label="باز کردن بررسی قبلی"><select className={inputClass} value={run?.run.id ?? ""} disabled={busy}
             onChange={event => {
@@ -317,7 +327,7 @@ export function CatalogueSection() {
             <option value="">انتخاب تطبیق</option>
             {saved.map(entry => <option key={entry.id} value={entry.id}>{entry.evidence.sourceName} · {entry.evidence.fileName}</option>)}
           </select></Field> : null}
-          {(Object.keys(labels) as CatalogueField[]).filter(field => overview?.target !== "watch" || !["parent_sku", "parent_title", "option"].includes(field))
+          {(Object.keys(labels) as CatalogueField[]).filter(field => overview?.target !== "watch" || !["parent_sku", "parent_title", ...optionFields].includes(field))
             .map(field => <Field key={field} label={labels[field]}><select className={inputClass} value={mapping[field] ?? ""} disabled={busy} onChange={e => {
               const next = { ...mapping };
               if (e.target.value === "") delete next[field];
@@ -327,9 +337,11 @@ export function CatalogueSection() {
               <option value="">بدون ستون</option>
               {columns.map((name, index) => <option key={index} value={index}>{name || `ستون ${toPersianDigits(index + 1)}`}</option>)}
             </select></Field>)}
-          {overview?.target === "retail" && mapping.option !== undefined ? <Field label="نام محور تنوعِ تعریف‌شده در شعبه">
-            <input className={inputClass} value={axis} maxLength={100} disabled={busy} onChange={e => setAxis(e.target.value)} />
-          </Field> : null}
+          {overview?.target === "retail" ? optionFields.map((field, index) => mapping[field] !== undefined
+            ? <Field key={field} label={`نام محور تنوع ${toPersianDigits(index + 1)} (تعریف‌شده در شعبه، مثل سایز یا رنگ)`}>
+              <input className={inputClass} value={axisNames[index]} maxLength={100} disabled={busy}
+                onChange={e => setAxisNames(names => names.map((name, i) => i === index ? e.target.value : name))} />
+            </Field> : null) : null}
           <Field
             label={hasBrandColumn ? "برند جایگزین برای ردیف‌های خالی (اختیاری)" : "نام برند پیش‌فرض (الزامی)"}
             hint={
