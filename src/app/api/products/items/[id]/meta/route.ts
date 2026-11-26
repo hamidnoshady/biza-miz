@@ -10,7 +10,7 @@ import {
   PRODUCT_LONG_DESCRIPTION_MAX,
   PRODUCT_SHORT_DESCRIPTION_MAX,
 } from "@/lib/product-content";
-import { findEmbeddedMedia } from "@/lib/embedded-media-guard";
+import { EMBEDDED_MEDIA_MESSAGE, findEmbeddedMedia } from "@/lib/embedded-media-guard";
 
 /**
  * The add/edit product form's write path for the Phase 42 product columns —
@@ -45,7 +45,7 @@ export const PATCH = withTenantScope(
       return NextResponse.json({ error: "missing_fields" }, { status: 400 });
     }
     if (findEmbeddedMedia(body.name)) {
-      return NextResponse.json({ error: "embedded_media", field: "name" }, { status: 400 });
+      return NextResponse.json({ error: "embedded_media", field: "name", message: EMBEDDED_MEDIA_MESSAGE }, { status: 400 });
     }
 
     if (body.publishStatus !== undefined && !isProductPublishStatus(body.publishStatus)) {
@@ -57,7 +57,12 @@ export const PATCH = withTenantScope(
     ] as const) {
       if (body[key] === undefined) continue;
       const normalized = normalizeProductDescription(body[key], max);
-      if (!normalized.ok) return NextResponse.json({ error: normalized.reason, field: key }, { status: 400 });
+      if (!normalized.ok) {
+        // GH #1567 F5 — the editor shows `message` when present, so the guard's
+        // own sentence reaches the owner instead of the generic fallback.
+        const message = normalized.reason === "embedded_media" ? EMBEDDED_MEDIA_MESSAGE : undefined;
+        return NextResponse.json({ error: normalized.reason, field: key, message }, { status: 400 });
+      }
       body[key] = normalized.value;
     }
 

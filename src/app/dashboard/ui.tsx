@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { recordApiFailure } from "@/lib/error-report";
 import { recordRouteStage, type RouteTimingOutcome } from "@/lib/route-instrumentation";
 import { FIXED_ASSET_ERROR_TRANSLATIONS } from "@/lib/fixed-assets-errors";
-import { EMBEDDED_MEDIA_MESSAGE, MEDIA_URL_MESSAGES } from "@/lib/embedded-media-guard";
 import { RETAIL_RETURN_ERROR_TRANSLATIONS } from "@/lib/retail-return-errors";
 
 /**
@@ -910,10 +909,6 @@ const ERROR_MESSAGES: Record<string, string> = {
     invalid_refund_amount: "مبلغ برگشت وجه باید عددی مثبت در واحد فروشگاه باشد.",
     connection_paused: "این اتصال در حالت توقف است؛ سلامت اتصال بررسی می‌شود اما جابه‌جایی داده انجام نمی‌شود.",
     invalid_media_url: "نشانی فایل معتبر نیست؛ یک نشانی کامل http یا https بدون نام کاربری و رمز وارد کنید.",
-    // GH #1567 F5 — the embedded-media guard's codes, one message everywhere.
-    embedded_media: EMBEDDED_MEDIA_MESSAGE,
-    media_url_too_long: MEDIA_URL_MESSAGES.media_url_too_long,
-    media_url_host_not_allowed: MEDIA_URL_MESSAGES.media_url_host_not_allowed,
     media_title_too_long: "عنوان رسانه بلندتر از حد مجاز است.",
     media_rest_unsupported:
       "در اتصال REST افزودن رسانه از راه دور ممکن نیست؛ این قابلیت فقط با افزونهٔ وردپرس بیزامیز در دسترس است.",
