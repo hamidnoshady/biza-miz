@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { findEmbeddedMedia } from "../embedded-media-guard";
 import { query, withTenantTransaction } from "../db";
 import { getConnection, type ConnectionRow } from "./connections-service";
 import { isWooCommerce } from "./provider-registry";
@@ -46,6 +47,11 @@ export async function previewProductPublication(businessId: string, locationId: 
   const byLocal = new Map(mappings.rows.map((r) => [r.local_id, r.remote_id]));
   if (linkRemoteId && byLocal.has(localId) && byLocal.get(localId) !== linkRemoteId) throw new Error("publication_already_linked");
   const makePayload = async (row: PublicationItem): Promise<Record<string, unknown>> => {
+    // GH #1567 F5 — a legacy description carrying inline image bytes is not
+    // published with the image cut out; the owner fixes it first.
+    if (findEmbeddedMedia(row.long_description) || findEmbeddedMedia(row.short_description) || findEmbeddedMedia(row.name)) {
+      throw new Error("publication_embedded_media");
+    }
     const price = row.kind === "variant_parent" ? null : await resolveMappedWooPrice(businessId, connection, row.id);
     if (row.kind !== "variant_parent" && price === null) throw new Error("publication_sale_price_missing");
     const type = row.parent_item_id ? "variation" : row.kind === "variant_parent" ? "variable" : "simple";

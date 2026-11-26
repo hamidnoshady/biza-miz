@@ -25,6 +25,8 @@ export const PRODUCT_PUBLISH_STATUS_HINTS: Record<ProductPublishStatus, string> 
 };
 
 /** Mirrors the CHECK constraints in migration 0260. */
+import { findEmbeddedMedia } from "./embedded-media-guard";
+
 export const PRODUCT_SHORT_DESCRIPTION_MAX = 1000;
 export const PRODUCT_LONG_DESCRIPTION_MAX = 20000;
 
@@ -35,16 +37,19 @@ export function isProductPublishStatus(value: unknown): value is ProductPublishS
 /**
  * Trims and bounds one description. Blank becomes `null` (not an empty
  * string) so "no description" has exactly one stored shape; an over-long value
- * is reported to the caller rather than silently truncated.
+ * is reported to the caller rather than silently truncated. Embedded media
+ * (`data:` URIs, base64 blobs — GH #1567 F5) is refused the same way, never
+ * stripped: the owner moves the image to the media library and saves again.
  */
 export function normalizeProductDescription(
   value: unknown,
   max: number,
-): { ok: true; value: string | null } | { ok: false; reason: "invalid_text" | "text_too_long" } {
+): { ok: true; value: string | null } | { ok: false; reason: "invalid_text" | "text_too_long" | "embedded_media" } {
   if (value === undefined || value === null) return { ok: true, value: null };
   if (typeof value !== "string") return { ok: false, reason: "invalid_text" };
   const trimmed = value.trim();
   if (!trimmed) return { ok: true, value: null };
+  if (findEmbeddedMedia(trimmed)) return { ok: false, reason: "embedded_media" };
   if (trimmed.length > max) return { ok: false, reason: "text_too_long" };
   return { ok: true, value: trimmed };
 }

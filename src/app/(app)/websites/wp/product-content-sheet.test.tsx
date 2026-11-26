@@ -208,4 +208,27 @@ describe("ProductContentSheet — the store's text, edited on purpose", () => {
     expect(within(alert).getByText(/نگاشت نشده/)).toBeTruthy();
     expect(screen.queryByLabelText("توضیح کوتاه فروشگاه")).toBeNull();
   });
+
+  it("never clears store text the mirror held back (GH #1567 F5), and refuses an image-carrying draft", async () => {
+    const user = userEvent.setup();
+    mockRead({ description: null, held: { description: "embedded_media", shortDescription: null, image: null } });
+    renderSheet();
+    expect(await screen.findByText(/تصویر جاسازی‌شده/)).toBeTruthy();
+    const short = await screen.findByLabelText("توضیح کوتاه فروشگاه");
+    await user.clear(short);
+    await user.type(short, "کوتاه تازه");
+    await user.click(screen.getByRole("button", { name: "اعمال در فروشگاه (صف ارسال)" }));
+    await waitFor(() => expect(call).toHaveBeenCalledTimes(1));
+    const [, , body] = vi.mocked(call).mock.calls[0] as unknown as [string, string, Record<string, unknown>];
+    // The held long description is not sent as "" — that would delete it.
+    expect(body).toEqual({ remoteId: REMOTE_ID, fields: { short_description: "کوتاه تازه" } });
+
+    vi.mocked(call).mockClear();
+    await user.clear(short);
+    await user.type(short, "data:image/png;base64,AAAA");
+    await user.click(screen.getByRole("button", { name: "اعمال در فروشگاه (صف ارسال)" }));
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(/data: یا base64/)).toBeTruthy();
+    expect(call).not.toHaveBeenCalled();
+  });
 });

@@ -49,9 +49,25 @@ export interface WooProductContent {
   galleryCount: number | null;
   /** When WordPress last wrote this product — the store's own watermark. */
   remoteModifiedAt: string | null;
+  /**
+   * GH #1567 F5 — store fields the mirror held back instead of cutting:
+   * inline image bytes, or text longer than this app can send back. The
+   * store still has that text; the editor must not send a clear for it.
+   */
+  held: WooProductContentHeld;
   /** When our sync last read this product's row. */
   lastSeenAt: string | null;
   queue: ProductQueueState | null;
+}
+
+export interface WooProductContentHeld {
+  shortDescription: "embedded_media" | "too_long" | null;
+  description: "embedded_media" | "too_long" | null;
+  image: "embedded_media" | null;
+}
+
+function holdOf(value: unknown): "embedded_media" | "too_long" | null {
+  return value === "embedded_media" || value === "too_long" ? value : null;
 }
 
 /** The two description fields this screen may change, and nothing else. */
@@ -99,6 +115,11 @@ export function productContentFromMeta(meta: unknown): Omit<WooProductContent, "
     gallery,
     galleryCount: typeof m.remoteGalleryCount === "number" && Number.isFinite(m.remoteGalleryCount) ? m.remoteGalleryCount : null,
     remoteModifiedAt: text(m.remoteModifiedAt),
+    held: {
+      shortDescription: holdOf(m.remoteShortDescriptionHeld),
+      description: holdOf(m.remoteDescriptionHeld),
+      image: m.remoteImageHeld === "embedded_media" ? "embedded_media" : null,
+    },
   };
 }
 

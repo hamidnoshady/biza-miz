@@ -19,6 +19,7 @@
 import { normaliseHeader, westernDigits } from "./codecs";
 import { isValidIsoDate, jalaliToIsoDate } from "../jalali";
 import { isWholeRial } from "../money";
+import { EMBEDDED_MEDIA_MESSAGE, findEmbeddedMedia, MEDIA_URL_MESSAGES, parseMediaUrl } from "../embedded-media-guard";
 import type {
   ColumnMapping,
   EntityDefinition,
@@ -262,8 +263,17 @@ export function coerceValue(
 
   switch (field.type) {
     case "text":
-    case "longtext":
+    case "longtext": {
+      // GH #1567 F5 — every imported text cell, every entity: an inline
+      // image is refused with the row, never imported or cut out.
+      if (findEmbeddedMedia(trimmed)) return error(`«${field.label}»: ${EMBEDDED_MEDIA_MESSAGE}`);
+      if (field.validation?.mediaUrl) {
+        const url = parseMediaUrl(trimmed);
+        if (!url.ok) return error(`«${field.label}»: ${MEDIA_URL_MESSAGES[url.reason]}`);
+        return { value: url.value, message: null };
+      }
       return { value: trimmed, message: null };
+    }
 
     case "email": {
       const value = westernDigits(trimmed).toLowerCase();

@@ -14,6 +14,7 @@
  *    to show; the owner edits it and saves it through the ordinary product
  *    write path. «مدل نمی‌فرستد، مدل ذخیره نمی‌کند.»
  */
+import { findEmbeddedMedia } from "./embedded-media-guard";
 import {
   PRODUCT_LONG_DESCRIPTION_MAX,
   PRODUCT_SHORT_DESCRIPTION_MAX,
@@ -102,5 +103,7 @@ export function parseProductDescriptionReply(text: string): ProductDescriptionDr
   const shortDescription = clean(record.short ?? record.shortDescription, PRODUCT_SHORT_DESCRIPTION_MAX);
   const longDescription = clean(record.long ?? record.longDescription, PRODUCT_LONG_DESCRIPTION_MAX);
   if (!shortDescription && !longDescription) return null;
+  // GH #1567 F5 — a model reply that inlines an image is not a draft.
+  if (findEmbeddedMedia(shortDescription) || findEmbeddedMedia(longDescription)) return null;
   return { shortDescription, longDescription };
 }

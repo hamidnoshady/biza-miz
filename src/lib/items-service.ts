@@ -14,6 +14,7 @@
  * leans on) it has no direct unit test; covered instead by
  * integration/generic-items.integration.test.ts.
  */
+import { assertNoEmbeddedMedia } from "./embedded-media-guard";
 import { getPool, query, type PoolClient } from "./db";
 import {
   validateItemKindParent,
@@ -143,6 +144,9 @@ export async function createItem(input: CreateItemInput, client?: PoolClient): P
   if (error) throw new Error(error);
   const intervalError = validateServiceIntervalMonths(input.serviceIntervalMonths);
   if (intervalError) throw new Error(intervalError);
+  // GH #1567 F5 — the last line of defence for every caller (MCP, imports,
+  // specialist forms): no inline image bytes in catalogue text.
+  assertNoEmbeddedMedia({ name: input.name });
 
   const params = [
     input.locationId,
@@ -246,6 +250,7 @@ export async function updateItemMeta(
   patch: ItemMetaPatch,
   client?: PoolClient,
 ): Promise<Item | null> {
+  assertNoEmbeddedMedia({ name: patch.name, shortDescription: patch.shortDescription, longDescription: patch.longDescription });
   const sets: string[] = [];
   const params: unknown[] = [id];
   const push = (column: string, value: unknown) => {

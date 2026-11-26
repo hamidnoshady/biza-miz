@@ -15,6 +15,8 @@
  * the services and the unit tests share it.
  */
 
+import { findEmbeddedMedia, parseMediaUrl } from "./embedded-media-guard";
+
 export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 const UUID_RE =
@@ -107,8 +109,18 @@ export function parseOptionalText(
   if (value === null) return { ok: true, value: null };
   if (typeof value !== "string") return { ok: false, error: "bad_request" };
   const trimmed = value.trim();
+  // GH #1567 F5 — no inline image bytes in any menu text.
+  if (findEmbeddedMedia(trimmed)) return { ok: false, error: "embedded_media" };
   if (trimmed.length > maxLength) return { ok: false, error: "too_long" };
   return { ok: true, value: trimmed || null };
+}
+
+/** A menu image link: an absolute http(s) URL (GH #1567 F5), or blank. */
+export function parseOptionalImageUrl(value: unknown): ParseResult<string | null | undefined> {
+  if (value === undefined) return { ok: true, value: undefined };
+  const parsed = parseMediaUrl(value);
+  if (!parsed.ok) return { ok: false, error: parsed.reason };
+  return { ok: true, value: parsed.value };
 }
 
 /** An item code / SKU: optional, trimmed, no interior control characters. */
@@ -295,7 +307,7 @@ export function validateMenuItemCreate(body: unknown): ParseResult<MenuItemCreat
   const sku = parseOptionalSku(raw.sku);
   if (!sku.ok) return sku;
   if (sku.value !== undefined) value.sku = sku.value;
-  const imageUrl = parseOptionalText(raw.imageUrl, 2000);
+  const imageUrl = parseOptionalImageUrl(raw.imageUrl);
   if (!imageUrl.ok) return imageUrl;
   if (imageUrl.value !== undefined) value.imageUrl = imageUrl.value;
   const imageMediaId = parseOptionalText(raw.imageMediaId, 64);
@@ -359,7 +371,7 @@ export function validateMenuItemPatch(body: unknown): ParseResult<MenuItemPatchI
     fields++;
   }
   if (raw.imageUrl !== undefined) {
-    const imageUrl = parseOptionalText(raw.imageUrl, 2000);
+    const imageUrl = parseOptionalImageUrl(raw.imageUrl);
     if (!imageUrl.ok) return imageUrl;
     value.imageUrl = imageUrl.value;
     fields++;

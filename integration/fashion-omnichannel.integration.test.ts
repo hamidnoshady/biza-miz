@@ -466,3 +466,63 @@ describe("4.2 lightweight, bounded outbound payloads", () => {
     expect(rows[0].bytes).toBeLessThan(200);
   });
 });
+
+describe("GH #1567 F5 — embedded media is held or refused, never stored or cut", () => {
+  const TINY = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+  const storeProduct = (id: number, description: string, src: string) => ({
+    id, type: "simple", name: `کالای ${id}`, sku: `F5-${id}`, price: "90000", regular_price: "90000", sale_price: "",
+    manage_stock: false, stock_quantity: null, stock_status: "instock", status: "publish", attributes: [], categories: [],
+    description, short_description: "توضیح کوتاه",
+    images: [{ id: 1, src, alt: "تصویر", position: 0 }],
+  });
+  const metaOf = async (remoteId: number) =>
+    (await db.query<{ meta: Record<string, unknown> }>(
+      "SELECT last_pushed_payload AS meta FROM integration_mappings WHERE connection_id = $1 AND entity_type = 'product' AND remote_id = $2",
+      [biz.connectionId, String(remoteId)],
+    )).rows[0]?.meta ?? {};
+
+  it("a store product with an inline image is mirrored as held (reason + length), never truncated or stored", async () => {
+    const connection = (await connections.getConnection(biz.id, biz.connectionId))!;
+    const description = `<p>متن فروشگاه</p><img src="${TINY}">`;
+    await sync.upsertProductFromWoo(connection, biz.locationId, storeProduct(99_501, description, TINY) as never);
+    const meta = await metaOf(99_501);
+    expect(meta).toMatchObject({
+      remoteDescription: null, remoteDescriptionHeld: "embedded_media", remoteDescriptionLength: description.length,
+      remoteShortDescription: "توضیح کوتاه", remoteShortDescriptionHeld: null,
+      remoteImageSrc: null, remoteImageHeld: "embedded_media",
+    });
+    expect(JSON.stringify(meta)).not.toContain("base64");
+
+    // Over-long store text: held whole, not cut to the bound (the old slice).
+    const long = "متن ".repeat(6_000);
+    await sync.upsertProductFromWoo(connection, biz.locationId, storeProduct(99_502, long, "https://shop.example.test/a.jpg") as never);
+    expect(await metaOf(99_502)).toMatchObject({
+      remoteDescription: null, remoteDescriptionHeld: "too_long", remoteImageSrc: "https://shop.example.test/a.jpg", remoteImageHeld: null,
+    });
+  });
+
+  it("the item service refuses image-carrying catalogue text from any caller; the legacy report lists old rows without touching them", async () => {
+    const items = await import("../src/lib/items-service");
+    const guard = await import("../src/lib/embedded-media-guard");
+    const report = await import("../src/lib/embedded-media-report-service");
+    const parent = await items.createItem({ locationId: biz.locationId, name: "پیراهن F5", kind: "simple" } as never);
+    await expect(items.updateItemMeta(parent.id, { longDescription: `<p>x</p><img src="${TINY}">` })).rejects.toBeInstanceOf(guard.EmbeddedMediaError);
+    await expect(items.updateItemMeta(parent.id, { shortDescription: "&#100;ata&colon;image/png;base64,AAAA" })).rejects.toThrow("embedded_media");
+    await expect(items.createItem({ locationId: biz.locationId, name: `x ${TINY}`, kind: "simple" } as never)).rejects.toThrow("embedded_media");
+    expect((await items.getItem(parent.id))?.longDescription ?? null).toBeNull();
+
+    // A row written before the rule: reported, never rewritten.
+    const legacy = `<p>قدیمی</p><img src="${TINY}">`;
+    await db.query("UPDATE items SET long_description = $2 WHERE id = $1", [parent.id, legacy]);
+    const listed = await report.embeddedMediaReport(biz.id, biz.locationId);
+    expect(listed).toContainEqual(expect.objectContaining({ source: "item", id: parent.id, field: "longDescription", kind: "data_uri" }));
+    const other = await report.embeddedMediaReport(randomUUIDLike(), null);
+    expect(other).toEqual([]);
+    const after = await db.query<{ long_description: string }>("SELECT long_description FROM items WHERE id = $1", [parent.id]);
+    expect(after.rows[0].long_description).toBe(legacy);
+  });
+});
+
+function randomUUIDLike(): string {
+  return "00000000-0000-4000-8000-00000000f5f5";
+}

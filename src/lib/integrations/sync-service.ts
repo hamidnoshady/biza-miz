@@ -45,6 +45,7 @@ import {
   upsertMapping,
 } from "./mapping-service";
 import { wooAmountToRial } from "./woo-money";
+import { findEmbeddedMedia, parseMediaUrl } from "../embedded-media-guard";
 import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "../product-content";
 import { effectivePushSwitches } from "./outbox-policy";
 import { writeIntegrationAudit } from "./audit";
@@ -484,10 +485,33 @@ const REMOTE_GALLERY_LIMIT = 8;
  * product form applies (`normalizeProductDescription`).
  */
 function boundedRemoteText(value: unknown, max: number): string | null {
-  if (typeof value !== "string") return null;
+  return remoteText(value, max).text;
+}
+
+/** Why a store text field was held out of the mirror (GH #1567 F5). */
+export type RemoteTextHold = "embedded_media" | "too_long";
+
+/**
+ * GH #1567 F5 — the store's text is mirrored whole or not at all. A field
+ * that inlines image bytes, or exceeds the bound this app can send back, is
+ * *held*: the mirror keeps null plus the reason and the store's length, the
+ * store keeps its text untouched, and the manager shows "edit it in
+ * WordPress". The old `slice(0, max)` silently cut the store's copy, and an
+ * edit-and-save from the manager would then have pushed the cut copy back.
+ */
+export function remoteText(value: unknown, max: number): { text: string | null; held: RemoteTextHold | null; length: number | null } {
+  if (typeof value !== "string") return { text: null, held: null, length: null };
   const text = value.trim();
-  if (!text) return null;
-  return text.length > max ? text.slice(0, max) : text;
+  if (!text) return { text: null, held: null, length: null };
+  if (findEmbeddedMedia(text)) return { text: null, held: "embedded_media", length: text.length };
+  if (text.length > max) return { text: null, held: "too_long", length: text.length };
+  return { text, held: null, length: text.length };
+}
+
+/** A store image `src`, only when it is a real http(s) link (never `data:`). */
+function remoteImageSrc(value: unknown): string | null {
+  const parsed = parseMediaUrl(value);
+  return parsed.ok ? parsed.value : null;
 }
 
 async function recordProductShape(connection: ConnectionRow, product: WooProduct): Promise<void> {
@@ -512,7 +536,10 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
         : null,
     remoteRegularPriceRial: safeWooPriceToRial(product.regular_price, connection.currency_unit),
     remoteSalePriceRial: safeWooPriceToRial(product.sale_price ?? "", connection.currency_unit),
-    remoteImageSrc: primary && typeof primary.src === "string" && primary.src ? primary.src : null,
+    remoteImageSrc: primary ? remoteImageSrc(primary.src) : null,
+    // A store image that is not a link (an inline `data:` image) is held,
+    // not mirrored: the flag lets the manager say so instead of showing none.
+    remoteImageHeld: primary && typeof primary.src === "string" && primary.src && !remoteImageSrc(primary.src) ? "embedded_media" : null,
     remoteImageAlt: primary && typeof primary.alt === "string" ? primary.alt : null,
     remoteGalleryCount: images.length,
     // The store's own gallery (every image after the primary), display-only
@@ -520,8 +547,8 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
     // bloat the mapping row.
     remoteGallery: images
       .slice(1, 1 + REMOTE_GALLERY_LIMIT)
-      .filter((image) => typeof image.src === "string" && image.src)
-      .map((image) => ({ src: image.src as string, alt: typeof image.alt === "string" ? image.alt : "" })),
+      .filter((image) => remoteImageSrc(image.src) !== null)
+      .map((image) => ({ src: remoteImageSrc(image.src) as string, alt: typeof image.alt === "string" ? image.alt : "" })),
     // The store's own storefront text (issue #1215, P1-2). Media stays a
     // read-only mirror (#941 owns attachment transport), but the descriptions
     // are text the owner may edit from the manager — and to edit what the
@@ -530,6 +557,9 @@ async function recordProductShape(connection: ConnectionRow, product: WooProduct
     // so the mirror never holds text this app could not send back.
     remoteShortDescription: boundedRemoteText(product.short_description, PRODUCT_SHORT_DESCRIPTION_MAX),
     remoteDescription: boundedRemoteText(product.description, PRODUCT_LONG_DESCRIPTION_MAX),
+    remoteShortDescriptionHeld: remoteText(product.short_description, PRODUCT_SHORT_DESCRIPTION_MAX).held,
+    remoteDescriptionHeld: remoteText(product.description, PRODUCT_LONG_DESCRIPTION_MAX).held,
+    remoteDescriptionLength: remoteText(product.description, PRODUCT_LONG_DESCRIPTION_MAX).length,
     // The store's own watermark for its content: when WordPress last wrote
     // this product, which is not when our sync last read it.
     remoteModifiedAt:

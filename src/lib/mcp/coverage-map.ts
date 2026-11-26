@@ -1298,6 +1298,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "src/app/api/products/duplicates/route.test.ts",
   },
   {
+    id: "misc.product-embedded-media",
+    module: "Products (retail)",
+    entity: "Legacy embedded-media report (GH #1567 F5)",
+    routes: ["products/embedded-media"],
+    status: "route-only (by design)",
+    note: "read-only list of catalogue/menu rows written before the embedded-media rule that still inline image bytes; nothing is modified — the owner fixes each row through the guarded product/menu form, so there is no write verb to expose",
+    test: "integration/fashion-omnichannel.integration.test.ts",
+  },
+  {
     id: "misc.price-lists",
     module: "Products (retail)",
     entity: "Price lists & entries (bulk quick-update)",

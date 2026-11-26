@@ -10,6 +10,7 @@ import {
   PRODUCT_LONG_DESCRIPTION_MAX,
   PRODUCT_SHORT_DESCRIPTION_MAX,
 } from "@/lib/product-content";
+import { findEmbeddedMedia } from "@/lib/embedded-media-guard";
 
 /**
  * The add/edit product form's write path for the Phase 42 product columns —
@@ -42,6 +43,9 @@ export const PATCH = withTenantScope(
     }
     if (body.name !== undefined && !body.name.trim()) {
       return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+    }
+    if (findEmbeddedMedia(body.name)) {
+      return NextResponse.json({ error: "embedded_media", field: "name" }, { status: 400 });
     }
 
     if (body.publishStatus !== undefined && !isProductPublishStatus(body.publishStatus)) {

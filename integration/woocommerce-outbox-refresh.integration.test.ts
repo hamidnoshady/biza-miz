@@ -713,3 +713,18 @@ describe("taxonomy sync as an app-side job (#1206 PERF-05)", () => {
     expect(rows[0].status).toBe("pending");
   });
 });
+
+describe("GH #1567 F5 — publication refuses image-carrying legacy text instead of stripping it", () => {
+  it("does not queue a product whose description inlines an image, and queues nothing", async () => {
+    const publication = await import("../src/lib/integrations/product-publication-service");
+    const legacy = '<p>متن</p><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">';
+    const { rows: [item] } = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id,name,sku,kind,long_description) VALUES ($1,'legacy blob','PUB-F5','simple',$2) RETURNING id`, [biz.locationId, legacy]);
+    await db.query(`INSERT INTO item_stock (item_id,quantity,unit_price) VALUES ($1,2,5000)`, [item.id]);
+    const before = (await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM integration_outbox_events WHERE connection_id=$1`, [biz.connectionId])).rows[0].n;
+    await expect(publication.previewProductPublication(biz.id, biz.locationId, biz.connectionId, item.id)).rejects.toThrow("publication_embedded_media");
+    const after = (await db.query<{ n: string }>(`SELECT count(*)::text AS n FROM integration_outbox_events WHERE connection_id=$1`, [biz.connectionId])).rows[0].n;
+    expect(after).toBe(before);
+    expect((await db.query<{ long_description: string }>(`SELECT long_description FROM items WHERE id=$1`, [item.id])).rows[0].long_description).toBe(legacy);
+  });
+});

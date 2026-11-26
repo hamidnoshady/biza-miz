@@ -24,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { query } from "../db";
 import { normalizeNumericText } from "../digits";
+import { findEmbeddedMedia } from "../embedded-media-guard";
 import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "../product-content";
 import { writeIntegrationAudit } from "./audit";
 import { assertPluginJobSupported } from "./plugin-job-guard";
@@ -83,6 +84,7 @@ export function sanitizeProductPatch(patch: Record<string, unknown>): Record<str
     if (!(field in patch)) continue;
     const value = patch[field];
     if (value === undefined || value === null) continue;
+    if (typeof value === "string" && findEmbeddedMedia(value)) throw new WooOpsError("embedded_media");
     if (field === "stock_quantity" || field === "manage_stock") {
       if (field === "manage_stock") {
         // Strict, because `Boolean("false")` is `true`: a caller that sent the
@@ -135,6 +137,9 @@ export function sanitizeProductPatch(patch: Record<string, unknown>): Record<str
       // itself would have truncated on the way back in (issue #1215, P1-2).
       const text = String(value);
       const max = field === "description" ? PRODUCT_LONG_DESCRIPTION_MAX : PRODUCT_SHORT_DESCRIPTION_MAX;
+      // GH #1567 F5 — inline image bytes never reach the storefront; the
+      // patch is refused whole rather than queued with the image cut out.
+      if (findEmbeddedMedia(text)) throw new WooOpsError("embedded_media");
       if (text.length > max) throw new WooOpsError("invalid_description");
       out[field] = text;
       continue;
