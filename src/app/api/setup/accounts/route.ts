@@ -5,6 +5,7 @@ import { markStepDone } from "@/lib/settings";
 import { requireManager } from "@/lib/setup-state";
 import { coaTemplateForIndustry, validateAccounts, type TemplateAccount } from "@/lib/coa-template";
 import { AccountTreeError } from "@/lib/account-hierarchy";
+import { ACCOUNT_TREE_MESSAGES } from "@/lib/setup-chart";
 import { withTenantScope } from "@/lib/auth";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 
@@ -30,15 +31,6 @@ export const GET = withTenantScope(async () => {
  * Creates the chart of accounts from the (possibly customized) template.
  * Replaces an existing chart only while no journal line or draft line references it.
  */
-/** The Persian message for each way a wizard chart can fail to place. */
-const TREE_MESSAGES: Record<AccountTreeError["reason"], string> = {
-  too_deep: "ساختار حساب‌ها از سطح «تفصیلی» عمیق‌تر است.",
-  parent_cycle: "ساختار والد/فرزند حساب‌ها حلقه دارد.",
-  parent_missing: "والد یکی از حساب‌ها در فهرست نیست.",
-  duplicate_code: "کد یکی از حساب‌ها تکراری است.",
-  type_mismatch: "نوع حساب فرزند باید با نوع والدش یکسان باشد.",
-};
-
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requireManager();
   if (error) return error;
@@ -86,7 +78,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     // A typed refusal is an answer, not a failure: the same 400/409 the editor
     // gives for the same rule, with nothing written.
     if (err instanceof AccountTreeError) {
-      return NextResponse.json({ error: "invalid_accounts", messages: [TREE_MESSAGES[err.reason]] }, { status: 400 });
+      return NextResponse.json({ error: "invalid_accounts", messages: [ACCOUNT_TREE_MESSAGES[err.reason]] }, { status: 400 });
     }
     if (err instanceof AccountsError) {
       return NextResponse.json({ error: err.message }, { status: err.status });

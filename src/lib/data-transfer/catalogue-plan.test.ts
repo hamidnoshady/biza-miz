@@ -3,7 +3,11 @@ import { catalogueRecords } from "./catalogue-plan";
 import type { CatalogueRow } from "./catalogue-profile";
 
 function row(number: number, sku: string, values: CatalogueRow["values"] = {}): CatalogueRow {
-  return { number, sku, title: sku, values, raw: {}, issues: [], duplicateRows: [], movement: null, dimensions: null, brandSource: "none" };
+  return {
+    number, sku, title: sku, values, raw: {}, issues: [], duplicateRows: [], movement: null, dimensions: null, brandSource: "none",
+    amounts: { price: { raw: null, rial: null, state: "blank" }, cost: { raw: null, rial: null, state: "blank" } },
+    stock: { raw: null, quantity: null, state: "blank" },
+  };
 }
 describe("catalogue review planning", () => {
   it("blocks both duplicates until exactly one physical row is selected", () => {

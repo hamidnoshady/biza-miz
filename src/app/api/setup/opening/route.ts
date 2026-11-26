@@ -1,16 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { SessionPayload } from "@/lib/auth";
 import { withTenantScope } from "@/lib/auth";
-import { getPool, query } from "@/lib/db";
+import { getPool } from "@/lib/db";
+import { memberAccessFor } from "@/lib/member-access";
 import { getSetting, markStepDone, SETTING_KEYS } from "@/lib/settings";
 import {
-  costingLocked,
   resolveActiveLocation,
   requireManager,
   type CostingSetting,
 } from "@/lib/setup-state";
-import { checkBalance, validateOpeningLines, withAutoOffset, type OpeningLine } from "@/lib/opening";
+import type { OpeningLine } from "@/lib/opening";
 import { WELL_KNOWN_CODES } from "@/lib/coa-template";
+import { loadSetupOpeningData } from "@/lib/setup-opening-service";
+import { SETUP_OPENING_STATE_MESSAGES } from "@/lib/setup-opening";
+import { postWizardOpeningBalances, WizardOpeningError } from "@/lib/setup-opening-posting";
 
 /**
  * The wizard's final data step — opening balances: an opening inventory count
@@ -23,38 +26,28 @@ export const GET = withTenantScope(async () => {
   const { session, error } = await requireManager();
   if (error) return error;
 
-  const location = await resolveActiveLocation(session);
-  const [{ rows: accounts }, { rows: openingEntry }, inventory] = await Promise.all([
-    query(
-      `SELECT id, code, name, type,
-              (SELECT count(*) FROM accounts c WHERE c.parent_id = a.id) AS children
-         FROM accounts a WHERE business_id = $1 AND is_active AND code <> $2 ORDER BY code`,
-      [session.businessId, WELL_KNOWN_CODES.inventory],
-    ),
-    query(
-      `SELECT je.id, je.entry_date, je.memo,
-              (SELECT COALESCE(SUM(debit), 0) FROM journal_lines WHERE entry_id = je.id) AS total
-         FROM journal_entries je
-        WHERE je.business_id = $1 AND je.source_type = 'opening'`,
-      [session.businessId],
-    ),
-    location
-      ? query(
-          `SELECT ii.id, ii.name, ii.unit,
-                  COALESCE((SELECT SUM(quantity) FROM stock_movements sm
-                             WHERE sm.inventory_item_id = ii.id), 0) AS quantity
-             FROM inventory_items ii WHERE ii.location_id = $1 ORDER BY ii.name`,
-          [location.id],
-        )
-      : Promise.resolve({ rows: [] }),
-  ]);
-
-  return NextResponse.json({
-    accounts,
-    openingEntry: openingEntry[0] ?? null,
-    inventoryItems: inventory.rows,
-    costingLocked: await costingLocked(session.businessId),
-  });
+  /*
+   * Issue #1583 — the old GET answered `{ accounts: [] }` when its read failed,
+   * so the screen's empty picker could not tell "no chart" from "permission
+   * denied" from "database unreachable". The payload now carries a structured
+   * `state` and the screen renders that instead of an empty select. A thrown
+   * read is still an error status (never a misleading 200), but it also carries
+   * the same vocabulary so a retry has something to say.
+   */
+  try {
+    const access = await memberAccessFor(session);
+    const data = await loadSetupOpeningData({ session, access });
+    return NextResponse.json(data);
+  } catch (err) {
+    console.error("[setup/opening] read failed", err);
+    return NextResponse.json(
+      {
+        state: "unavailable",
+        message: SETUP_OPENING_STATE_MESSAGES.unavailable,
+      },
+      { status: 503 },
+    );
+  }
 });
 
 interface OpeningInventoryRow {
@@ -80,9 +73,32 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
 
   if (body.inventory) return openingInventory(session, body.inventory);
-  if (body.balances) return openingBalances(session.businessId, session.sub, body.balances);
+  if (body.balances) return openingBalances(session, body.balances);
   return NextResponse.json({ error: "bad_request" }, { status: 400 });
 });
+
+/** The wizard's opening journal goes through the canonical posting service. */
+async function openingBalances(
+  session: SessionPayload,
+  payload: { lines?: OpeningLine[]; autoOffset?: boolean },
+) {
+  try {
+    const result = await postWizardOpeningBalances({
+      session,
+      lines: payload.lines,
+      autoOffset: payload.autoOffset,
+    });
+    return NextResponse.json({ ok: true, ...result });
+  } catch (err) {
+    if (err instanceof WizardOpeningError) {
+      return NextResponse.json(
+        { error: err.message, ...(err.details ?? {}) },
+        { status: err.status },
+      );
+    }
+    throw err;
+  }
+}
 
 /**
  * Opening physical count: creates inventory items and one 'adjustment' stock
@@ -199,111 +215,6 @@ async function openingInventory(
     const progress = await markStepDone(businessId, "opening", client);
     await client.query("COMMIT");
     return NextResponse.json({ ok: true, totalValue: totalValue.toString(), progress });
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-/** Opening ledger balances → one balanced journal entry (source_type 'opening'). */
-async function openingBalances(
-  businessId: string,
-  userId: string,
-  payload: { lines?: OpeningLine[]; autoOffset?: boolean },
-) {
-  const rawLines = (payload.lines ?? []).map((l) => ({
-    accountId: String(l.accountId ?? ""),
-    debit: Number(l.debit) || 0,
-    credit: Number(l.credit) || 0,
-  }));
-
-  const { rows: existingEntry } = await query(
-    "SELECT id FROM journal_entries WHERE business_id = $1 AND source_type = 'opening'",
-    [businessId],
-  );
-  if (existingEntry.length > 0) {
-    // Same self-healing rule as the inventory branch above (issue #808 §9):
-    // the ledger already holds the opening entry, so this retry's job is to
-    // make sure the progress marker agrees — not to refuse with a 409 that
-    // leaves the wizard stuck one step behind the data.
-    const progress = await markStepDone(businessId, "opening");
-    return NextResponse.json({
-      ok: true,
-      entryId: existingEntry[0].id,
-      alreadyExists: true,
-      progress,
-    });
-  }
-
-  let lines = rawLines.filter((l) => l.debit !== 0 || l.credit !== 0);
-
-  if (payload.autoOffset) {
-    const { rows: offsetAccount } = await query<{ id: string }>(
-      "SELECT id FROM accounts WHERE business_id = $1 AND code = $2",
-      [businessId, WELL_KNOWN_CODES.openingEquity],
-    );
-    if (offsetAccount.length === 0) {
-      return NextResponse.json({ error: "offset_account_missing" }, { status: 409 });
-    }
-    lines = withAutoOffset(lines, offsetAccount[0].id);
-  }
-
-  const errors = validateOpeningLines(lines);
-  if (errors.length > 0) {
-    return NextResponse.json({ error: "invalid_lines", messages: errors }, { status: 400 });
-  }
-  const balance = checkBalance(lines);
-  if (!balance.balanced) {
-    return NextResponse.json(
-      { error: "not_balanced", totalDebit: balance.totalDebit, totalCredit: balance.totalCredit },
-      { status: 400 },
-    );
-  }
-
-  // All referenced accounts must belong to this business.
-  const accountIds = lines.map((l) => l.accountId);
-  const { rows: inventoryAccount } = await query<{id:string}>(
-    "SELECT id FROM accounts WHERE business_id=$1 AND code=$2", [businessId,WELL_KNOWN_CODES.inventory]);
-  if (inventoryAccount.some(a => accountIds.includes(a.id))) {
-    return NextResponse.json({ error: "inventory_opening_is_automatic" }, { status: 409 });
-  }
-  const { rows: owned } = await query(
-    "SELECT id FROM accounts WHERE business_id = $1 AND id = ANY($2::uuid[])",
-    [businessId, accountIds],
-  );
-  if (owned.length !== new Set(accountIds).size) {
-    return NextResponse.json({ error: "unknown_account" }, { status: 400 });
-  }
-
-  const client = await getPool().connect();
-  let entryId: string;
-  try {
-    await client.query("BEGIN");
-    const { rows: entry } = await client.query(
-      `INSERT INTO journal_entries (business_id, entry_date, memo, source_type, created_by)
-       VALUES ($1, CURRENT_DATE, 'تراز افتتاحیه', 'opening', $2) RETURNING id`,
-      [businessId, userId],
-    );
-    entryId = entry[0].id;
-    for (const l of lines) {
-      await client.query(
-        "INSERT INTO journal_lines (entry_id, account_id, debit, credit) VALUES ($1, $2, $3, $4)",
-        [entryId, l.accountId, l.debit, l.credit],
-      );
-    }
-    await client.query("SELECT set_config('app.fiscal_constructing_entry_id', '', true)");
-    // Committed together with the entry it marks (issue #808 §6).
-    const progress = await markStepDone(businessId, "opening", client);
-    await client.query("COMMIT");
-    return NextResponse.json({
-      ok: true,
-      entryId,
-      totalDebit: balance.totalDebit,
-      totalCredit: balance.totalCredit,
-      progress,
-    });
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

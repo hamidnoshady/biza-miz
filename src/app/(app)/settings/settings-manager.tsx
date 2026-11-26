@@ -49,6 +49,7 @@ import { LogsPanel } from "./logs-panel";
 import { NotificationSettings } from "./notification-settings";
 import { OnlinePlatformsSettings } from "./online-platforms-settings";
 import { OrderControlsSettings } from "./order-controls-settings";
+import { KitchenWorkflowSettings } from "./kitchen-workflow-settings";
 import { PaymentMethodsSettings } from "./payment-methods-settings";
 import { PricingSettings } from "./pricing-settings";
 import { RetailPricingSettings } from "./retail-pricing-settings";
@@ -261,7 +262,18 @@ export function SettingsManager({
       {activeTab === "pricing" ? (isProductWorkspaceIndustry(industry) ? <RetailPricingSettings /> : <PricingSettings />) : null}
       {activeTab === "online-platforms" ? <OnlinePlatformsSettings /> : null}
       {activeTab === "payment-methods" ? <PaymentMethodsSettings /> : null}
-      {activeTab === "orders" ? <OrderControlsSettings /> : null}
+      {activeTab === "orders" ? (
+        <div className="space-y-4">
+          <OrderControlsSettings />
+          {/*
+            The kitchen's workflow and archive policy is order configuration
+            too (it decides how tickets enter and leave the kitchen board), so
+            it lives on the orders tab next to the control policy. Hidden for
+            a member without kitchen view — the API behind it refuses them.
+          */}
+          {permissions?.includes(PERMISSIONS.kitchenView) ? <KitchenWorkflowSettings /> : null}
+        </div>
+      ) : null}
       {activeTab === "accounts" ? <AccountsSettings /> : null}
       {activeTab === "team" ? (
         <TeamManager currentUserId={currentUserId} role={role} permissions={permissions} />

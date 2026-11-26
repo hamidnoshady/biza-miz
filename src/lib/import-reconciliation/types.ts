@@ -289,6 +289,8 @@ export const RESOLUTION_REASONS = [
   "movement_already_applied",
   "order_owned_stock",
   "serial_quantity",
+  /** An update-only import met a SKU the branch does not have; it may not create one. */
+  "update_requires_existing",
 ] as const;
 export type ResolutionReason = (typeof RESOLUTION_REASONS)[number];
 
@@ -330,6 +332,7 @@ export const RESOLUTION_REASON_LABELS: Record<ResolutionReason, string> = {
   movement_already_applied: "این حرکت قبلاً اعمال شده",
   order_owned_stock: "کسر موجودی بر عهدهٔ سفارش آنلاین است",
   serial_quantity: "کالای سریال‌دار باید مقدار یک داشته باشد",
+  update_requires_existing: "در حالت به‌روزرسانی، کالای جدید ساخته نمی‌شود",
 };
 
 export type FieldAuthorityAction =

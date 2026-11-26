@@ -1795,6 +1795,21 @@ export async function middleware(request: NextRequest) {
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
+  // Issue #1239 — the first-run guard in the workspace shell needs the path
+  // to decide whether an unfinished business may be here. Server components
+  // cannot read the URL otherwise, and the alternative (a per-page guard
+  // copied into every app) is exactly the drift the guard exists to prevent.
+  // Overwritten, never trusted from the caller.
+  //
+  // Guarded by a try/catch because `Headers` refuses a non-Latin-1 value: a
+  // route segment this runtime hands back decoded would otherwise throw here
+  // and fail the whole request. An unset header only makes the first-run guard
+  // fail open (its documented behaviour), never a broken page.
+  try {
+    requestHeaders.set("x-pathname", request.nextUrl.pathname);
+  } catch {
+    requestHeaders.delete("x-pathname");
+  }
 
   const mode = cspMode();
   const telegramMiniAppDocument =

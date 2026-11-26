@@ -46,6 +46,8 @@ import { isHybridSite } from "@/lib/site-routes";
 import { isCloudEmbedUserAgent } from "@/lib/cloud-embed";
 import { HybridConnectivityNotice } from "./hybrid-connectivity-notice";
 import { getGrant } from "@/lib/platform-service";
+import { isSetupComplete } from "@/lib/setup-state";
+import { firstRunRedirect } from "@/lib/first-run-guard";
 import { SupportSessionBanner, SupportSessionEnded } from "./support-session-banner";
 import { LocalOfflineShellGuard } from "./local-offline-shell-guard";
 import { getLocalActivationView } from "@/lib/local-activation-site-service";
@@ -109,6 +111,25 @@ export async function WorkspaceShell({
     ),
   ]);
   if (!member?.isActive) redirect("/login");
+  // Issue #1239 / ESH-90 — the first-run gate. One decision for every workspace
+  // page: a new business whose owner has not pressed Finish is sent to the
+  // wizard, whether they arrived by a bookmark, browser Back, `?next=/dashboard`
+  // after login, a native deep link or a business switch. Members who cannot
+  // finish the wizard (no `settings.manage`) are never redirected, and the
+  // billing/security/help surfaces stay reachable — see src/lib/first-run-guard.ts.
+  const [requestPathname, setupComplete] = await Promise.all([
+    headers().then((h) => h.get("x-pathname") ?? ""),
+    // Self-scoped: `isSetupComplete` runs under its own `withTenant`, for the
+    // reason its doc comment gives (the ambient `enterWith()` scope can be
+    // clobbered by a concurrent background tick).
+    isSetupComplete(session.businessId),
+  ]);
+  const firstRunTarget = firstRunRedirect({
+    pathname: requestPathname,
+    setupComplete,
+    canManageSettings: member.permissions.has(PERMISSIONS.settingsManage),
+  });
+  if (firstRunTarget) redirect(firstRunTarget);
   const [industryResult, prefs, appAvailability, appActivationStates, workspaceServiceEnabled, features, deployment, serverSyncConfig] = tenantReads;
   const runtimeRole = deploymentRole();
   // Phase 46: a Hybrid desktop shows the full menu; cloud screens open in its

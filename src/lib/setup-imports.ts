@@ -43,7 +43,8 @@ export const SETUP_IMPORT_MODULE_APP: Record<DataModuleKey, AppKey | null> = {
 export type SetupImportUnavailableReason =
   | "app_not_selected"
   | "permission"
-  | "not_importable";
+  | "not_importable"
+  | "industry_module";
 
 /** One registered entity, reduced to what the onboarding decision needs. */
 export interface SetupImportEntityInput {
@@ -55,6 +56,12 @@ export interface SetupImportEntityInput {
   importable: boolean;
   /** This member holds the entity's own import permission and `data.import`. */
   granted: boolean;
+  /**
+   * False when the entity needs a module this business type does not have —
+   * menu categories/items/modifiers for a shop, a service company or AEC.
+   * Absent = eligible, which is what every established catalogued type is.
+   */
+  industryEligible?: boolean;
 }
 
 export interface SetupImportCandidate extends SetupImportEntityInput {
@@ -83,6 +90,9 @@ export function setupImportUnavailableReason(
   selectedApps: readonly AppKey[] | null | undefined,
 ): SetupImportUnavailableReason | null {
   if (!entity.importable) return "not_importable";
+  // "Your trade has no menu" is a more fundamental fact than "you cannot
+  // import it": a jewellery shop has no menu module, whatever it selects.
+  if (entity.industryEligible === false) return "industry_module";
   if (!entity.granted) return "permission";
   const app = SETUP_IMPORT_MODULE_APP[entity.module];
   // `null`/`undefined` selection is the legacy unset state: keep the type
@@ -100,6 +110,9 @@ export function setupImportReasonLabel(
   if (!reason) return null;
   if (reason === "not_importable") {
     return "ورود این نوع داده از فایل پشتیبانی نمی‌شود؛ آن را از صفحهٔ خودش ثبت کنید.";
+  }
+  if (reason === "industry_module") {
+    return "این نوع داده با نوع کسب‌وکار شما سازگار نیست؛ در این صنف وجود ندارد.";
   }
   if (reason === "permission") {
     return "برای ورود این نوع داده، مجوز «ورود داده» و دسترسی همان بخش لازم است.";

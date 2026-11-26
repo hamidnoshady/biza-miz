@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { nextPath, prevPath, stepIndex, stepsFor, STEPS } from "./steps";
 import type { WizardStep } from "@/lib/wizard-steps";
 import { useSetupIndustry } from "./industry-context";
+import { SetupStepHelp } from "./step-help";
 import { isNotableApiFailure, recordApiFailure } from "@/lib/error-report";
 
 export interface ApiResult<T> {
@@ -137,6 +138,13 @@ export function errorMessage(
     offset_account_missing: "حساب «تراز افتتاحیه» (کد ۳۹۰۰) در سرفصل‌ها نیست.",
     incomplete: "هنوز مراحل الزامی کامل نشده‌اند.",
     no_location: "شعبه‌ای ثبت نشده است.",
+    opening_set_exists:
+      "مانده‌های افتتاحیهٔ رسمی این کسب‌وکار قبلاً تأیید یا ثبت شده است؛ سند دوم ساخته نمی‌شود.",
+    not_a_leaf_account: "حساب انتخاب‌شده زیرحساب دارد و برای ثبت سند باید یک حساب تفصیلی انتخاب کنید.",
+    account_inactive: "حساب انتخاب‌شده بایگانی شده است.",
+    chart_exists: "سرفصل حساب‌ها از قبل وجود دارد و بازنویسی نمی‌شود.",
+    accounting_not_enabled: "برنامهٔ حسابداری برای این کسب‌وکار فعال نشده است.",
+    permission_denied: "برای این کار دسترسی لازم را ندارید.",
   };
   return map[code ?? ""] ?? "خطای غیرمنتظره. دوباره تلاش کنید.";
 }
@@ -379,6 +387,10 @@ export function StepShell({
           {description}
         </p>
       </header>
+
+      {/* Issue #1239 / ESH-90 — inline help inside the step itself: a published
+          KB excerpt when one resolves, the step's local lines otherwise. */}
+      <SetupStepHelp step={step} />
 
       {children}
 

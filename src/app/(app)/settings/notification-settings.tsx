@@ -16,6 +16,7 @@ import {
 } from "@/lib/notifications";
 import { EmptyState, SectionCard, StatusBadge } from "@/app/dashboard/page-chrome";
 import { ErrorBox, Field, InfoBox, api, errorMessage, inputClass } from "@/app/dashboard/ui";
+import { KitchenNotificationSettings } from "./kitchen-notification-settings";
 import { currentSubscriptionEndpoint, disablePush, enablePush, pushSupport } from "./push-client";
 import { useNative } from "@/components/native/native-provider";
 import { registerNativePushNotifications } from "@/lib/native/capabilities-client";
@@ -573,6 +574,15 @@ export function NotificationSettings({ workspaceAvailable = true }: { workspaceA
           </Button>
         </div>
       </SectionCard>
+
+      {/*
+        The kitchen half of this tab: the device's sound matrix and the
+        branch's preparation-age thresholds. The kitchen *events* themselves
+        are ordinary rule cards further down («شیفت و روز کاری»); a member
+        without kitchen view draws nothing here.
+      */}
+      <KitchenNotificationSettings />
+
       <details className="rounded-xl border p-3">
         <summary>پیشرفته — محدودهٔ شعبه</summary>
         <p className="text-sm text-muted-foreground">
