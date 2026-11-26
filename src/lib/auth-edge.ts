@@ -165,6 +165,23 @@ export interface SessionPayload {
   mfaVerified?: boolean;
   /** Epoch seconds of the most recent primary/MFA/step-up authentication. */
   recentAuthAt?: number;
+  /**
+   * #1386 — what `recentAuthAt` actually proved.
+   *
+   * `true` when the most recent authentication on this session was possession
+   * of the SMS number alone: a routine phone-OTP login that completed without
+   * a distinct factor (no factor was due, or a trusted device waived it), or
+   * an `sms_otp` step-up afterwards. A routine sign-in is allowed on that
+   * proof (the owner-approved policy), but it can never *by itself* remove,
+   * replace or add a credential on an account that holds a separately
+   * enrolled factor — `requireSensitiveRecentAuth` asks for that factor.
+   *
+   * Cleared only by proving the distinct factor (TOTP or a recovery code) on
+   * the step-up route or at the login MFA step. Absent on every other door
+   * and on tokens minted before #1386; those are judged by `recentAuthAt`
+   * alone, exactly as before. Carried through every re-mint of the session.
+   */
+  otpOnlyAssurance?: boolean;
   /** Registered JWT issued-at claim (epoch seconds). */
   iat?: number;
   /** Registered JWT expiry claim (epoch seconds) — set by `signSession`, read back after verification. */

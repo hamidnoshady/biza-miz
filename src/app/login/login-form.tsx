@@ -175,7 +175,7 @@ export default function LoginForm() {
             ? "ورود سریع"
             : roster
               ? "ورود کارکنان"
-              : "ورود با شمارهٔ موبایل و رمز عبور"}
+              : "ورود به حساب کاربری"}
         </p>
 
         {pinOnly && trusted ? (

@@ -126,6 +126,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     tokenVersion: session.tokenVersion,
     mfaVerified: session.mfaVerified,
     recentAuthAt: session.recentAuthAt,
+    // #1386 — what that recent auth proved travels with it; dropping it here
+    // would let a switch upgrade an OTP-only session for free.
+    otpOnlyAssurance: session.otpOnlyAssurance,
     employeeSessionId: opened.id,
   });
 
