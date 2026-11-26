@@ -443,15 +443,16 @@ describe("buildReportQuery", () => {
 });
 
 describe("STANDARD_REPORTS", () => {
-  it("has 35 pre-built reports with unique keys", () => {
+  it("has 36 pre-built reports with unique keys", () => {
     // 18 through Phase 35, plus Phase 36's four CRM reports (acquisition,
     // retention, lifetime value, consent coverage), plus Phase 43's ten
     // retail-trade reports, which moved into the library from the per-trade
     // manager tabs they used to be the only door to, plus issue #839's three
     // automotive reports (stock and valuation, sales and profitability, and
-    // the holds with their deposits).
-    expect(STANDARD_REPORTS).toHaveLength(35);
-    expect(new Set(STANDARD_REPORTS.map((r) => r.key)).size).toBe(35);
+    // the holds with their deposits), plus GH #1567 6E's advisory fashion
+    // merchandising suggestions.
+    expect(STANDARD_REPORTS).toHaveLength(36);
+    expect(new Set(STANDARD_REPORTS.map((r) => r.key)).size).toBe(36);
   });
 
   it("every report declares a group the UI can shelve it under", () => {
@@ -582,6 +583,10 @@ describe("standardReportsFor", () => {
     expect(fashion).toContain("dead_stock");
     expect(fashion).not.toContain("near_expiry_batches");
     expect(fashion).not.toContain("food_cost_variance");
+    // GH #1567 6E — the advisory merchandising report is fashion's alone.
+    expect(fashion).toContain("fashion_merchandising_advice");
+    expect(haberdashery).not.toContain("fashion_merchandising_advice");
+    expect(cosmetics).not.toContain("fashion_merchandising_advice");
 
     // The warehouse reports follow the `stock` module, which F&B has no part
     // of — its equivalent is the recipe-costed inventory store.

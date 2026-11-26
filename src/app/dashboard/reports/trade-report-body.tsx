@@ -30,6 +30,8 @@ import {
   type VehicleSalesReportPayload,
 } from "./automotive-report-views";
 import { EmptyState } from "../page-chrome";
+import type { AdviceReport } from "@/lib/fashion-merchandising-advice";
+import { FashionAdviceView } from "./fashion-advice-view";
 import type { ReportShape } from "./standard-report-config";
 type ReportPayload = Record<string, unknown>;
 
@@ -55,6 +57,8 @@ export function TradeReportBody({ shape, payload }: { shape: ReportShape; payloa
       return <LowStockView report={payload as unknown as LowStockReport} />;
     case "dead_stock":
       return <DeadStockView report={payload as unknown as DeadStockReport} />;
+    case "fashion_advice":
+      return <FashionAdviceView report={payload as unknown as AdviceReport} />;
     // Issue #839 §14 — the dealership's own payloads.
     case "vehicle_inventory":
       return <VehicleInventoryView report={payload as unknown as VehicleInventoryReportPayload} />;

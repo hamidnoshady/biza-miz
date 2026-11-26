@@ -37,6 +37,7 @@ import {
   vehicleSalesReport,
 } from "./automotive-reports-service";
 import { listLayaways, listLayawaysPage } from "./jewelry-flagship-service";
+import { fashionMerchandisingAdvice } from "./fashion-merchandising-advice-service";
 import { deadStockReport, lowStockReport, deadStockReportPage, lowStockReportPage } from "./retail-stock-service";
 import type { DateRangeFilters } from "./reports-service";
 
@@ -161,6 +162,12 @@ export async function runTradeReport(
       const today = context.todayIso ?? new Date().toISOString().slice(0, 10);
       const rows = await deadStockReport(locationId, DEAD_STOCK_DAYS, today);
       return { rows, totalCount: rows.length, totalValueRial: rows.reduce((sum, r) => sum + r.valueRial, 0) };
+    }
+
+    // GH #1567 6E — advisory merchandising suggestions (read-only).
+    case "fashion_merchandising_advice": {
+      if (!locationId || industry !== "fashion_apparel") return { advisory: true, rows: [], totalCount: 0 };
+      return fashionMerchandisingAdvice(businessId, locationId, { from, to, todayIso: context.todayIso }) as unknown as Record<string, unknown>;
     }
 
     default:
