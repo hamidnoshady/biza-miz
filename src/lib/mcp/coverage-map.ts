@@ -262,6 +262,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/fixed-assets.integration.test.ts",
   },
   {
+    id: "accounting.intangible-assets",
+    module: "Accounting",
+    entity: "Intangible assets (register, amortize, impair, dispose)",
+    routes: ["ledger/intangible-assets"],
+    note: "no MCP verbs yet: the register is API-only until its reporting surface lands, so an AI client cannot amortize or impair an asset behind the tenant's back (#1326 tracks the verbs)",
+    status: "route-only (by design)",
+    test: "integration/intangible-assets.integration.test.ts",
+  },
+  {
     id: "accounting.payroll",
     module: "Accounting",
     entity: "Payroll (settings, staff, runs, advances)",
