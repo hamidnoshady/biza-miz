@@ -17,7 +17,7 @@ const report = buildAdvice(
     { itemId: "d", styleId: "old", styleName: "کت", variantLabel: "طوسی / L", soldUnits: 0, onHand: 6, unitCostRial: 250_000 },
   ],
   { from: "2026-09-01", to: "2026-10-26" },
-  { generatedAt: "2026-10-26T12:00:00.000Z", excludedConsigned: 1 },
+  { excludedConsigned: 1 },
 );
 
 describe("FashionAdviceView", () => {

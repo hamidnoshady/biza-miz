@@ -87,8 +87,8 @@ export interface AdviceRow {
 export interface AdviceReport {
   advisory: true;
   notice: string;
+  /** The advice is a pure function of the data in this window (no wall clock), so two reads of the same window agree. */
   window: { from: string; to: string; days: number };
-  generatedAt: string;
   rules: typeof ADVICE_RULES;
   sources: readonly string[];
   rows: AdviceRow[];
@@ -118,7 +118,7 @@ export function windowDays(from: string, to: string): number {
 export function buildAdvice(
   facts: VariantFact[],
   window: { from: string; to: string },
-  options: { generatedAt: string; excludedConsigned?: number },
+  options: { excludedConsigned?: number } = {},
 ): AdviceReport {
   const days = windowDays(window.from, window.to);
   const rows: AdviceRow[] = [];
@@ -210,7 +210,6 @@ export function buildAdvice(
     advisory: true,
     notice: ADVISORY_NOTICE,
     window: { from: window.from, to: window.to, days },
-    generatedAt: options.generatedAt,
     rules: ADVICE_RULES,
     sources: ADVICE_SOURCES,
     rows,

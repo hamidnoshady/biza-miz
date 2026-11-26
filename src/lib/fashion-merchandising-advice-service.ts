@@ -22,7 +22,7 @@ function shiftIso(iso: string, days: number): string {
 export async function fashionMerchandisingAdvice(
   businessId: string,
   locationId: string,
-  options: { from?: string; to?: string; todayIso?: string; now?: Date } = {},
+  options: { from?: string; to?: string; todayIso?: string } = {},
 ): Promise<AdviceReport> {
   const today = options.todayIso ?? new Date().toISOString().slice(0, 10);
   const to = options.to ?? today;
@@ -65,5 +65,5 @@ export async function fashionMerchandisingAdvice(
     });
   }
 
-  return buildAdvice(facts, { from, to }, { generatedAt: (options.now ?? new Date()).toISOString(), excludedConsigned });
+  return buildAdvice(facts, { from, to }, { excludedConsigned });
 }

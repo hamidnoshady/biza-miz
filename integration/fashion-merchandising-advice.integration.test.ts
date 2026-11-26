@@ -220,6 +220,10 @@ describe("fashion advisory merchandising suggestions (GH #1567 6E)", () => {
       businessId: ctx.tenant.businessId, locationId: ctx.tenant.locationId, industry: "fashion_apparel", todayIso: today,
     })) as unknown as Advice;
     expect(await fingerprint(ctx.tenant.businessId)).toEqual(before);
+    // Deterministic: a second read of the same window is identical (no wall clock in the payload).
+    expect(await trade.runTradeReport("fashion_merchandising_advice", {
+      businessId: ctx.tenant.businessId, locationId: ctx.tenant.locationId, industry: "fashion_apparel", todayIso: today,
+    })).toEqual(advice);
 
     expect(advice.advisory).toBe(true);
     expect(advice.window.days).toBe(56);
