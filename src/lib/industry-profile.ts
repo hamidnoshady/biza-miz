@@ -735,6 +735,9 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // profiles carry, so a trade without the variant board never sees it.
   ["/accounting/products", "stock"],
   ["/accounting/cosmetics", "cosmetics"],
+  // GH #1567 6A — the fashion trade's tailoring desk; gated by the trade's
+  // own module (the page and the API also refuse every other industry).
+  ["/accounting/tailoring", "fashion_apparel"],
   // Phase 36b — the Growth & Marketing app's home. Anchored on `loyalty`
   // (core for every trade) like its nav entry: the app is the container for
   // loyalty, promotions and commission, and a business that had any of the

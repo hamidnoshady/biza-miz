@@ -28,6 +28,7 @@ import {
   LifeBuoyIcon,
   PackageIcon,
   PlugIcon,
+  ScissorsIcon,
   SettingsIcon,
   ShoppingCartIcon,
   SparklesIcon,
@@ -90,6 +91,8 @@ const BUSINESS_NAV_ICONS: Record<string, LucideIcon> = {
   "/media": ImageIcon,
   "/accounting/reports": BarChart3Icon,
   "/accounting/cosmetics": SparklesIcon,
+  // GH #1567 6A — the fashion trade's alteration / made-to-measure desk.
+  "/accounting/tailoring": ScissorsIcon,
   "/settings/billing": WalletIcon,
   "/settings": SettingsIcon,
   // Phase 36b — the Growth & Marketing app's home; the trend glyph the

@@ -379,7 +379,8 @@ export function CatalogueSection() {
           ) : null}
           {(run?.run.evidence.valueTotals as ValueTotals | undefined ?? dry?.valueTotals) ? (() => {
             const values = (run?.run.evidence.valueTotals as ValueTotals | undefined) ?? dry!.valueTotals!;
-            const part = (label: string, counts: Record<string, number>) =>
+            // Older run evidence (or a preview with no value columns mapped) may lack a field; render it as zeros instead of crashing.
+            const part = (label: string, counts: Record<string, number> | undefined = {}) =>
               `${label}: ${toPersianDigits(counts.valid ?? 0)} معتبر، ${toPersianDigits(counts.zero ?? 0)} صفر، ${toPersianDigits((counts.invalid ?? 0) + (counts.formula ?? 0) + (counts.error ?? 0))} نامعتبر، ${toPersianDigits(counts.blank ?? 0)} خالی`;
             return <p className="text-sm text-muted-foreground">
               {part("قیمت", values.price)} · {part("بهای خرید", values.cost)} · {part("موجودی", values.quantity)}

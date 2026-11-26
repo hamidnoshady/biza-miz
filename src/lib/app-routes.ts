@@ -165,6 +165,8 @@ export const ACCOUNTING_WORKSPACE_HREFS = {
   inventory: "/accounting/inventory",
   products: "/accounting/products",
   cosmetics: "/accounting/cosmetics",
+  // GH #1567 6A — the fashion trade's alteration / made-to-measure desk.
+  tailoring: "/accounting/tailoring",
   reports: "/accounting/reports",
   floor: "/accounting/floor",
   kitchen: "/accounting/kitchen",

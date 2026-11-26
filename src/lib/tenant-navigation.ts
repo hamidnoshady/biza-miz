@@ -187,6 +187,18 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
     ...(industry === "cosmetics"
       ? [{ label: INDUSTRY_LABELS.cosmetics, module: "cosmetics" as const, href: ACCOUNTING_WORKSPACE_HREFS.cosmetics, roles: ["owner", "manager"] }]
       : []),
+    // GH #1567 6A — the fashion trade's alteration / made-to-measure desk.
+    // Permission-derived: a member sees it with either tailoring key (the
+    // page then mounts only what each key allows), and no other trade has it.
+    ...(industry === "fashion_apparel"
+      ? [{
+          label: "خیاطی و دوخت",
+          module: "fashion_apparel" as const,
+          href: ACCOUNTING_WORKSPACE_HREFS.tailoring,
+          roles: ["owner", "manager"] as Role[],
+          requiredAnyPermission: [PERMISSIONS.tailoringManage, PERMISSIONS.tailoringMeasurements],
+        }]
+      : []),
     // The «حسابداری» sub-menu — the Accounting app's sections, each a real
     // route under the app's own prefix (`/accounting/…`). This tree is the
     // href *registry* the flattened-nav consumers read (the mobile header's
