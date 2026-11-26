@@ -356,7 +356,7 @@ export async function getContract(
       order_id: string | null; journal_entry_id: string | null; note: string | null; actor_name: string | null; created_at: string;
     }>(
       `SELECT m.id, m.kind, m.line_id, i.name AS item_name, m.quantity, m.owner_share_rial::text, m.commission_rial::text,
-              m.amount_rial::text, m.order_id, m.journal_entry_id, m.note, u.name AS actor_name, m.created_at::text
+              m.amount_rial::text, m.order_id, m.journal_entry_id, m.note, u.full_name AS actor_name, m.created_at::text
          FROM fashion_consignment_movements m
          LEFT JOIN fashion_consignment_lines l ON l.id = m.line_id
          LEFT JOIN items i ON i.id = l.item_id

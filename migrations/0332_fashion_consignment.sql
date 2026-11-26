@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS fashion_consignment_movements (
 CREATE UNIQUE INDEX IF NOT EXISTS fashion_consignment_movements_key_uq
     ON fashion_consignment_movements (business_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS fashion_consignment_movements_sale_uq
-    ON fashion_consignment_movements (order_item_id) WHERE kind IN ('sale', 'void');
+    ON fashion_consignment_movements (order_item_id, kind) WHERE kind IN ('sale', 'void');
 CREATE INDEX IF NOT EXISTS fashion_consignment_movements_contract_idx
     ON fashion_consignment_movements (contract_id, created_at);
 CREATE INDEX IF NOT EXISTS fashion_consignment_movements_order_item_idx
