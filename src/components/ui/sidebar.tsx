@@ -23,6 +23,13 @@ type SidebarContextValue = {
    * the member with a click that appears to do nothing.
    */
   expandSidebar: () => void;
+  /**
+   * The control that opened the phone drawer. Escape closes the drawer and
+   * puts focus back here, so a keyboard user is not dropped on `body`
+   * (issue #1553). Radix only restores focus to a `DialogTrigger` it owns;
+   * this drawer is opened by an ordinary button calling `toggleSidebar`.
+   */
+  mobileTriggerRef: React.RefObject<HTMLButtonElement | null>;
 };
 
 const SidebarContext = React.createContext<SidebarContextValue | null>(null);
@@ -51,6 +58,7 @@ function SidebarProvider({
   const [internalOpen, setInternalOpen] = React.useState(defaultOpen);
   const [isMobile, setIsMobile] = React.useState(false);
   const [openMobile, setOpenMobile] = React.useState(false);
+  const mobileTriggerRef = React.useRef<HTMLButtonElement | null>(null);
   const open = openProp ?? internalOpen;
 
   React.useEffect(() => {
@@ -91,6 +99,7 @@ function SidebarProvider({
       setOpenMobile,
       toggleSidebar,
       expandSidebar,
+      mobileTriggerRef,
     }),
     [expandSidebar, isMobile, open, openMobile, toggleSidebar],
   );
@@ -112,7 +121,11 @@ function Sidebar({
   children,
   ...props
 }: React.ComponentProps<"aside"> & { side?: "left" | "right" }) {
-  const { state, isMobile, openMobile, setOpenMobile } = useSidebar();
+  const { state, isMobile, openMobile, setOpenMobile, mobileTriggerRef } = useSidebar();
+  // Escape is the one dismissal the keyboard user asked for by hand, so it is
+  // the one that must hand focus back to the hamburger. A close caused by a
+  // navigation must not: the destination heading takes focus instead.
+  const escapeReturnsFocusRef = React.useRef(false);
 
   if (isMobile) {
     return (
@@ -122,7 +135,22 @@ function Sidebar({
           warns and screen readers announce an unnamed dialog. They are spoken
           only — the visible name is the brand block the sidebar already draws.
         */}
-        <SheetContent side={side} showCloseButton className="w-[86vw] max-w-80 gap-0 p-0">
+        <SheetContent
+          side={side}
+          showCloseButton
+          className="w-[86vw] max-w-80 gap-0 p-0"
+          onEscapeKeyDown={() => {
+            escapeReturnsFocusRef.current = true;
+          }}
+          onCloseAutoFocus={(event) => {
+            if (!escapeReturnsFocusRef.current) return;
+            escapeReturnsFocusRef.current = false;
+            const trigger = mobileTriggerRef.current;
+            if (!trigger?.isConnected) return;
+            event.preventDefault();
+            trigger.focus();
+          }}
+        >
           <SheetTitle className="sr-only">منوی داشبورد</SheetTitle>
           <SheetDescription className="sr-only">
             دسترسی به بخش‌های داشبورد و تنظیمات حساب
@@ -162,7 +190,7 @@ function Sidebar({
 }
 
 function SidebarTrigger({ className, ...props }: React.ComponentProps<typeof Button>) {
-  const { state, isMobile, openMobile, toggleSidebar } = useSidebar();
+  const { state, isMobile, openMobile, toggleSidebar, mobileTriggerRef } = useSidebar();
   const expanded = isMobile ? openMobile : state === "expanded";
   const label = isMobile
     ? expanded
@@ -182,7 +210,12 @@ function SidebarTrigger({ className, ...props }: React.ComponentProps<typeof But
       aria-expanded={expanded}
       aria-controls={SIDEBAR_ID}
       className={cn("size-11 shrink-0", className)}
-      onClick={toggleSidebar}
+      onClick={(event) => {
+        // Remember the opener at the moment the drawer opens: by the time it
+        // closes, Radix has already moved focus into the sheet.
+        if (isMobile) mobileTriggerRef.current = event.currentTarget;
+        toggleSidebar();
+      }}
       {...props}
     >
       {isMobile ? <MenuIcon /> : state === "expanded" ? <PanelRightCloseIcon /> : <PanelRightOpenIcon />}
