@@ -1307,6 +1307,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/tailoring.integration.test.ts",
   },
   {
+    id: "misc.fashion-production",
+    module: "Production (fashion)",
+    entity: "Fashion production orders, BOMs, stages, WIP costing and finished-goods receipt (GH #1567 6B)",
+    routes: ["production-orders", "production-boms"],
+    status: "route-only (by design)",
+    note: "every step moves stock and posts to WIP 1310 / the trade inventory account, behind inventory.view to read and inventory.adjust (+ ledger.approve for a WIP write-off) to act; idempotent and version-checked; no MCP/AI write verb until an approval-gated design exists (GH #1567 F7) — the advisory merchandising AI (6E) may only read the report",
+    test: "integration/fashion-production.integration.test.ts",
+  },
+  {
     id: "misc.product-embedded-media",
     module: "Products (retail)",
     entity: "Legacy embedded-media report (GH #1567 F5)",

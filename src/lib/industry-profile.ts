@@ -738,6 +738,8 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   // GH #1567 6A — the fashion trade's tailoring desk; gated by the trade's
   // own module (the page and the API also refuse every other industry).
   ["/accounting/tailoring", "fashion_apparel"],
+  // GH #1567 6B — fashion production orders; the API refuses other trades too.
+  ["/accounting/production-orders", "fashion_apparel"],
   // Phase 36b — the Growth & Marketing app's home. Anchored on `loyalty`
   // (core for every trade) like its nav entry: the app is the container for
   // loyalty, promotions and commission, and a business that had any of the

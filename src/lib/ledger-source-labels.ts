@@ -70,6 +70,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   // سیستم ادواری — بستن دوره (periodic-closing-service.ts).
   periodic_closing: "بستن دوره انبار (ادواری)",
   item_stock_count: "شمارش موجودی کالا",
+  item_production_order: "سفارش تولید",
   item_stock_transfer: "انتقال موجودی کالا",
   item_audit: "بازبینی کالا",
   // GH #1567 F2/F3 — reviewed opening stock and items-model NRV write-downs.

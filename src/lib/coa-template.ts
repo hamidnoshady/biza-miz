@@ -1236,6 +1236,9 @@ export const FASHION_APPAREL_COA_TEMPLATE: TemplateAccount[] = [
   { code: "1200", name: "حساب‌های دریافتنی", type: "asset", parentCode: "1000" },
   { code: "1220", name: "مالیات بر ارزش افزوده خرید (قابل استرداد)", type: "asset", parentCode: "1000" },
   { code: "1374", name: "موجودی پوشاک و کالای مد", type: "asset", parentCode: "1000" },
+  // GH #1567 6B — production orders (cut/sew/finish) carry work in progress
+  // here and absorb labour/subcontract cost through 5180, as F&B production does.
+  { code: "1310", name: "کالای در جریان ساخت", type: "asset", parentCode: "1000" },
   { code: "1360", name: "کالای در راه", type: "asset", parentCode: "1000" },
   { code: "1400", name: "پیش‌پرداخت‌ها", type: "asset", parentCode: "1000" },
   { code: "1500", name: "اثاثه و تجهیزات", type: "asset", parentCode: "1000" },
@@ -1269,6 +1272,7 @@ export const FASHION_APPAREL_COA_TEMPLATE: TemplateAccount[] = [
 
   { code: "5000", name: "هزینه‌ها", type: "expense" },
   { code: "5184", name: "بهای تمام‌شده پوشاک و کالای مد فروخته‌شده", type: "expense", parentCode: "5000" },
+  { code: "5180", name: "هزینهٔ تبدیل جذب‌شده در تولید", type: "expense", parentCode: "5000", isContra: true },
   { code: "5210", name: "پورسانت فروش", type: "expense", parentCode: "5000" },
   { code: "5300", name: "اجاره", type: "expense", parentCode: "5000" },
   { code: "5400", name: "آب، برق و گاز", type: "expense", parentCode: "5000" },

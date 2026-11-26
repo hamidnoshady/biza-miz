@@ -38,6 +38,7 @@ import {
   WalletIcon,
   WatchIcon,
   CarIcon,
+  FactoryIcon,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -93,6 +94,7 @@ const BUSINESS_NAV_ICONS: Record<string, LucideIcon> = {
   "/accounting/cosmetics": SparklesIcon,
   // GH #1567 6A — the fashion trade's alteration / made-to-measure desk.
   "/accounting/tailoring": ScissorsIcon,
+  "/accounting/production-orders": FactoryIcon,
   "/settings/billing": WalletIcon,
   "/settings": SettingsIcon,
   // Phase 36b — the Growth & Marketing app's home; the trend glyph the

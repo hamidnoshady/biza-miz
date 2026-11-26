@@ -219,6 +219,7 @@ const INDUSTRY_GUARDED_ACCOUNTING_PREFIXES = [
   "/accounting/products",
   "/accounting/cosmetics",
   "/accounting/tailoring",
+  "/accounting/production-orders",
   "/accounting/kitchen",
 ] as const;
 

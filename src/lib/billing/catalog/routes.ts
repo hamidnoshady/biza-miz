@@ -91,6 +91,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   // registers like agency's: the money a job earns is the linked ordinary
   // order (`orders`/`sales`) and its ledger entry, so it is not billed twice.
   tailoring: keys("operations.shared"),
+  // GH #1567 6B — fashion production orders and their BOMs move stock and post
+  // to WIP / inventory, the same inventory declaration as `inventory`/`stock`.
+  "production-orders": keys("accounting.inventory"),
+  "production-boms": keys("accounting.inventory"),
   knowledge: keys("operations.shared"),
   support: keys("operations.shared"),
   "support-access": keys("operations.shared"),
