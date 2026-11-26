@@ -358,6 +358,18 @@ export interface ToolRoutingContext {
   task?: string | null;
   /** The member's latest instruction, only ever used for keyword hints. */
   message?: string | null;
+  /**
+   * Server-resolved section hints that are not in the instruction: the current
+   * project workspace, an assigned agent's app focus, or an explicit Work Area
+   * focus. They are hints like the message keywords: they can only add a group
+   * the permission filter still has to allow.
+   */
+  groups?: readonly ToolGroup[];
+}
+
+/** The sections an existing task lens would use, for a caller that must pick apps. */
+export function groupsForTask(task: string | null | undefined): ToolGroup[] {
+  return task ? [...(TASK_GROUPS[task] ?? [])] : [];
 }
 
 /**
@@ -380,14 +392,25 @@ export function routeTools(
   }
 
   const allowed = new Set<ToolGroup>();
-  const mentioned = groupsMentionedIn(context?.message);
+  // Server-resolved hints (project workspace, assigned agent, explicit Work
+  // Area focus) are section hints exactly like the member's own words.
+  const mentioned = [
+    ...new Set([...groupsMentionedIn(context?.message), ...(context?.groups ?? [])]),
+  ];
   const taskGroups = context?.task ? (TASK_GROUPS[context.task] ?? []) : [];
 
-  // Naming a section inside the focused app narrows to what was named, and any
-  // other section named is exactly how legitimate cross-app work keeps its
-  // tools. Mentioning no section at all widens to the whole focused app.
+  // Naming a section inside the focused app narrows to what was named. Naming
+  // only another app's section is an explicit cross-app request: keep the
+  // focused app whole (so no capability is silently removed) and add the named
+  // groups. Mentioning no section at all widens to the whole focused app.
   const mentionsFocusedSection = mentioned.some((group) => appGroups.has(group));
-  if (mentionsFocusedSection) {
+  if (mentioned.length > 0 && mentionsFocusedSection) {
+    for (const group of mentioned) allowed.add(group);
+  } else if (mentioned.length > 0) {
+    for (const group of appGroups) allowed.add(group);
+    // A cross-app turn also keeps the settings surface, exactly like a vague
+    // focused turn did before this branch existed.
+    allowed.add("settings");
     for (const group of mentioned) allowed.add(group);
   } else if (taskGroups.length > 0) {
     // The task lens is an explicit, server-validated choice, so it can select

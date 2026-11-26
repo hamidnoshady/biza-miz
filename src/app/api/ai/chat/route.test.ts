@@ -33,6 +33,23 @@ vi.mock("@/lib/db", () => ({
   withoutTenantScope: vi.fn(async (_scope: string, fn: () => Promise<unknown>) => fn()),
 }));
 
+vi.mock("@/lib/industry-guard", () => ({
+  getBusinessIndustry: vi.fn(async () => "food_service"),
+}));
+
+vi.mock("@/lib/features", () => ({
+  effectiveFeatures: vi.fn(async () => ({ ai_assistant: true })),
+}));
+
+vi.mock("@/lib/app-availability-service", () => ({
+  effectiveAppAvailability: vi.fn(async () => ({
+    accounting: { usable: true },
+    crm: { usable: true },
+    growth: { usable: true },
+    website: { usable: true },
+  })),
+}));
+
 vi.mock("@/lib/ai-runtime", () => ({
   resolveAiConfigFor: vi.fn(async () => ({
     enabled: true,
@@ -184,5 +201,53 @@ describe("POST /api/ai/chat streaming error handling", () => {
     const text = await readStreamText(res);
     expect(text).toContain("event: done");
     expect(text).toContain("پاسخ دستیار هوش مصنوعی");
+  });
+
+  it("passes the page hint and trusted app state to the selector, never as a grant", async () => {
+    const { runAgentTurn } = await import("@/lib/ai-service");
+    const req = new NextRequest("http://localhost:3000/api/ai/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "چقدر دیروز فروختیم؟" }],
+        routePath: "/accounting/pos",
+      }),
+    });
+
+    const res = await POST(req);
+    await readStreamText(res);
+    expect(vi.mocked(runAgentTurn)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        appFocus: null,
+        toolSelection: expect.objectContaining({
+          routeApp: "accounting",
+          enabledApps: ["accounting", "crm", "growth", "website"],
+          branchScope: null,
+        }),
+      }),
+    );
+  });
+
+  it("clamps a client focus to a usable app instead of widening it", async () => {
+    const { effectiveAppAvailability } = await import("@/lib/app-availability-service");
+    vi.mocked(effectiveAppAvailability).mockResolvedValueOnce({
+      accounting: { usable: true } as never,
+      crm: { usable: true } as never,
+      growth: { usable: true } as never,
+      website: { usable: false } as never,
+    });
+    const { runAgentTurn } = await import("@/lib/ai-service");
+    const req = new NextRequest("http://localhost:3000/api/ai/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        messages: [{ role: "user", content: "وضعیت سایت" }],
+        appFocus: "website",
+      }),
+    });
+
+    const res = await POST(req);
+    await readStreamText(res);
+    expect(vi.mocked(runAgentTurn)).toHaveBeenCalledWith(
+      expect.objectContaining({ appFocus: null }),
+    );
   });
 });
