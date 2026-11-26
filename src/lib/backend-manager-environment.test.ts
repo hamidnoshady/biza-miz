@@ -35,6 +35,7 @@ const backendManager = require("../../electron/backend-manager.js") as {
       updateTargetPath?: string;
       updatePolicyPath?: string;
       updateCommandPath?: string;
+      identityPath?: string;
     },
   ) => Record<string, string>;
   postgresInitdbFlags: () => string[];
@@ -59,6 +60,7 @@ describe("desktopServerEnvironment", () => {
         updateTargetPath: "/userData/Configuration/update-target.json",
         updatePolicyPath: "/userData/Configuration/update-policy.json",
         updateCommandPath: "/userData/Configuration/update-command.json",
+        identityPath: "/userData/Configuration/business-identity.json",
       },
     );
     expect(env.PG_TOOLS_DIR).toBe("/resources/postgresql-tools");
@@ -70,6 +72,7 @@ describe("desktopServerEnvironment", () => {
     expect(env.DESKTOP_UPDATE_TARGET_PATH).toBe("/userData/Configuration/update-target.json");
     expect(env.DESKTOP_UPDATE_POLICY_PATH).toBe("/userData/Configuration/update-policy.json");
     expect(env.DESKTOP_UPDATE_COMMAND_PATH).toBe("/userData/Configuration/update-command.json");
+    expect(env.DESKTOP_IDENTITY_PATH).toBe("/userData/Configuration/business-identity.json");
   });
 
   it("still sets the core env (unchanged by the fix) and forces production/loopback posture", () => {
@@ -105,6 +108,7 @@ describe("desktopServerEnvironment", () => {
     expect(env.RESTORE_EMERGENCY_DIR).toBeUndefined();
     expect(env.DESKTOP_UPDATE_STATE_PATH).toBeUndefined();
     expect(env.DESKTOP_UPDATE_TARGET_PATH).toBeUndefined();
+    expect(env.DESKTOP_IDENTITY_PATH).toBeUndefined();
     expect(env.APP_RELEASE_VERSION).toBe("unknown");
   });
 

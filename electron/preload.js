@@ -77,5 +77,15 @@ contextBridge.exposeInMainWorld("businessSuiteDesktop", Object.freeze({
     status: () => ipcRenderer.invoke("desktop:support-companion"),
     launch: (ticketId) => ipcRenderer.invoke("desktop:support-companion", { action: "launch", ticketId }),
   }),
+  /**
+   * Desktop multi-business (#1571/#1572) — which business this window is
+   * serving, and the way back to the saved-business picker. Both answers come
+   * from the main process: the renderer never names the active business and
+   * never chooses which one is running.
+   */
+  business: Object.freeze({
+    current: () => ipcRenderer.invoke("desktop:business-current"),
+    change: () => ipcRenderer.invoke("desktop:business-switch"),
+  }),
 }));
 

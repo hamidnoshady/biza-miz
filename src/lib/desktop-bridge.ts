@@ -192,7 +192,31 @@ export interface DesktopBridge {
   printing?: DesktopPrintingBridge;
   /** Issue #984 — the standalone support companion launcher; optional so older shells still type-check. */
   supportCompanion?: DesktopSupportCompanionBridge;
+  /** Present since desktop multi-business shipped; optional so older shells still type-check. */
+  business?: DesktopBusinessBridge;
 }
+
+/**
+ * Desktop multi-business (#1571/#1572) — which saved business the shell is
+ * serving, and the way back to the picker. Both answers come from the main
+ * process; the renderer never names the active business.
+ */
+export interface DesktopBusinessStatus {
+  activeProfileId: string | null;
+  activeDisplayName: string | null;
+  running: boolean;
+  appUrl: string | null;
+}
+
+export interface DesktopBusinessBridge {
+  current(): Promise<{ status: DesktopBusinessStatus | null; multiBusiness: boolean }>;
+  /** Stops this business's local runtime and relaunches into the picker; the page goes away with it. */
+  change(): Promise<{ ok: true }>;
+}
+
+// #1572 deliberately has no renderer-facing identity write: the local server
+// publishes a non-secret identity file for its own profile and the shell reads
+// it on the next launch. A page script cannot name a saved business.
 
 /**
  * Issue #984 — `status` reports install presence for truthful UI states;

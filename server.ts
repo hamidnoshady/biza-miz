@@ -214,6 +214,24 @@ app.prepare().then(async () => {
   }
   await assertRlsEffective();
 
+  // #1572 follow-up — name the saved business from the database this backend
+  // already holds, before the first health probe can answer. A profile enrolled
+  // before the identity file existed (or a legacy install imported into one)
+  // never pairs again, so startup is the only place it gets named. Published
+  // before `listen` so the desktop shell's own read after readiness sees it,
+  // and best-effort so no metadata gap can stop the app from starting.
+  const { publishStartupBusinessIdentity } = await import("./src/lib/desktop-identity-file");
+  try {
+    const startupIdentity = await publishStartupBusinessIdentity();
+    if (startupIdentity.published) {
+      console.log("> desktop business identity: published");
+    } else if (startupIdentity.reason !== "not_desktop") {
+      console.log(`> desktop business identity: ${startupIdentity.reason}`);
+    }
+  } catch (error) {
+    console.warn("> desktop business identity could not be published:", error);
+  }
+
   // Keep every scheduled job handle so a deploy can stop future work before
   // draining the HTTP server and database pool. The callbacks already catch
   // and log their own failures; this helper only owns their lifecycle.

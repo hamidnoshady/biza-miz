@@ -109,6 +109,29 @@ function fail(message) {
  * ------------------------------------------------------------------ */
 
 /**
+ * Every data root this installation may have written to, newest layout first.
+ *
+ * A multi-business install (#1571) keeps each saved business's Configuration/,
+ * Logs/ and Data/ under `businesses/<uuid>/` and only the registry at the
+ * install root, so the readiness facts the run needs live one level down. The
+ * install root itself stays in the list: the picker's own launch logs there,
+ * and an install that has not been through the folder migration still keeps a
+ * flat `config.json` there.
+ */
+function businessRoots(userDataDir) {
+  const roots = [userDataDir];
+  const profilesDir = path.join(userDataDir, "businesses");
+  try {
+    for (const entry of fs.readdirSync(profilesDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) roots.push(path.join(profilesDir, entry.name));
+    }
+  } catch {
+    // No saved business yet: the install root is the only root there is.
+  }
+  return roots;
+}
+
+/**
  * Read the desktop config; `null` until the backend has written it.
  *
  * Both layouts are checked because an install that has not been through the
@@ -117,15 +140,17 @@ function fail(message) {
  * mistake it for a fresh one.
  */
 function readDesktopConfig(userDataDir) {
-  for (const candidate of [
-    path.join(userDataDir, "Configuration", "config.json"),
-    path.join(userDataDir, "config.json"),
-  ]) {
-    if (!fs.existsSync(candidate)) continue;
-    try {
-      return JSON.parse(fs.readFileSync(candidate, "utf8"));
-    } catch {
-      return null;
+  for (const root of businessRoots(userDataDir)) {
+    for (const candidate of [
+      path.join(root, "Configuration", "config.json"),
+      path.join(root, "config.json"),
+    ]) {
+      if (!fs.existsSync(candidate)) continue;
+      try {
+        return JSON.parse(fs.readFileSync(candidate, "utf8"));
+      } catch {
+        return null;
+      }
     }
   }
   return null;
@@ -145,20 +170,31 @@ function readDesktopConfig(userDataDir) {
  *   Desktop backend is ready {"appUrl":"http://127.0.0.1:3000","instanceId":"…"}
  */
 function readinessFromLog(userDataDir) {
+  // Every root, not the first one that answers: a multi-business install keeps
+  // one log per saved business, so the launch under test is the one that wrote
+  // most recently — an older business's stale "Ready on" must not be picked up.
+  const candidates = [];
   for (const log of desktopLogs(userDataDir)) {
     if (!fs.existsSync(log)) continue;
     const text = fs.readFileSync(log, "utf8");
     const ports = [...text.matchAll(/Ready on http:\/\/127\.0\.0\.1:(\d+)/g)];
     if (!ports.length) continue;
-    const appPort = Number(ports[ports.length - 1][1]);
-    const instances = [...text.matchAll(/"instanceId"\s*:\s*"([^"]+)"/g)];
-    return {
-      appPort,
-      instanceId: instances.length ? instances[instances.length - 1][1] : null,
-      log,
-    };
+    let modified = 0;
+    try {
+      modified = fs.statSync(log).mtimeMs;
+    } catch {
+      modified = 0;
+    }
+    candidates.push({ log, text, appPort: Number(ports[ports.length - 1][1]), modified });
   }
-  return null;
+  if (!candidates.length) return null;
+  const newest = candidates.sort((a, b) => a.modified - b.modified).at(-1);
+  const instances = [...newest.text.matchAll(/"instanceId"\s*:\s*"([^"]+)"/g)];
+  return {
+    appPort: newest.appPort,
+    instanceId: instances.length ? instances[instances.length - 1][1] : null,
+    log: newest.log,
+  };
 }
 
 /** The local application origin for a desktop config. */
@@ -405,8 +441,12 @@ function writeOwnerCredentials(userDataDir, credentials) {
 
 function desktopLogs(userDataDir) {
   // Both folder layouts, because the smoke run can start on either side of the
-  // Configuration/Data/Backup/Logs migration (issue #985 acceptance).
-  return [path.join(userDataDir, "Logs", "desktop.log"), path.join(userDataDir, "logs", "desktop.log")];
+  // Configuration/Data/Backup/Logs migration (issue #985 acceptance) — and every
+  // saved business's own root, because #1571 logs there once one is opened.
+  return businessRoots(userDataDir).flatMap((root) => [
+    path.join(root, "Logs", "desktop.log"),
+    path.join(root, "logs", "desktop.log"),
+  ]);
 }
 
 function logOffsets(userDataDir) {
@@ -435,12 +475,13 @@ function diagnosticSummary(userDataDir) {
   const logs = desktopLogs(userDataDir);
   const log = logs.find((candidate) => fs.existsSync(candidate));
   const facts = [];
+  const roots = businessRoots(userDataDir);
   const config = readDesktopConfig(userDataDir);
   const announced = readinessFromLog(userDataDir);
   facts.push(
     config?.appPort
       ? `config appPort ${config.appPort}`
-      : "no config.json at the profile root",
+      : `no config.json in any of ${roots.length} data root(s)`,
   );
   facts.push(announced ? `log says ready on ${announced.appPort}` : "the log never said the server was ready");
   try {
@@ -448,10 +489,10 @@ function diagnosticSummary(userDataDir) {
   } catch {
     facts.push("profile directory is unreadable");
   }
-  for (const candidate of [
-    path.join(userDataDir, "Configuration", "config.json"),
-    path.join(userDataDir, "config.json"),
-  ]) {
+  for (const candidate of roots.flatMap((root) => [
+    path.join(root, "Configuration", "config.json"),
+    path.join(root, "config.json"),
+  ])) {
     try {
       facts.push(
         fs.existsSync(candidate)
@@ -465,8 +506,11 @@ function diagnosticSummary(userDataDir) {
     }
   }
   facts.push(
-    fs.existsSync(path.join(userDataDir, "Data", "pgdata", "postmaster.pid")) ||
-      fs.existsSync(path.join(userDataDir, "pgdata", "postmaster.pid"))
+    roots.some(
+      (root) =>
+        fs.existsSync(path.join(root, "Data", "pgdata", "postmaster.pid")) ||
+        fs.existsSync(path.join(root, "pgdata", "postmaster.pid")),
+    )
       ? "postmaster.pid present (PostgreSQL is running)"
       : "postmaster.pid absent",
   );
@@ -662,9 +706,11 @@ class InstalledApplication {
   }
 
   assertNoPostmasterPid(stage) {
-    for (const relative of [path.join("Data", "pgdata", "postmaster.pid"), path.join("pgdata", "postmaster.pid")]) {
-      if (fs.existsSync(path.join(this.userDataDir, relative))) {
-        fail(`PostgreSQL postmaster.pid remained after ${stage} (${relative})`);
+    for (const root of businessRoots(this.userDataDir)) {
+      for (const relative of [path.join("Data", "pgdata", "postmaster.pid"), path.join("pgdata", "postmaster.pid")]) {
+        if (fs.existsSync(path.join(root, relative))) {
+          fail(`PostgreSQL postmaster.pid remained after ${stage} (${path.join(root, relative)})`);
+        }
       }
     }
   }

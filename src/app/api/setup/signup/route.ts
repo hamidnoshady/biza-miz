@@ -10,6 +10,7 @@ import {
 } from "@/lib/business-provisioning";
 import { loadSignupGate, signupGateError } from "@/lib/iam/signup-controls";
 import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
+import { publishDesktopBusinessIdentity } from "@/lib/desktop-identity-file";
 
 /**
  * Self-service business registration.
@@ -63,6 +64,14 @@ export async function POST(request: NextRequest) {
     }
     throw err;
   }
+
+  // #1572 — a locally created business is just as real as a paired one; the
+  // backend publishes the identity for the desktop shell (no-op elsewhere).
+  publishDesktopBusinessIdentity({
+    businessId: created.businessId,
+    businessSubdomain: created.businessSubdomain,
+    cloudOrigin: null,
+  });
 
   const userAgent = request.headers.get("user-agent");
   const opened = await withTenant(created.businessId, () =>

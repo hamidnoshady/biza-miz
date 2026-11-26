@@ -8,6 +8,7 @@ import {
   validateSnapshot,
 } from "@/lib/pairing-snapshot";
 import { acknowledgePendingPairing } from "@/lib/server-sync";
+import { publishDesktopBusinessIdentity } from "@/lib/desktop-identity-file";
 
 const REDEEM_TIMEOUT_MS = 30_000;
 
@@ -58,6 +59,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   const pairingSessionId = typeof payload.pairingSessionId === "string" ? payload.pairingSessionId : undefined;
   await repairPairingSnapshot(validated.snapshot, address.url, { pairingSessionId, installationId });
+  // Re-enrollment proves the same identity again for this saved profile; the
+  // shell picks it up on the next launch (see desktop-identity-file.ts).
+  publishDesktopBusinessIdentity({
+    businessId: validated.snapshot.business.id,
+    businessSubdomain: validated.snapshot.business.subdomain ?? validated.snapshot.business.slug,
+    cloudOrigin: new URL(address.url).origin,
+  });
   // Same acknowledgement first-run pairing uses. The session fields persisted
   // above let every sync tick retry it if this request is interrupted.
   const activationPending =

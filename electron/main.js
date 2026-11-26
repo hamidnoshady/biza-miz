@@ -17,7 +17,7 @@ const { computePaths, migrateLegacyLayout } = require("./app-paths");
 const { DesktopUpdateEngine } = require("./update-engine");
 const { companionStatus, launchCompanion } = require("./support-companion");
 const maintenanceGate = require("./maintenance-gate");
-const { CLOUD_PARTITION, guardCloudPane, hardenCloudPane, hideCloudSidebar, stampEmbedAgent } = require("./cloud-pane");
+const { CLOUD_PARTITION, cloudPartition, guardCloudPane, hardenCloudPane, hideCloudSidebar, stampEmbedAgent } = require("./cloud-pane");
 const { registerTrustedHandler } = require("./ipc-sender");
 const { installNavigationGuard } = require("./navigation-guard");
 const { installPermissionHandlers } = require("./permissions");
@@ -28,6 +28,22 @@ const {
   validatePrintTarget,
 } = require("./print-target-guard");
 const { ServerSupervisor } = require("./server-supervisor");
+const { ProfileManager } = require("./profile-manager");
+const {
+  addProfile,
+  deleteProfileData,
+  importLegacyInstall,
+  profileDataDir,
+  profileHasData,
+  readRegistry,
+  recordProfileIdentity,
+  registryPath,
+  removeProfile,
+  selectProfile,
+  writeRegistry,
+} = require("./profile-registry");
+const { showProfilePicker } = require("./profile-picker");
+const { businessIdentityPath, instanceFingerprint, readBusinessIdentityFile } = require("./business-identity-file");
 const { BRAND_NAME_EN, brandName, byLocale } = require("./brand");
 const { resolveUserDataDir } = require("./user-data-path");
 
@@ -47,6 +63,9 @@ if (!app.commandLine.hasSwitch("user-data-dir")) {
 // Phase 46: «ورود با حساب ابری» — the cloud hands the browser back to the app
 // with businesssuite://cloud-login?code=…&state=…
 const LOGIN_PROTOCOL = "businesssuite";
+
+/** The label of the profile an installation starts with — a fresh install, or one whose last profile was removed. */
+const DEFAULT_PROFILE_LABEL = "کسب‌وکار من";
 if (process.defaultApp && process.argv.length >= 2) {
   app.setAsDefaultProtocolClient(LOGIN_PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
 } else {
@@ -85,6 +104,15 @@ function runDesktopShell() {
   let cleanupStarted = null;
   let ipcRegistered = false;
   let mainAppUrl = null;
+  // Multi-business profiles (#1571). The INSTALLATION root owns the registry and
+  // every installation-wide concern (single-instance lock, storage marker, folder
+  // migration, update engine); each business's own data lives under
+  // `businesses/<profile-uuid>/` and is served by exactly one backend at a time.
+  let installRoot = null;
+  let profileManager = null;
+  // One CloudPane partition per business, so its cloud cookies and storage are
+  // never the ones the next business's pane loads.
+  let cloudPartitionName = CLOUD_PARTITION;
   // A login link that arrived before the till window existed (a cold start from the browser).
   let pendingLoginLink = cloudLoginLink(process.argv);
   // One Windows notification per discovered version, so an available update is
@@ -168,7 +196,7 @@ function runDesktopShell() {
       appOrigin = null;
     }
     installPermissionHandlers(session.defaultSession, { appOrigin });
-    installPermissionHandlers(session.fromPartition(CLOUD_PARTITION), { appOrigin: null });
+    installPermissionHandlers(session.fromPartition(cloudPartitionName), { appOrigin: null });
 
     mainWindow = new BrowserWindow({
       width: 1280,
@@ -188,11 +216,11 @@ function runDesktopShell() {
     });
     let paneOrigin = null;
     mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-      paneOrigin = hardenCloudPane(webPreferences, params);
+      paneOrigin = hardenCloudPane(webPreferences, params, { partition: cloudPartitionName });
       if (!paneOrigin) return event.preventDefault();
       // Every request to the cloud carries the embed token — service-worker
       // navigations included — so the cloud never draws its own sidebar here.
-      const cloudSession = session.fromPartition(CLOUD_PARTITION);
+      const cloudSession = session.fromPartition(cloudPartitionName);
       stampEmbedAgent(cloudSession, paneOrigin, params.useragent || cloudSession.getUserAgent());
     });
     mainWindow.webContents.on("did-attach-webview", (_event, contents) => {
@@ -335,6 +363,36 @@ function runDesktopShell() {
       return companionStatus();
     });
 
+    // Desktop multi-business (#1571/#1572): which business this window is
+    // serving, and the "change business" action. The answers come from the live
+    // manager and the registry, never from renderer input.
+    handleIpc("desktop:business-current", async () => {
+      const current = readRegistry(installRoot);
+      return {
+        status: profileManager?.status() ?? null,
+        multiBusiness: (current.registry?.profiles.length ?? 0) > 1,
+      };
+    });
+    handleIpc("desktop:business-switch", async () => {
+      const current = readRegistry(installRoot);
+      if (current.state !== "ok") throw new Error("profile_registry_unreadable");
+      if (current.registry.profiles.length < 2) throw new Error("only_one_business");
+      logger.info("Owner requested a business switch; restarting into the picker", {
+        from: profileManager?.status().activeProfileId ?? null,
+      });
+      quitting = true;
+      serverSupervisor?.cancel();
+      // A full relaunch, not an in-process handover: it is the only way to be
+      // sure every local writer, gateway and background tick of this business is
+      // gone before another one starts. Two or more saved businesses are what
+      // make the relaunched app open the picker, so nothing of this one survives
+      // into the next.
+      await cleanup();
+      app.relaunch();
+      app.exit(0);
+      return { ok: true };
+    });
+
     // Desktop updates: manual and background downloads share this one engine.
     // Renderer input is still treated as hostile: the engine validates SemVer,
     // HTTPS origin, exact size/hash, Authenticode publisher and backup evidence.
@@ -472,9 +530,15 @@ function runDesktopShell() {
       // must still be recognised as "already has data here" — otherwise it
       // would incorrectly look like a fresh install and re-prompt for a
       // storage location every launch after the very first migration.
+      // A profile registry is installation evidence too: once a legacy install
+      // has been imported into its first business profile, its config.json lives
+      // inside that profile and the root no longer holds one — without this
+      // check the second launch would look like a fresh install and re-prompt for
+      // a storage location every time.
       const hasExistingConfigAtDefault =
         fs.existsSync(path.join(defaultUserDataDir, "config.json")) ||
-        fs.existsSync(computePaths(defaultUserDataDir).configPath);
+        fs.existsSync(computePaths(defaultUserDataDir).configPath) ||
+        fs.existsSync(registryPath(defaultUserDataDir));
       const { root: markerRoot } = await localStorageChecks.readStorageRootMarker(defaultUserDataDir);
       const decision = localStorageChecks.decideStorageBootstrap({ hasExistingConfigAtDefault, markerRoot });
       if (decision.action === "use_marker_root") {
@@ -553,9 +617,19 @@ function runDesktopShell() {
     await localStorageChecks.writeStorageRootMarker(defaultUserDataDir, chosenRoot);
   }
 
-  async function initialiseBackend() {
-    backend = new BackendManager({ app, logger, safeStorage });
-    const state = await backend.start();
+  /**
+   * Start the one active business. `ProfileManager` owns the lifecycle — the
+   * single-active-backend guarantee and the serialized start/stop — so this
+   * function only wires the gateway/certificate/firewall managers to whichever
+   * business the manager just started.
+   */
+  async function initialiseBackend(profile) {
+    profileManager = new ProfileManager({ app, logger, safeStorage, installRoot });
+    const state = await profileManager.start(profile);
+    // The manager owns the running backend; this reference is what the IPC
+    // handlers and the crash supervisor already use.
+    backend = profileManager.backend;
+    cloudPartitionName = cloudPartition(profile.id);
     const certificates = createCertificateManager(state.userDataDir, logger);
     firewall = new FirewallManager(logger);
     gateway = new GatewayManager({ backend, certificateManager: certificates, logger });
@@ -571,11 +645,74 @@ function runDesktopShell() {
     return state;
   }
 
+  /**
+   * Name the profile this launch is serving, from the file its *own backend*
+   * published (#1572 follow-up).
+   *
+   * The renderer is not involved: pairing/reconnect/bootstrap/signup make the
+   * local server write `Configuration/business-identity.json`, and this reads
+   * it once the backend is up. Two independent refusals protect the registry —
+   * the document must carry this profile's instance fingerprint (so a file
+   * copied from another saved business is `foreign` and ignored), and
+   * `recordProfileIdentity` still refuses a tenant that disagrees with a value
+   * the profile already holds. A missing or unreadable file is normal (a first
+   * run that has not enrolled yet) and never blocks startup.
+   */
+  function applyPublishedIdentity(profile, instanceId) {
+    try {
+      applyPublishedIdentityUnsafe(profile, instanceId);
+    } catch (error) {
+      // A metadata gap must never turn a healthy launch into a recovery dialog.
+      logger.warn("Desktop business identity could not be applied", {
+        profileId: profile.id,
+        detail: error?.message || String(error),
+      });
+    }
+  }
+
+  function applyPublishedIdentityUnsafe(profile, instanceId) {
+    const file = businessIdentityPath(profileDataDir(installRoot, profile.id));
+    const read = readBusinessIdentityFile(file, instanceFingerprint(instanceId));
+    if (!read.identity) {
+      if (read.state !== "missing") {
+        logger.warn("Desktop business identity file was not used", {
+          profileId: profile.id,
+          state: read.state,
+        });
+      }
+      return;
+    }
+    const current = readRegistry(installRoot);
+    if (current.state !== "ok") {
+      logger.warn("Desktop business identity was not recorded", {
+        profileId: profile.id,
+        error: "profile_registry_unreadable",
+      });
+      return;
+    }
+    const result = recordProfileIdentity(current.registry, profile.id, read.identity);
+    if (!result.ok) {
+      logger.warn("Desktop business identity was not recorded", {
+        profileId: profile.id,
+        error: result.error,
+        field: result.field ?? null,
+      });
+      return;
+    }
+    if (result.changed) {
+      writeRegistry(installRoot, result.registry);
+      logger.info("Desktop business identity recorded from the running backend", { profileId: profile.id });
+    }
+  }
+
   async function cleanup() {
     if (cleanupStarted) return cleanupStarted;
     cleanupStarted = (async () => {
       if (gateway) await gateway.stop().catch((error) => logger?.error("Gateway shutdown failed", error));
-      if (backend) await backend.stop().catch((error) => logger?.error("Backend shutdown failed", error));
+      // Through the manager, so `stopRequested` is set and a start that is still
+      // in flight is cancelled at its next checkpoint rather than orphaned.
+      if (profileManager) await profileManager.stop().catch((error) => logger?.error("Backend shutdown failed", error));
+      else if (backend) await backend.stop().catch((error) => logger?.error("Backend shutdown failed", error));
     })();
     return cleanupStarted;
   }
@@ -742,11 +879,151 @@ function runDesktopShell() {
     });
   }
 
-  async function bootWithRecovery() {
+  /**
+   * Which saved business this launch should open (#1571/#1572).
+   *
+   * The rules, in order:
+   *  1. A single-business installation never sees a picker — it opens its one
+   *     profile directly, so an existing owner's launch looks exactly as before
+   *     this feature. That is the "users with only one configured business retain
+   *     a simple login experience" requirement.
+   *  2. A multi-business installation lists its saved businesses and opens the one
+   *     the owner picks. The last-used business is only *highlighted* — nothing
+   *     ever crosses into another tenant without a click.
+   *  3. A legacy single-business install is imported as the first profile before
+   *     any of the above, and a brand-new install gets one empty profile, so that
+   *     "add another business" is symmetric with it and the existing setup wizard
+   *     always has a data root to run in.
+   *
+   * Returns the chosen profile, or null when the owner quit.
+   */
+  async function chooseStartupBusiness() {
+    installRoot = app.getPath("userData");
+    const read = readRegistry(installRoot);
+    if (read.state === "unreadable" || read.state === "invalid") {
+      // Fail closed. A profile's data must never be adopted by a guess, and a
+      // silent replacement would strand a real business behind a lost index.
+      await dialog.showMessageBox({
+        type: "error",
+        title: "فهرست کسب‌وکارها خوانده نشد",
+        message: "فهرست کسب‌وکارهای ذخیره‌شده روی این رایانه آسیب‌دیده یا ناخواناست.",
+        detail: `${registryPath(installRoot)}\n\nدادهٔ هیچ کسب‌وکاری پاک نشده است. این فایل را از یک نسخهٔ پشتیبان سالم برگردانید و برنامه را دوباره باز کنید.`,
+        buttons: ["بستن"],
+        noLink: true,
+      });
+      return null;
+    }
+
+    let registry = read.registry;
+
+    if (registry.profiles.length === 0) {
+      const imported = importLegacyInstall({ installRoot, registry });
+      if (!imported.ok) {
+        await dialog.showMessageBox({
+          type: "error",
+          title: "انتقال نصب موجود انجام نشد",
+          message: "این نصب تک‌کسب‌وکاری به پروفایل کسب‌وکار منتقل نشد.",
+          detail: `${imported.error || imported.reason}\n\nهمهٔ داده‌های قبلی در جای خود باقی مانده‌اند.`,
+          buttons: ["بستن"],
+          noLink: true,
+        });
+        return null;
+      }
+      if (imported.imported) {
+        logger.info("Imported the existing single-business install into its first desktop profile", {
+          profileId: imported.profile.id,
+          moved: imported.moved,
+        });
+        registry = imported.registry ?? read.registry;
+      } else {
+        const created = addProfile(registry, { displayName: DEFAULT_PROFILE_LABEL });
+        if (!created.ok) return null;
+        registry = writeRegistry(installRoot, created.registry);
+        logger.info("Created the first desktop business profile", { profileId: created.profile.id });
+      }
+    }
+
+    // The single-business shortcut applies to the launch only. Once the picker
+    // has been shown it reopens for every add or removal, so removing a business
+    // can never silently drop the app into whichever one is left (and removing
+    // the last one leaves an empty picker to add a named business from).
+    let pickerOpened = false;
+
+    for (;;) {
+      if (!pickerOpened && registry.profiles.length < 2) {
+        const only = registry.profiles[0];
+        if (!only) return null;
+        const selected = selectProfile(registry, only.id);
+        if (selected.ok) writeRegistry(installRoot, selected.registry);
+        return selected.ok ? selected.profile : only;
+      }
+      pickerOpened = true;
+
+      const outcome = await showProfilePicker({
+        logger,
+        list: () => ({
+          lastUsedProfileId: registry.lastUsedProfileId,
+          profiles: registry.profiles.map((profile) => ({
+            id: profile.id,
+            displayName: profile.displayName,
+            mode: profile.mode,
+            hasData: profileHasData(installRoot, profile.id),
+          })),
+        }),
+        describe: (profileId) => {
+          const profile = registry.profiles.find((entry) => entry.id === profileId);
+          return profile
+            ? { displayName: profile.displayName, hasData: profileHasData(installRoot, profileId) }
+            : null;
+        },
+      });
+
+      if (outcome.action === "quit") return null;
+
+      if (outcome.action === "choose") {
+        const selected = selectProfile(registry, outcome.profileId);
+        if (!selected.ok) continue;
+        registry = writeRegistry(installRoot, selected.registry);
+        return selected.profile;
+      }
+
+      if (outcome.action === "add") {
+        const created = addProfile(registry, { displayName: outcome.displayName });
+        if (!created.ok) {
+          logger.warn("Refused a new desktop business profile", { error: created.error });
+          continue;
+        }
+        const selected = selectProfile(created.registry, created.profile.id);
+        registry = writeRegistry(installRoot, selected.ok ? selected.registry : created.registry);
+        logger.info("Added a desktop business profile", { profileId: created.profile.id });
+        return selected.ok ? selected.profile : created.profile;
+      }
+
+      if (outcome.action === "remove") {
+        const removed = removeProfile(registry, outcome.profileId);
+        if (!removed.ok) continue;
+        // Registry first, then the data: an interruption in between must not
+        // leave the registry pointing at a half-deleted directory.
+        registry = writeRegistry(installRoot, removed.registry);
+        try {
+          deleteProfileData(installRoot, outcome.profileId);
+        } catch (error) {
+          logger.error("Removing a desktop business profile's local data failed", error);
+        }
+        logger.info("Removed a desktop business profile from this computer", { profileId: outcome.profileId });
+        continue;
+      }
+    }
+  }
+
+  async function bootWithRecovery(profile) {
     for (;;) {
       try {
         cleanupStarted = null;
-        const state = await initialiseBackend();
+        const state = await initialiseBackend(profile);
+        // The backend has committed this profile's business (if any), so its
+        // published identity is now trustworthy for this profile.
+        applyPublishedIdentity(profile, state.config.instanceId);
         // Reaching here proves both PostgreSQL and the packaged web backend
         // passed their health checks. Only now may a pending update be marked
         // successful (and only when app.getVersion() is the expected target).
@@ -811,7 +1088,11 @@ function runDesktopShell() {
     } catch (error) {
       console.error("Folder-layout migration failed; continuing with the existing layout.", error);
     }
-    logger = createLogger(app.getPath("userData"));
+    installRoot = app.getPath("userData");
+    // The shell logs at the installation root, because this runs before a
+    // business has been chosen. Once one is, logging moves into that business's
+    // own Logs/ (see `chooseStartupBusiness` below).
+    logger = createLogger(installRoot);
     updater = new DesktopUpdateEngine({ app, logger });
     updater.on("state", (state) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("desktop:update-state", state);
@@ -861,7 +1142,21 @@ function runDesktopShell() {
     logger.info("Desktop process starting", { version: app.getVersion(), packaged: app.isPackaged });
     process.on("uncaughtException", (error) => logger.error("Uncaught desktop exception", error));
     process.on("unhandledRejection", (error) => logger.error("Unhandled desktop rejection", error));
-    await bootWithRecovery();
+
+    // Saved businesses (#1571/#1572): after the single-instance lock and the
+    // folder-layout migration, and before anything is pointed at one business's
+    // data root.
+    const chosenProfile = await chooseStartupBusiness();
+    if (!chosenProfile) {
+      quitting = true;
+      app.exit(0);
+      return;
+    }
+    // From here every line this business produces lands in its own Logs/. The
+    // update engine is an INSTALLATION concern and keeps the shell logger it was
+    // constructed with.
+    logger = createLogger(profileDataDir(installRoot, chosenProfile.id));
+    await bootWithRecovery(chosenProfile);
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0 && backend?.config) void createWindow(`http://127.0.0.1:${backend.config.appPort}`);
       else focusMainWindow();
