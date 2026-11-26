@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1322**. Rows: tenant **122**, platform **26**.
+Route files scanned: **1327**. Rows: tenant **123**, platform **26**.
 
 ## Summary of remaining gaps
 
@@ -44,7 +44,7 @@ Route files scanned: **1322**. Rows: tenant **122**, platform **26**.
 
 Full CRUD + lifecycle verbs where the domain supports them. The permission column is read from the route files themselves.
 
-Counts — covered: 62 · partial: 3 · MCP gap: 15 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 27
+Counts — covered: 62 · partial: 3 · MCP gap: 15 · backend gap: 0 · n/a (infra): 14 · duplicate surface: 1 · route-only (by design): 28
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -73,6 +73,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 15 · backend gap: 0 · n/a (in
 | Accounting | Internal transfers<br>_one document per movement, posting through the ordinary journal path in the same transaction; append-only (a correction is a reversal, never an edit). Route-only by design for the same reason as the accounts above_ | (route only) | (route only) | — | (route only) | — | finance.transfers_manage, ledger.view | — | — | integration/financial-transfers.integration.test.ts | route-only (by design) |
 | Accounting | Expenses | get_expense, list_expenses | expense.categorize | — | expense.reverse | — | finance.expenses_manage, ledger.view | step-up (always approve) | get_expense, list_expenses, expense.categorize, expense.reverse | integration/expense.integration.test.ts | covered |
 | Accounting | Fixed assets (register, depreciate, dispose, transfer) | list_fixed_assets | fixed-asset.create | fixed-asset.set_acquisition | fixed-asset.depreciate, fixed-asset.dispose | — | finance.assets_manage, ledger.view | connection mode; step-up (always approve) | list_fixed_assets, fixed-asset.create, fixed-asset.set_acquisition, fixed-asset.depreciate, fixed-asset.dispose | integration/fixed-assets.integration.test.ts | covered |
+| Accounting | Intangible assets (register, amortize, impair, dispose)<br>_no MCP verbs yet: the register is API-only until its reporting surface lands, so an AI client cannot amortize or impair an asset behind the tenant's back (#1326 tracks the verbs)_ | (route only) | (route only) | — | (route only) | — | finance.assets_manage, ledger.view | — | — | integration/intangible-assets.integration.test.ts | route-only (by design) |
 | Accounting | Payroll (settings, staff, runs, advances)<br>_settings and pay terms are always_approve by parity with the rest of the money-shaping payroll verbs (settings govern every future run; terms change somebody's pay)_ | get_payroll_summary, list_payroll_advances, list_payroll_runs | payroll.advance.record, payroll.run.accrue | payroll.settings.update, payroll.staff.terms | payroll.advance.void, payroll.run.pay, payroll.run.void | — | payroll.manage, payroll.view | step-up (always approve) | get_payroll_summary, list_payroll_advances, list_payroll_runs, payroll.advance.record, payroll.run.accrue, payroll.settings.update, payroll.staff.terms, payroll.advance.void, payroll.run.pay, payroll.run.void | integration/payroll.integration.test.ts | covered |
 | Accounting | Bank reconciliation<br>_line clearance rides the shared parseLineClearanceRequest parser — boolean required, batch wins, a malformed batch is refused whole, never partly applied_ | get_unreconciled_bank_lines, list_reconciliations | reconciliation.create | reconciliation.line.clear | reconciliation.complete | — | finance.reconciliation_manage, ledger.view | connection mode; step-up (always approve) | get_unreconciled_bank_lines, list_reconciliations, reconciliation.create, reconciliation.line.clear, reconciliation.complete | integration/reconciliation.integration.test.ts | covered |
 | Accounting | Fiscal years & periods (open/close), readiness<br>_all three calendar verbs are always_approve: a reopened period takes postings again, a locked one freezes them, a closed year builds its closing entries under the year lock (unwind is console-only, no MCP verb)_ | get_fiscal_readiness, list_fiscal_years | fiscal.year.create | fiscal.period.set_status | fiscal.year.close | — | ledger.close_period, ledger.view | step-up (always approve) | get_fiscal_readiness, list_fiscal_years, fiscal.year.create, fiscal.period.set_status, fiscal.year.close | integration/fiscal-readiness.integration.test.ts | covered |

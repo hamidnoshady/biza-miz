@@ -220,6 +220,14 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   { table: 'gold_account_movements', columns: ["created_by"] },
   { table: 'gold_prices', columns: ["created_by"] },
   { table: 'installments', columns: ["created_by"] },
+  // Issue #1326 — the intangible register. The asset row carries `business_id`
+  // itself; its charge tables are scoped through it, exactly like the
+  // fixed-asset ones. Every column names the member whose financial act the
+  // register keeps (capitalisation, the amortization charge and its reversal,
+  // the impairment assessment and its reversal, the disposal).
+  { table: 'intangible_asset_amortization_entries', columns: ["created_by", "reversed_by"], scope: { kind: 'join', table: 'intangible_assets', on: 'intangible_asset_id' } },
+  { table: 'intangible_asset_impairments', columns: ["assessed_by", "reversed_by"], scope: { kind: 'join', table: 'intangible_assets', on: 'intangible_asset_id' } },
+  { table: 'intangible_assets', columns: ["capitalized_by", "created_by", "disposed_by"] },
   { table: 'inventory_count_scans', columns: ["created_by"] },
   { table: 'inventory_cutovers', columns: ["approved_by"] },
   { table: 'inventory_events', columns: ["created_by"] },
