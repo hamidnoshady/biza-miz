@@ -80,6 +80,7 @@
  * actionable Persian message *before* anything is written — a blocked void
  * never leaves the invoice half-reversed.
  */
+import { parseConsignmentSnapshot, voidConsignedSale } from "./fashion-consignment-service";
 import { postedCogsValue, restoreFungibleStock } from "./item-stock-valuation";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
@@ -369,6 +370,23 @@ export async function voidRetailInvoice(
         line.id,
         params.reason,
       ]);
+      continue;
+    }
+
+    // GH #1567 6D — a consigned (امانی) line: its sale entry was reversed
+    // above; the units go back to the owner's consignment shelf, never to
+    // item_stock (which they never left).
+    const consignment = snapshot.kind === "stocked" ? parseConsignmentSnapshot(snapshot.consignment) : null;
+    if (consignment) {
+      await voidConsignedSale(client, {
+        businessId: params.businessId,
+        locationId: params.locationId,
+        orderId: params.orderId,
+        orderItemId: line.id,
+        snapshot: consignment,
+        createdBy: params.actorId,
+      });
+      await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [line.id, params.reason]);
       continue;
     }
 

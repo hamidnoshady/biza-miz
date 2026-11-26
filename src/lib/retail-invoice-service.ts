@@ -59,6 +59,12 @@ import type { SettlementMethod } from "./ledger";
 import type { Industry } from "./industries";
 import type { RetailInvoiceLineSnapshotStored } from "./retail-invoice/types";
 import {
+  lockConsignedLineForSale,
+  recordConsignedSaleMovement,
+  sellConsignedUnits,
+  type ConsignmentSaleSnapshot,
+} from "./fashion-consignment-service";
+import {
   assertTendersExhausted,
   buildTenderQueue,
   resolveLineTenders,
@@ -639,6 +645,20 @@ export async function createRetailInvoice(
       ],
     );
 
+    // GH #1567 6D — a consigned line's movement row is keyed by the order
+    // line, so it can only be written once that row exists.
+    if (settled.snapshot.kind === "stocked" && settled.snapshot.consignment) {
+      await recordConsignedSaleMovement(client, {
+        businessId: input.businessId,
+        locationId: input.locationId,
+        orderId,
+        orderItemId: itemRows[0].id,
+        createdBy: input.createdBy ?? null,
+        snapshot: settled.snapshot.consignment as ConsignmentSaleSnapshot,
+        entryId: settled.consignmentEntryId ?? null,
+      });
+    }
+
     // Batch-tracked cosmetics: the exact allocation this line consumed is
     // persisted against the line, in the same transaction, so a later
     // return/refund/void can restore the SAME lots instead of guessing from
@@ -826,6 +846,8 @@ interface SettledLine {
   /** The COGS this line's sale posted, Rial — the commission margin basis. */
   cost?: RialText;
   brandId?: string | null;
+  /** GH #1567 6D — the consigned sale's journal entry (for its movement row). */
+  consignmentEntryId?: string | null;
   metalValue?: RialText;
   makingCharge?: RialText;
   profit?: RialText;
@@ -1258,6 +1280,54 @@ async function settleLine(
   if (line.kind === "stocked") {
     if (!isTradeGoodsIndustry(input.industry)) {
       throw new RetailInvoiceError("این نوع کالا در این کسب‌وکار قابل فروش نیست.");
+    }
+    // GH #1567 6D — a fashion variant holding consigned (امانی) units sells
+    // them for their owner: owner share → 2110, commission → 4700, no COGS
+    // and no item_stock movement (the shop never owned them).
+    if (input.industry === "fashion_apparel") {
+      const consigned = await lockConsignedLineForSale(client, input.businessId, input.locationId, line.itemId);
+      if (consigned) {
+        const sale = await sellConsignedUnits(client, consigned, {
+          businessId: input.businessId,
+          locationId: input.locationId,
+          itemId: line.itemId,
+          quantity: line.quantity,
+          unitPrice: line.unitPrice,
+          discount: combinedDiscount,
+          vatPercent: line.vatPercent,
+          tenders: tenderQueue,
+          createdBy: input.createdBy ?? null,
+        });
+        return {
+          itemId: line.itemId,
+          name: item.name,
+          quantity: line.quantity,
+          gross: sale.breakdown.gross,
+          discount: sale.breakdown.discount,
+          net: sale.breakdown.net,
+          vat: sale.breakdown.vat,
+          total: sale.breakdown.total,
+          // The shop's margin on someone else's goods is its commission, so the
+          // staff-commission margin basis treats the owner's share as the cost.
+          cost: sale.snapshot.ownerShare,
+          brandId: item.brandId,
+          consignmentEntryId: sale.entryId,
+          snapshot: {
+            kind: "stocked",
+            quantity: line.quantity,
+            unitPrice: line.unitPrice != null ? rialText(String(Math.round(line.unitPrice))) : null,
+            gross: sale.breakdown.gross,
+            manualDiscount: rialText(String(Math.max(0, Math.round(manualDiscount)))),
+            promotionDiscount: rialText(String(Math.max(0, Math.round(promotionDiscount)))),
+            discount: sale.breakdown.discount,
+            vat: sale.breakdown.vat,
+            net: sale.breakdown.net,
+            total: sale.breakdown.total,
+            ledgerEntryIds: sale.entryId ? [sale.entryId] : [],
+            consignment: sale.snapshot,
+          },
+        };
+      }
     }
     const tradeSale = await sellTradeGoodsUnits(client, {
       trade: input.industry,

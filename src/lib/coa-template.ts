@@ -1252,6 +1252,7 @@ export const FASHION_APPAREL_COA_TEMPLATE: TemplateAccount[] = [
   { code: "2300", name: "حقوق پرداختنی", type: "liability", parentCode: "2000" },
   { code: "2410", name: "اعتبار فروشگاهی", type: "liability", parentCode: "2000" },
   { code: "2420", name: "کارت هدیه", type: "liability", parentCode: "2000" },
+  { code: "2110", name: "پرداختنی به امانت‌گذاران", type: "liability", parentCode: "2000" },
 
   ...SHARED_LIABILITY_ACCOUNTS,
 
@@ -1264,6 +1265,10 @@ export const FASHION_APPAREL_COA_TEMPLATE: TemplateAccount[] = [
 
   { code: "4000", name: "درآمدها", type: "revenue" },
   { code: "4584", name: "فروش پوشاک، کیف و کفش", type: "revenue", parentCode: "4000" },
+  // GH #1567 6D — consignment (امانی) by contract: a consigned sale credits the
+  // owner's share to 2110 and only the shop's commission to 4700 (never 4584,
+  // never COGS — the shop never owned the goods).
+  { code: "4700", name: "درآمد کارمزد فروش امانی", type: "revenue", parentCode: "4000" },
   { code: "4900", name: "سایر درآمدها", type: "revenue", parentCode: "4000" },
   { code: "4400", name: "برگشت از فروش", type: "revenue", parentCode: "4000", isContra: true },
 

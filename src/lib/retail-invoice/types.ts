@@ -133,6 +133,20 @@ export interface AccessoryLineSnapshot extends RetailInvoiceLineSnapshotBase {
 
 export interface StockedLineSnapshot extends RetailInvoiceLineSnapshotBase {
   kind: "stocked";
+  /**
+   * GH #1567 6D — present when the units sold were consigned (امانی): the
+   * line posted owner share → 2110 and commission → 4700 instead of revenue
+   * and COGS, and its returns/void move the consignment ledger, not item_stock.
+   */
+  consignment?: {
+    contractId: string;
+    lineId: string;
+    terms: "owner_price" | "commission";
+    quantity: number;
+    net: string;
+    ownerShare: string;
+    commission: string;
+  };
 }
 
 /**

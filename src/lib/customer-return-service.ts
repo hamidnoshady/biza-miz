@@ -1,4 +1,5 @@
 import Decimal from "decimal.js";
+import { parseConsignmentSnapshot, returnConsignedUnits } from "./fashion-consignment-service";
 import { allocateProportionally, parseSaleMerchSnapshot, recordSaleReturnFact } from "./sale-return-facts";
 import type { PoolClient } from "pg";
 import {
@@ -344,6 +345,34 @@ export async function createCustomerReturn(
     // back together. A discarded (damaged/unsellable) return refunds without
     // restocking — the goods stay out of the shelf and out of the reversal.
     if (soldRow.retail_snapshot) {
+      // GH #1567 6D — a consigned (امانی) line goes back on the owner's shelf
+      // and reclassifies its contra-revenue to 2110/4700; it never touches
+      // item_stock or COGS (it never relieved them).
+      const consignment = parseConsignmentSnapshot((soldRow.retail_snapshot as { consignment?: unknown }).consignment);
+      if (consignment) {
+        await returnConsignedUnits(client, {
+          businessId: params.businessId,
+          locationId: params.locationId,
+          orderId: params.orderId,
+          orderItemId: line.orderItemId,
+          customerReturnId: returnId,
+          quantity: String(line.quantity),
+          disposition: line.disposition,
+          snapshot: consignment,
+          createdBy: params.createdBy ?? null,
+        });
+        retailReturnLines.push({
+          orderItemId: line.orderItemId,
+          itemId: soldRow.item_id ?? null,
+          reportable: false,
+          quantity: String(line.quantity),
+          disposition: line.disposition,
+          weight: 0n,
+          cogs: 0n,
+          merch: parseSaleMerchSnapshot(undefined),
+        });
+        continue;
+      }
       const lineCogsBefore = retailCogs.amount;
       if (line.disposition === "restockable") {
         const snap = soldRow.retail_snapshot as {
