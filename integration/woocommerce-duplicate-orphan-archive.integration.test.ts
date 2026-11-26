@@ -64,12 +64,12 @@ async function mapProduct(remoteId: number, sku: string): Promise<string> {
 }
 
 /** An unmapped twin, as the pre-fix race left it: same name and SKU, a frozen stock snapshot. */
-async function insertOrphan(sku: string, locationId = biz.locationId): Promise<string> {
+async function insertOrphan(sku: string, locationId = biz.locationId, quantity = 0): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
     `WITH i AS (INSERT INTO items (location_id, name, sku, kind) VALUES ($1, 'اسپری دوفاز ضد موخوره', $2, 'simple') RETURNING id),
-          s AS (INSERT INTO item_stock (item_id, quantity) SELECT id, 1 FROM i)
+          s AS (INSERT INTO item_stock (item_id, quantity) SELECT id, $3 FROM i)
      SELECT id::text FROM i`,
-    [locationId, sku],
+    [locationId, sku, quantity],
   );
   return rows[0].id;
 }
@@ -186,15 +186,15 @@ describe("archiving the losing twin of the creation race", () => {
     expect(await isActive(kept)).toBe(true);
     // Reversible and non-destructive: the row, its stock snapshot and every mapping stay.
     const stock = await db.query(`SELECT quantity::text FROM item_stock WHERE item_id = $1`, [orphan]);
-    expect(Number(stock.rows[0].quantity)).toBe(1);
+    expect(Number(stock.rows[0].quantity)).toBe(0);
     expect((await db.query(`SELECT count(*)::int AS n FROM integration_mappings`)).rows[0].n).toBe(mappingsBefore.rows[0].n);
     // Another business's orphan is untouched.
     expect(await isActive(otherOrphan)).toBe(true);
     // The audit row names the twin it duplicated.
     const audit = await auditRows(orphan);
     expect(audit).toHaveLength(1);
-    expect(audit[0].payload).toMatchObject({ sku: "zza05023", twinItemId: kept });
-    expect(Number(audit[0].payload.orphanQuantity)).toBe(1);
+    expect(audit[0].payload).toMatchObject({ kind: "race_orphan", sku: "zza05023", twinItemId: kept });
+    expect(Number(audit[0].payload.orphanQuantity)).toBe(0);
 
     // Running it again finds nothing left to do.
     const again = await resolve.planDuplicateOrphanArchives(biz.id, { sku: "zza05023" });
@@ -239,6 +239,23 @@ describe("archiving the losing twin of the creation race", () => {
     expect(result.archived).toEqual([]);
     expect(await isActive(withBarcode)).toBe(true);
     expect(await isActive(withPrice)).toBe(true);
+  });
+
+  it("blocks an orphan that still holds on-hand stock, even when item_stock is its only row", async () => {
+    // Issue #1592: the FK scan skips item_stock on purpose, so quantity must
+    // be an explicit guard. 304 of the 410 reported pairs hold stock.
+    await mapProduct(5250, "zza05250");
+    const stocked = await insertOrphan("zza05250", biz.locationId, 4);
+    const [plan] = await resolve.planDuplicateOrphanArchives(biz.id, { sku: "zza05250" });
+    expect(plan.status).toBe("blocked");
+    expect(plan.blockers).toContain("nonzero_stock");
+    expect(Number(plan.orphanQuantity)).toBe(4);
+
+    const result = await resolve.archiveDuplicateOrphans(biz.id, [plan]);
+    expect(result.archived).toEqual([]);
+    expect(await isActive(stocked)).toBe(true);
+    const stock = await db.query(`SELECT quantity::text FROM item_stock WHERE item_id = $1`, [stocked]);
+    expect(Number(stock.rows[0].quantity)).toBe(4);
   });
 
   it("re-checks under lock and leaves an orphan that gained a reference after the plan", async () => {

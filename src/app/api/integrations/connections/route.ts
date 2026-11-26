@@ -136,7 +136,14 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // signs its deliveries with (REST mode) and the link token the plugin
   // authenticates with. Never cached, never retrievable afterwards.
   const response = NextResponse.json(
-    { connection: result.connection, webhookSecret: result.webhookSecret, linkToken: result.linkToken ?? null },
+    {
+      connection: result.connection,
+      webhookSecret: result.webhookSecret,
+      linkToken: result.linkToken ?? null,
+      // Issue #1592: an earlier link to the same store, for provenance. Its
+      // mappings are not copied; products from this link go through review.
+      reconnectOf: result.reconnectOf ?? null,
+    },
     { status: 201 },
   );
   response.headers.set("Cache-Control", "no-store");

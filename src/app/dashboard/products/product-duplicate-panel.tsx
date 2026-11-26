@@ -6,7 +6,7 @@
  * The screen shows what the owner needs before anything is touched: every row
  * that carries the SKU (id, branch, kind and parent, on-hand quantity, creation
  * time in Shamsi, the store mapping that owns it, and the last product payload
- * the store sent), why the candidate is ambiguous, and the two decisions that
+ * the store sent), why the candidate is ambiguous, and the decisions that
  * exist:
  *
  *  - «نگهداری جداگانه» — an audited "these are different rows": no write to
@@ -14,14 +14,16 @@
  *    sources, stores and variant families, which is why a shared SKU alone is
  *    never a merge key;
  *  - «بایگانی نسخهٔ تکراری» — offered only for the row the server's plan calls a
- *    proven creation-race twin with no referencing record. Archive means
- *    `is_active = false` (reversible, audited), never delete, and the two stock
- *    snapshots are never added together.
+ *    proven duplicate twin with no referencing record and zero stock. Archive
+ *    means `is_active = false` (reversible, audited), never delete, and the two
+ *    stock snapshots are never added together;
+ *  - «بازگردانی نسخهٔ بایگانی‌شده» — undo that archive while the row is still
+ *    inactive and unmapped.
  *
  * A blocked candidate shows its blockers and keeps the archive button away.
- * Both decisions require an explicit confirmation and echo the review token the
- * screen loaded, so a plan that changed meanwhile is refused rather than acted
- * on.
+ * Every decision requires an explicit confirmation and echoes the review token
+ * the screen loaded, so a plan that changed meanwhile is refused rather than
+ * acted on.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -38,7 +40,10 @@ import {
 import type { DuplicateReviewGroup } from "@/lib/duplicate-items-review-service";
 import type { DuplicateReportMember } from "@/lib/duplicate-items-report";
 
-type PendingDecision = { kind: "keep_separate" } | { kind: "archive_orphan"; orphanItemId: string };
+type PendingDecision =
+  | { kind: "keep_separate" }
+  | { kind: "archive_orphan"; orphanItemId: string }
+  | { kind: "restore_archived"; orphanItemId: string };
 
 const KIND_LABEL: Record<string, string> = {
   simple: "محصول ساده",
@@ -105,7 +110,9 @@ export function ProductDuplicatePanel({
         action: decision.kind,
         confirm: true,
         reviewToken: group.reviewToken,
-        ...(decision.kind === "archive_orphan" ? { orphanItemId: decision.orphanItemId } : {}),
+        ...(decision.kind === "archive_orphan" || decision.kind === "restore_archived"
+          ? { orphanItemId: decision.orphanItemId }
+          : {}),
       }),
     });
     setBusy(false);
@@ -118,14 +125,18 @@ export function ProductDuplicatePanel({
           ? "شواهد این بررسی تغییر کرده است؛ فهرست دوباره خوانده شد. پیش از تأیید، یک بار دیگر بازبینی کنید."
           : result.data.error === "duplicate_not_safe_to_archive"
             ? "بایگانی خودکار برای این ردیف مجاز نیست؛ رکوردی به آن ارجاع می‌دهد و تصمیم با شماست."
-            : "تصمیم ثبت نشد؛ دسترسی و وضعیت اتصال را بررسی کنید.",
+            : result.data.error === "duplicate_not_restorable"
+              ? "بازگردانی این ردیف مجاز نیست؛ فقط بایگانی همین بررسی قابل بازگشت است."
+              : "تصمیم ثبت نشد؛ دسترسی و وضعیت اتصال را بررسی کنید.",
       );
       return;
     }
     setNotice(
       decision.kind === "keep_separate"
         ? "این ردیف‌ها جدا نگه داشته شدند و به‌عنوان تصمیم بازبینی‌شده ثبت شد."
-        : "نسخهٔ تکراری بایگانی شد. ردیف و سابقهٔ آن باقی است و در صورت نیاز قابل بازگردانی است.",
+        : decision.kind === "restore_archived"
+          ? "ردیف بایگانی‌شده دوباره فعال شد. موجودی و سابقهٔ آن دست‌نخورده باقی مانده است."
+          : "نسخهٔ تکراری بایگانی شد. ردیف و سابقهٔ آن باقی است و در صورت نیاز قابل بازگردانی است.",
     );
     onDecision();
     void load();
@@ -207,6 +218,16 @@ export function ProductDuplicatePanel({
               </div>
             ) : null}
 
+            {group.plan ? (
+              <p className="text-[11px] text-muted-foreground">
+                {group.plan.kind === "historical_duplicate_candidate"
+                  ? "ردیف تکراری تاریخی"
+                  : "نسخهٔ بازندهٔ تلاقی ایجاد"}
+                {group.plan.daysApart == null ? "" : ` · فاصلهٔ دو ردیف: ${toPersianDigits(group.plan.daysApart)} روز`}
+                {group.plan.twinName ? ` · ردیف نگه‌داشته‌شده: ${group.plan.twinName}` : ""}
+              </p>
+            ) : null}
+
             {pending === null ? (
               <div className="flex flex-wrap gap-2">
                 {group.plan?.status === "archive" ? (
@@ -226,7 +247,23 @@ export function ProductDuplicatePanel({
                   </Button>
                 ) : null}
                 {group.plan?.status === "already_archived" ? (
-                  <p className="text-xs text-muted-foreground">نسخهٔ تکراری پیش‌تر بایگانی شده است.</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-xs text-muted-foreground">نسخهٔ تکراری پیش‌تر بایگانی شده است.</p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="min-h-9 text-xs"
+                      disabled={busy}
+                      onClick={() => {
+                        setError("");
+                        setNotice("");
+                        setPending({ kind: "restore_archived", orphanItemId: group.plan!.orphanItemId });
+                      }}
+                    >
+                      بازگردانی نسخهٔ بایگانی‌شده
+                    </Button>
+                  </div>
                 ) : null}
                 {group.needsAction ? (
                   <Button
@@ -250,12 +287,16 @@ export function ProductDuplicatePanel({
                 <p className="font-medium text-amber-950 dark:text-amber-200">
                   {pending.kind === "keep_separate"
                     ? "این ردیف‌ها به‌عنوان دو محصول جدا ثبت می‌شوند."
-                    : "نسخهٔ تکراری بایگانی می‌شود (حذف نمی‌شود)."}
+                    : pending.kind === "restore_archived"
+                      ? "ردیف بایگانی‌شده دوباره فعال می‌شود."
+                      : "نسخهٔ تکراری بایگانی می‌شود (حذف نمی‌شود)."}
                 </p>
                 <p className="text-muted-foreground">
                   {pending.kind === "keep_separate"
                     ? "هیچ ردیفی تغییر نمی‌کند؛ فقط تصمیم شما ثبت و در گزارش بازبینی باقی می‌ماند."
-                    : "ردیف، موجودی و سابقهٔ آن حفظ می‌شود، پیوند فروشگاه جابه‌جا نمی‌شود و دو موجودی با هم جمع نمی‌شوند. این کار در گزارش رویدادها ثبت و قابل بازگردانی است."}
+                    : pending.kind === "restore_archived"
+                      ? "فقط وضعیت فعال بودن ردیف برمی‌گردد؛ موجودی، سابقه، پیوند و فاکتورهای تاریخی جابه‌جا نمی‌شوند و این کار در گزارش رویدادها ثبت می‌شود."
+                      : "ردیف، موجودی و سابقهٔ آن حفظ می‌شود، پیوند فروشگاه جابه‌جا نمی‌شود و دو موجودی با هم جمع نمی‌شوند. این کار در گزارش رویدادها ثبت و قابل بازگردانی است."}
                 </p>
                 <div className="flex flex-wrap gap-2">
                   <Button
@@ -331,6 +372,11 @@ function MemberCard({
       <p className="break-all text-muted-foreground">
         منبع: {member.provenance || "بدون پیوند"}
       </p>
+      {member.attributes.length > 0 ? (
+        <p className="text-muted-foreground">
+          ویژگی‌ها: {member.attributes.map((attribute) => `${attribute.name}: ${attribute.value}`).join("، ")}
+        </p>
+      ) : null}
       {member.snapshots.map((snapshot) => (
         <p key={`${snapshot.connectionId}:${snapshot.remoteId}`} className="text-muted-foreground">
           آخرین دریافت از فروشگاه: {shamsi(snapshot.receivedAt)} · موجودی اعلامی فروشگاه:{" "}

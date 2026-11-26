@@ -30,6 +30,7 @@ import {
   listSuppressedRemoteEditsForConnection,
 } from "../import-reconciliation/entry-guards";
 import { pluginCronAlerts } from "./plugin-cron-alerts";
+import { listDuplicateStockConflicts } from "./product-authority-guard";
 import { recordNotification } from "../notification-events";
 import { resolveMappedWooPrice } from "./woo-price-source-service";
 
@@ -190,13 +191,19 @@ export async function refreshOutboxForConnection(connection: ConnectionRow): Pro
   const gate = await canPublishConnectionOutbound(businessId, connection);
   if (!gate.allowed) return;
   const locationId = await resolveLocationId(connection);
-  const [mappings, manualAxes, suppressedEdits] = await Promise.all([
+  const [mappings, manualAxes, suppressedEdits, duplicateConflicts] = await Promise.all([
     listMappings(businessId, connection.id, "product"),
     openManualProductAxes(connection.id),
     listSuppressedRemoteEditsForConnection(businessId, connection.id),
+    listDuplicateStockConflicts(businessId, connection.id),
   ]);
 
   for (const mapping of mappings) {
+    // Issue #1592: an unmapped twin holding stock means this mapped row's
+    // snapshot is not the whole physical quantity. Pushing it would overwrite
+    // the store with a partial number, so both automatic axes wait for the
+    // duplicate review. A global disable is deliberately not used.
+    if (duplicateConflicts.has(mapping.localId)) continue;
     const desired = await desiredState(connection, locationId, mapping);
     // The variation's parent, from the mapping's own metadata — the one
     // central rule (parentRemoteIdFromMeta). Without it the scheduled push

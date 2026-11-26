@@ -1,21 +1,27 @@
 /**
- * Archive the losing twins of the WooCommerce creation race (dashboard audit
- * F13) in one business's `items`. A DRY RUN unless `--apply` is given.
+ * Archive duplicate product rows in one business's `items`. A DRY RUN unless
+ * `--apply` is given.
  *
  * Run `scripts/report-duplicate-items.ts` first: it explains every duplicate
- * SKU. This script acts only on groups it classifies `race_orphan` — an
- * unmapped row created within ten minutes of a WooCommerce-mapped row of the
- * same kind and branch — and only archives (`is_active = false`, reversible,
- * audited) an orphan that nothing references. A row with sales, stock
- * movements, batches, barcodes, children or any other referencing record is
- * listed as blocked with the tables that hold it, and is left for a person.
- * Nothing is merged, moved or deleted.
+ * SKU. This script plans two proven fingerprints — the ten-minute creation
+ * race and the weeks-apart historical duplicate (issue #1592) — and only marks
+ * a row `archive` when it is an unmapped twin of a live WooCommerce-mapped row
+ * of the same product, nothing references it, and its `item_stock` quantity is
+ * zero. A row with sales, stock movements, batches, barcodes, children, a
+ * manual price or *any on-hand quantity* is listed as blocked with its evidence
+ * and left for a person. Nothing is merged, moved or deleted.
+ *
+ * Production note (issue #1592): `--apply` here is the same guarded, reversible
+ * archive the screen uses (`is_active = false`, audited). Running it against
+ * زنی زیبا still requires separate owner approval of the exact per-item plan
+ * and quantities. This issue authorises code and previews, not the mutation.
  *
  *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid>                  # plan only
  *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --sku zza05023   # one SKU
  *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --location <uuid> # one branch
- *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --apply          # do it
- *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --json           # machine-readable plan
+ *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --kind historical_duplicate_candidate
+ *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --apply          # guarded archive
+ *   npx tsx scripts/resolve-duplicate-items.ts --business <uuid> --json          # machine-readable plan
  */
 import "dotenv/config";
 import { getPool } from "../src/lib/db";
@@ -38,11 +44,13 @@ function shamsi(iso: string): string {
 }
 
 function describe(plan: OrphanPlan): void {
+  const kind = plan.kind === "historical_duplicate_candidate" ? "historical" : "race";
   console.log(
-    `  SKU ${plan.sku}  orphan ${plan.orphanItemId}  qty ${plan.orphanQuantity ?? "—"}  created ${shamsi(plan.orphanCreatedAt)}`,
+    `  [${kind}] SKU ${plan.sku}  orphan ${plan.orphanItemId}  qty ${plan.orphanQuantity ?? "—"}  created ${shamsi(plan.orphanCreatedAt)}` +
+      (plan.daysApart == null ? "" : `  (${plan.daysApart} day(s) apart)`),
   );
   console.log(`    name: ${plan.orphanName}`);
-  console.log(`    kept twin: ${plan.twinItemId ?? "—"}  qty ${plan.twinQuantity ?? "—"}`);
+  console.log(`    kept twin: ${plan.twinItemId ?? "—"}  name ${plan.twinName ?? "—"}  qty ${plan.twinQuantity ?? "—"}`);
   for (const blocker of plan.blockers) console.log(`    blocked: ${ORPHAN_BLOCKER_LABEL[blocker]}`);
   for (const ref of plan.references) console.log(`      ${ref.table}.${ref.column}: ${ref.count} row(s)`);
 }
@@ -51,7 +59,7 @@ async function main(): Promise<number> {
   const businessId = argValue("--business");
   if (!businessId || !UUID_RE.test(businessId)) {
     console.error(
-      "usage: npx tsx scripts/resolve-duplicate-items.ts --business <uuid> [--sku <sku>] [--location <uuid>] [--apply] [--json]",
+      "usage: npx tsx scripts/resolve-duplicate-items.ts --business <uuid> [--sku <sku>] [--location <uuid>] [--kind race_orphan|historical_duplicate_candidate] [--apply] [--json]",
     );
     return 2;
   }
@@ -65,6 +73,11 @@ async function main(): Promise<number> {
     console.error("--location needs a branch (location) uuid.");
     return 2;
   }
+  const kind = argValue("--kind");
+  if (kind !== null && kind !== "race_orphan" && kind !== "historical_duplicate_candidate") {
+    console.error("--kind takes race_orphan or historical_duplicate_candidate.");
+    return 2;
+  }
   const apply = process.argv.includes("--apply");
   const asJson = process.argv.includes("--json");
   if (apply && asJson) {
@@ -72,7 +85,8 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const plans = await planDuplicateOrphanArchives(businessId, { sku, locationId });
+  const planned = await planDuplicateOrphanArchives(businessId, { sku, locationId });
+  const plans = kind ? planned.filter((plan) => plan.kind === kind) : planned;
 
   if (asJson) {
     console.log(JSON.stringify(plans, null, 2));
@@ -82,8 +96,15 @@ async function main(): Promise<number> {
   const toArchive = plans.filter((p) => p.status === "archive");
   const done = plans.filter((p) => p.status === "already_archived");
   const blocked = plans.filter((p) => p.status === "blocked");
+  const raceCount = plans.filter((p) => p.kind === "race_orphan").length;
+  const historicalCount = plans.filter((p) => p.kind === "historical_duplicate_candidate").length;
   console.log(
-    `${plans.length} creation-race orphan(s): ${toArchive.length} can be archived, ${done.length} already archived, ${blocked.length} blocked.\n`,
+    `${plans.length} duplicate row(s) (${raceCount} race, ${historicalCount} historical): ` +
+      `${toArchive.length} can be archived, ${done.length} already archived, ${blocked.length} blocked.\n`,
+  );
+  console.log(
+    "Expected inventory effect of the archive plan: 0 — only rows whose item_stock quantity is zero and that nothing references are selected. " +
+      "Blocked rows keep their stock and history untouched; they are not merged.\n",
   );
   if (toArchive.length > 0) {
     console.log(apply ? "Archiving:" : "Would archive (dry run — pass --apply to do it):");
