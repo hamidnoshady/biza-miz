@@ -249,6 +249,24 @@ describe("building a feed", () => {
     expect(result.skipped.map((entry) => entry.name).sort()).toEqual(["بدون تصویر", "غیرفعال"].sort());
   });
 
+  it("never sends a legacy data: image (clipped or whole): the page is skipped as unusable_image (GH #1567 F5)", async () => {
+    const blob = `data:image/jpeg;base64,${"/9j/4AAQSkZJRgABAQ".repeat(120)}`;
+    const id = await seedProduct(alpha.businessId, { name: "تصویر جاسازی‌شده", price: 120_000, image: blob });
+    try {
+      const result = await withTenant(alpha.businessId, () =>
+        feed.buildShopFeed({ businessId: alpha.businessId, shopId: alpha.shopId }),
+      );
+      expect(result.skipped).toContainEqual(expect.objectContaining({ productId: id, reason: "unusable_image" }));
+      expect(result.firstPage?.products.length).toBe(1);
+      expect(JSON.stringify(result.firstPage)).not.toContain("data:");
+      // The legacy row itself is left untouched — the feed only refuses to send it.
+      const { rows } = await db.query<{ image_url: string }>("SELECT image_url FROM menu_items WHERE id = $1", [id]);
+      expect(rows[0].image_url).toBe(blob);
+    } finally {
+      await db.query("DELETE FROM menu_items WHERE id = $1", [id]);
+    }
+  });
+
   it("leaves the sold-out choice inert until stock is a feed input", async () => {
     // `menu_items` carries no stock count yet, so every published product is sent
     // as available (see feed-service's `available: true`). The flag is honoured, it
