@@ -92,6 +92,10 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'recurring_journal_template_versions.actor_user_id': 'recurring voucher template history',
   'recurring_journal_occurrence_events.actor_user_id': 'recurring voucher scheduler audit',
   'aec_project_profiles.project_manager_user_id': 'project staffing assignment',
+  // GH #1567 6B — who is working a production stage now. A live assignment,
+  // not history: the append-only item_production_order_actions log keeps the
+  // actor of every stage report, so SET NULL on member delete loses nothing.
+  'item_production_order_stages.assignee_user_id': 'production stage assignment',
   'ai_automations.authorized_by': 'AI automation setup',
   'ai_automations.created_by': 'AI automation setup',
   'ai_autopilot_activity_seen.user_id': 'AI read-state',

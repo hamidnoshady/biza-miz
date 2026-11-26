@@ -136,8 +136,10 @@ describe("desktop client-reference manifest compaction", () => {
     // 646 -> 665 MiB on owner instruction (2026-10-24) for the merged 709-file batch, then
     // 665 -> 677 MiB on the owner's choice (2026-10-26) for PR #1139's root-layout assistant,
     // then 677 -> 725 MB with the staged-runtime gate's 300 MiB move (issue #902 / PR #1152),
-    // which keeps this payload at the same ~420 MiB above that gate.
-    expect(workflow).toContain("if ($unpacked -gt 725MB)");
+    // which keeps this payload at the same ~420 MiB above that gate, then 725 -> 732 MB with
+    // the staged-runtime gate's 316 -> 322 MiB move for GH #1567 / PR #1575 (measured +5.3 MiB
+    // of new route/page surface; pending owner sign-off on that PR).
+    expect(workflow).toContain("if ($unpacked -gt 732MB)");
     // The installer baseline moved 175 -> 176 MiB on owner instruction (2026-11-25,
     // PR #1563) for the first measured crossing of the release baseline — see the
     // budget comment in the workflow.
