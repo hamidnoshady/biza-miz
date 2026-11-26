@@ -75,7 +75,7 @@ import {
   type SiteIssueSeverity,
   type SiteIssueStatus,
 } from "@/lib/aec-site";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "../../use-workspace-lookups";
 import { DateCell, DateField, PickerField, SelectField, workspaceError } from "../../workspace-ui";
 import { AecChecklistsSection } from "./checklists-panel";
 
@@ -869,6 +869,11 @@ function IssueForm({
     (issue?.severity as SiteIssueSeverity) ?? "medium",
   );
   const [responsiblePartyId, setResponsiblePartyId] = useState(issue?.responsiblePartyId ?? "");
+  const partyPicker = usePartyPicker(
+    lookups.parties,
+    responsiblePartyId,
+    partyPageFrom(lookups),
+  );
   const [assignedToId, setAssignedToId] = useState(issue?.assignedToId ?? "");
   const [raisedDate, setRaisedDate] = useState(issue?.raisedDate ?? "");
   const [dueDate, setDueDate] = useState(issue?.dueDate ?? "");
@@ -1039,7 +1044,12 @@ function IssueForm({
           label="مسئول رفع (طرف)"
           value={responsiblePartyId}
           onChange={setResponsiblePartyId}
-          options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+          options={partyPicker.options}
+          searchable
+          searchPlaceholder="جست‌وجوی طرف…"
+          onSearch={partyPicker.setTerm}
+          searching={partyPicker.searching}
+          searchNote={partyPicker.note}
         />
         <PickerField
           label="ارجاع به"

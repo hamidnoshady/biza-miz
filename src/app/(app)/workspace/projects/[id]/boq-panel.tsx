@@ -67,8 +67,13 @@ import {
   computeBoqItemTotals,
   type EstimateVersionStatus,
 } from "@/lib/aec-boq";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
-import { workspaceError } from "../../workspace-ui";
+import {
+  partyPageFrom,
+  usePartyPicker,
+  type PartyPage,
+  type WorkspaceLookups,
+} from "../../use-workspace-lookups";
+import { PickerField, workspaceError } from "../../workspace-ui";
 
 /* ---------------------------------------------------------------------------
  * Wire shapes — `/api/aec/**`
@@ -923,6 +928,7 @@ export function BoqTab({
           item={editing.item}
           sections={draft?.sections ?? []}
           parties={lookups.parties}
+          partyPage={partyPageFrom(lookups)}
           money={money}
           onClose={() => setEditing(null)}
           onSubmit={(item) => {
@@ -1128,6 +1134,7 @@ function ItemDialog({
   item,
   sections,
   parties,
+  partyPage,
   money,
   onClose,
   onSubmit,
@@ -1135,11 +1142,13 @@ function ItemDialog({
   item: DraftItem;
   sections: DraftSection[];
   parties: WorkspaceLookups["parties"];
+  partyPage: PartyPage;
   money: Moneyish;
   onClose: () => void;
   onSubmit: (item: DraftItem) => void;
 }) {
   const [row, setRow] = useState<DraftItem>(item);
+  const partyPicker = usePartyPicker(parties, row.partyId, partyPage);
   const totals = draftTotals(row, money);
 
   return (
@@ -1282,20 +1291,17 @@ function ItemDialog({
             />
           </Field>
 
-          <Field label="تأمین‌کننده/پیمانکار">
-            <select
-              className={inputClass}
-              value={row.partyId}
-              onChange={(event) => setRow({ ...row, partyId: event.target.value })}
-            >
-              <option value="">— انتخاب کنید —</option>
-              {parties.map((party) => (
-                <option key={party.id} value={party.id}>
-                  {party.name}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <PickerField
+            label="تأمین‌کننده/پیمانکار"
+            value={row.partyId}
+            onChange={(next) => setRow({ ...row, partyId: next })}
+            options={partyPicker.options}
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={partyPicker.setTerm}
+            searching={partyPicker.searching}
+            searchNote={partyPicker.note}
+          />
           <Field label="توضیحات">
             <input
               className={inputClass}

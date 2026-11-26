@@ -67,7 +67,7 @@ import { mediaFileUrl } from "@/app/dashboard/media/media-picker";
 import { toPersianDigits } from "@/lib/digits";
 import { RFI_STATUSES, RFI_STATUS_LABELS, type RfiStatus } from "@/lib/aec-rfi";
 import { AEC_SPECIALTIES, AEC_SPECIALTY_LABELS, type AecSpecialty } from "@/lib/aec";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "../../use-workspace-lookups";
 import { DateCell, DateField, PickerField, SelectField, workspaceError } from "../../workspace-ui";
 
 /* ---------------------------------------------------------------------------
@@ -623,6 +623,11 @@ function RfiForm({
   const [question, setQuestion] = useState(rfi?.question ?? "");
   const [discipline, setDiscipline] = useState(rfi?.discipline ?? "");
   const [responsiblePartyId, setResponsiblePartyId] = useState(rfi?.responsiblePartyId ?? "");
+  const partyPicker = usePartyPicker(
+    lookups.parties,
+    responsiblePartyId,
+    partyPageFrom(lookups),
+  );
   const [assignedToId, setAssignedToId] = useState(rfi?.assignedToId ?? "");
   const [raisedDate, setRaisedDate] = useState(rfi?.raisedDate ?? "");
   const [dueDate, setDueDate] = useState(rfi?.dueDate ?? "");
@@ -730,7 +735,12 @@ function RfiForm({
             label="طرف مسئول پاسخ"
             value={responsiblePartyId}
             onChange={setResponsiblePartyId}
-            options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+            options={partyPicker.options}
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={partyPicker.setTerm}
+            searching={partyPicker.searching}
+            searchNote={partyPicker.note}
             placeholder="— انتخاب نشده —"
             hint="کارفرما، مشاور یا پیمانکاری که باید پاسخ دهد."
           />

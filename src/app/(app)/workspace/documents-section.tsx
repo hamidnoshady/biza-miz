@@ -67,11 +67,7 @@ interface DocumentSummary {
   in_review: number;
   draft: number;
 }
-import {
-  partyPickerOptions,
-  useWorkspacePartySearch,
-  type WorkspaceLookups,
-} from "./use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "./use-workspace-lookups";
 
 export interface DocumentRow {
   id: string;
@@ -342,13 +338,7 @@ function DocumentDialog({
   const [partyId, setPartyId] = useState(document?.partyId ?? "");
   // Issue #907 F10 — «مشتری / طرف حساب» searches the whole directory on the
   // server; the selected row is resolved by id so editing never blanks it.
-  const [partyTerm, setPartyTerm] = useState("");
-  const partyMatches = useWorkspacePartySearch(partyTerm, partyId);
-  const partyNote = partyMatches.error
-    ? partyMatches.error
-    : partyMatches.hasMore
-      ? `${toPersianDigits(String(partyMatches.parties.length))} مورد از ${toPersianDigits(String(partyMatches.total))} مورد نمایش داده شد؛ نام را دقیق‌تر کنید.`
-      : undefined;
+  const partyPicker = usePartyPicker(lookups.parties, partyId, partyPageFrom(lookups));
   const [contractId, setContractId] = useState(document?.contractId ?? "");
   const [mediaAssetId, setMediaAssetId] = useState(document?.mediaAssetId ?? "");
   const [tags, setTags] = useState(document?.tags.join("، ") ?? "");
@@ -504,12 +494,12 @@ function DocumentDialog({
           label="مشتری / طرف حساب"
           value={partyId}
           onChange={setPartyId}
-          options={partyPickerOptions(lookups.parties, partyMatches, partyId)}
+          options={partyPicker.options}
           searchable
           searchPlaceholder="جست‌وجوی طرف حساب…"
-          onSearch={setPartyTerm}
-          searching={partyMatches.loading}
-          searchNote={partyNote}
+          onSearch={partyPicker.setTerm}
+          searching={partyPicker.searching}
+          searchNote={partyPicker.note}
         />
         <Field label="برچسب‌ها" hint="با «،» جدا کنید">
           <input className={inputClass} value={tags} onChange={(e) => setTags(e.target.value)} />

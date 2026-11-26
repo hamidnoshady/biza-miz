@@ -81,7 +81,7 @@ import {
   type SubmittalType,
 } from "@/lib/aec-rfi";
 import { AEC_SPECIALTIES, AEC_SPECIALTY_LABELS, type AecSpecialty } from "@/lib/aec";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "../../use-workspace-lookups";
 import { DateCell, DateField, PickerField, SelectField, workspaceError } from "../../workspace-ui";
 
 /* ---------------------------------------------------------------------------
@@ -744,6 +744,11 @@ function SubmittalForm({
   const [specSection, setSpecSection] = useState(submittal?.specSection ?? "");
   const [discipline, setDiscipline] = useState(submittal?.discipline ?? "");
   const [responsiblePartyId, setResponsiblePartyId] = useState(submittal?.responsiblePartyId ?? "");
+  const partyPicker = usePartyPicker(
+    lookups.parties,
+    responsiblePartyId,
+    partyPageFrom(lookups),
+  );
   const [responseRequiredBy, setResponseRequiredBy] = useState(submittal?.responseRequiredBy ?? "");
   const [documentId, setDocumentId] = useState(submittal?.documentId ?? "");
   const [notes, setNotes] = useState(submittal?.notes ?? "");
@@ -849,7 +854,12 @@ function SubmittalForm({
             label="طرف مسئول"
             value={responsiblePartyId}
             onChange={setResponsiblePartyId}
-            options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+            options={partyPicker.options}
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={partyPicker.setTerm}
+            searching={partyPicker.searching}
+            searchNote={partyPicker.note}
             placeholder="— انتخاب نشده —"
           />
           <PickerField
