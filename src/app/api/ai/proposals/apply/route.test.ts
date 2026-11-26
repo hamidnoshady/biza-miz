@@ -128,4 +128,20 @@ describe("POST /api/ai/proposals/apply idempotency", () => {
     expect(fetch).not.toHaveBeenCalled();
     expect(audit.releaseAiActionAudit).toHaveBeenCalledWith("biz-1", "audit-1");
   });
+
+  it("GH #1567 F7 — the approval must present the displayed hash (fail closed) and it is passed through", async () => {
+    vi.mocked(audit.claimAiActionAudit).mockResolvedValue(claim("ar.receipt.record", { customerId: "customer-1", method: "cash", amount: 100_000 }));
+    vi.mocked(recordHumanApproval).mockResolvedValue({ ok: false, error: "approval_binding_required" });
+    const response = await POST(applyRequest("audit-1"));
+    expect(response.status).toBe(409);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(recordHumanApproval).toHaveBeenCalledWith(expect.objectContaining({ requirePresentedHash: true, presentedPayloadHash: null }));
+
+    vi.mocked(recordHumanApproval).mockClear();
+    const hash = "a".repeat(64);
+    await POST(new Request("http://localhost/api/ai/proposals/apply", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ auditId: "audit-1", payloadHash: hash }),
+    }) as never);
+    expect(recordHumanApproval).toHaveBeenCalledWith(expect.objectContaining({ requirePresentedHash: true, presentedPayloadHash: hash }));
+  });
 });

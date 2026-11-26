@@ -1,7 +1,8 @@
 /**
- * The one way a proposal is applied from the browser: resolve its endpoint from
- * the catalogue, fetch it with the signed-in user's own session cookie, and let
- * the already-role-guarded route decide. Shared by the chat widget and the AI
+ * The one way a proposal is applied from the browser: through
+ * `/api/ai/proposals/apply` with the proposal's audit id and the approval hash
+ * the card displayed (GH #1567 F7); the server claims the audit row, records
+ * the human approval and calls the already-role-guarded business route. Shared by the chat widget and the AI
  * hub's autopilot activity list (Phase 31), which surfaces proposals autopilot
  * held back for confirmation — those take exactly this path, unchanged.
  */
@@ -15,53 +16,40 @@ export async function applyProposalRequest(
   proposal: ProposedAction,
   auditId?: string | null,
   approval?: "session",
+  /** GH #1567 F7 — the approval hash of the payload the card showed; required for gated actions. */
+  payloadHash?: string | null,
 ): Promise<ApplyProposalOutcome> {
   const meta = ACTION_CATALOG[proposal.type];
   if (!meta) return { ok: false, error: "unknown_action", detail: "نوع این پیشنهاد شناخته‌شده نیست." };
 
-  // New proposals use the server-owned audit row as the idempotency key. The
-  // server claims it before calling the business endpoint, so reloads and
-  // double clicks cannot execute a non-idempotent action twice.
-  if (auditId) {
-    const response = await fetch("/api/ai/proposals/apply", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ auditId, ...(approval ? { approval } : {}) }),
-    });
-    const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!response.ok) {
-      return {
-        ok: false,
-        error: "request_failed",
-        detail: typeof data.message === "string" ? data.message : "این پیشنهاد قبلاً اجرا شده یا دیگر قابل اجرا نیست.",
-      };
-    }
+  // GH #1567 F7 — there is no direct path. A proposal is applied only through
+  // the server-owned audit row: the server claims it (so reloads and double
+  // clicks cannot run it twice), records the human approval against the hash
+  // of the payload this card showed, and only then calls the business route.
+  // A card without an audit link (its audit row could not be written) is
+  // refused rather than sent straight to the destination, which would bypass
+  // the approval record entirely.
+  if (!auditId) {
     return {
-      ok: true,
-      endpoint: typeof data.endpoint === "string" ? data.endpoint : meta.endpoint,
-      method: meta.method,
-      status: response.status,
+      ok: false,
+      error: "missing_param",
+      detail: "این پیشنهاد در گزارش ممیزی ثبت نشده و برای امنیت اجرا نمی‌شود؛ درخواست را دوباره بفرستید.",
     };
   }
 
-  const endpoint = resolveActionEndpoint(meta, proposal.payload);
-  if (!endpoint) {
-    return { ok: false, error: "missing_param", detail: "شناسهٔ لازم برای اجرای این پیشنهاد در آن موجود نیست." };
-  }
-
-  const response = await fetch(endpoint, {
-    method: meta.method,
+  const response = await fetch("/api/ai/proposals/apply", {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(proposal.payload),
+    body: JSON.stringify({ auditId, ...(approval ? { approval } : {}), ...(payloadHash ? { payloadHash } : {}) }),
   });
   const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {
-    const detail = Array.isArray(data.messages)
-      ? data.messages.join(" ")
-      : typeof data.error === "string"
-        ? data.error
-        : "";
-    return { ok: false, endpoint, method: meta.method, error: "request_failed", detail };
+    return {
+      ok: false,
+      error: "request_failed",
+      detail: typeof data.message === "string" ? data.message : "این پیشنهاد قبلاً اجرا شده یا دیگر قابل اجرا نیست.",
+    };
   }
+  const endpoint = typeof data.endpoint === "string" ? data.endpoint : resolveActionEndpoint(meta, proposal.payload) ?? meta.endpoint;
   return { ok: true, endpoint, method: meta.method, status: response.status };
 }

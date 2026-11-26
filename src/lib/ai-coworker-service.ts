@@ -24,7 +24,7 @@
  */
 import { ACTION_CATALOG, type ActionType, type ProposedAction } from "./ai";
 import { aiActionServiceGate } from "./ai-service-activation";
-import { createAiActionAudit } from "./ai-action-audit";
+import { boundProposal, createAiActionAudit } from "./ai-action-audit";
 import { projectExistsForBusiness } from "./ai-projects";
 import {
   clampAutopilotSetting,
@@ -32,7 +32,7 @@ import {
   type AutopilotCategorySetting,
 } from "./ai-autopilot";
 import { executorTargetLocation } from "./ai-autopilot-executors";
-import { requiresHumanApproval } from "./ai-approval-policy";
+import { AI_APPROVAL_TTL_HOURS, requiresHumanApproval } from "./ai-approval-policy";
 import { recordHumanApproval, runAiExecutor } from "./ai-human-approval";
 import { isDeferrableDenial, verifyUnattendedAuthority } from "./ai-unattended-authority";
 import { autopilotAmountContext } from "./ai-amount-context";
@@ -329,6 +329,12 @@ export interface CoworkerRunAction {
   heldReason: string | null;
   error: string | null;
   result: Record<string, unknown> | null;
+  /**
+   * GH #1567 F7 — for a still-pending financial/stock action, the hash of the
+   * payload exactly as it will be stored and run. The hub must send it back
+   * with the approval; null for ungated or decided actions.
+   */
+  approvalHash: string | null;
 }
 
 export interface CoworkerRun {
@@ -400,6 +406,7 @@ function toAction(row: ActionRow): CoworkerRunAction {
     heldReason: pending ? row.error : null,
     error: pending ? null : row.error,
     result: row.result,
+    approvalHash: pending ? boundProposal({ type: row.action_type as ActionType, payload: row.payload ?? {} }).payloadHash : null,
   };
 }
 
@@ -676,6 +683,8 @@ async function applyAction(input: {
    * `authorizedBy` is the human who just said yes to this exact action.
    */
   humanApproved?: boolean;
+  /** GH #1567 F7 — the hash the approving human was shown for this action. */
+  presentedPayloadHash?: string | null;
 }): Promise<ApplyOutcome> {
   const meta = ACTION_CATALOG[input.action.type];
   const auditId = await createAiActionAudit({
@@ -759,8 +768,8 @@ async function applyAction(input: {
       businessId: input.businessId,
       auditId,
       approverUserId: authority.userId,
-      presentedPayloadHash: null,
-      requirePresentedHash: false,
+      presentedPayloadHash: input.presentedPayloadHash ?? null,
+      requirePresentedHash: true,
     });
     if (!approval.ok) {
       await query(
@@ -1270,12 +1279,39 @@ export async function decideCoworkerRun(input: {
   runId: string;
   decision: CoworkerDecision;
   actorUserId: string;
+  /**
+   * GH #1567 F7 — `{ [actionId]: approvalHash }` exactly as the hub showed
+   * them. Every pending financial/stock action must be present and match, or
+   * nothing runs.
+   */
+  approvals?: Readonly<Record<string, string>>;
 }): Promise<DecideRunResult> {
   const run = await getCoworkerRun(input.businessId, input.runId);
   if (!run) return { ok: false, error: "coworker_run_not_found" };
   if (run.status !== "pending_approval") return { ok: false, error: "coworker_run_already_decided" };
 
   const pending = run.actions.filter((action) => action.status === "pending");
+  if (input.decision === "approve") {
+    // Fail closed BEFORE anything runs: a held run older than the approval
+    // window is expired, and every gated action needs the hash it was shown.
+    if (Date.now() - new Date(run.createdAt).getTime() > AI_APPROVAL_TTL_HOURS * 3_600_000) {
+      return { ok: false, error: "approval_expired" };
+    }
+    for (const action of pending) {
+      if (!action.approvalHash) continue;
+      const presented = input.approvals?.[action.id];
+      if (!presented) return { ok: false, error: "approval_binding_required" };
+      if (presented !== action.approvalHash) return { ok: false, error: "approval_stale" };
+    }
+  }
+  // One decision per run: claim it atomically so a double click or two tabs
+  // cannot both execute the same actions.
+  const { rowCount: claimed } = await query(
+    `UPDATE ai_coworker_runs SET decided_at = now()
+      WHERE business_id = $1 AND id = $2 AND status = 'pending_approval' AND decided_at IS NULL`,
+    [input.businessId, input.runId],
+  );
+  if ((claimed ?? 0) === 0) return { ok: false, error: "coworker_run_already_decided" };
   const actorName = await userName(input.businessId, input.actorUserId);
 
   if (input.decision === "reject") {
@@ -1303,6 +1339,7 @@ export async function decideCoworkerRun(input: {
         authorizedBy: input.actorUserId,
         authorizedByName: actorName,
         humanApproved: true,
+        presentedPayloadHash: input.approvals?.[action.id] ?? null,
       });
       await query(
         `UPDATE ai_coworker_run_actions
@@ -1328,8 +1365,12 @@ export async function decideCoworkerRun(input: {
   const statuses = statusRows.map((row) => row.status as CoworkerActionStatus);
 
   await query(
+    // A run whose actions are still pending (an approved action deferred by a
+    // disabled app, say) stays open: release the decision claim so it can be
+    // approved again once the cause is fixed.
     `UPDATE ai_coworker_runs
-        SET status = $3, summary = $4, decided_at = now(), decided_by = $5
+        SET status = $3, summary = $4,
+            decided_at = CASE WHEN $3 = 'pending_approval' THEN NULL ELSE now() END, decided_by = $5
       WHERE business_id = $1 AND id = $2`,
     [
       input.businessId,

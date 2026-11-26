@@ -70,15 +70,18 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // GH #1567 F7 — this click IS the human approval of a financial/stock
   // proposal (including ones an autopilot, automation or coworker job held
   // back). Record it against the stored payload, refuse an expired proposal
-  // or a row whose payload no longer matches its stamp, and — when the card
-  // sent the hash it displayed — refuse a stale screen.
+  // or a row whose payload no longer matches its stamp, and refuse an
+  // approval that does not present the hash of the payload the card showed:
+  // missing (`approval_binding_required`) or different (`approval_stale`)
+  // fails closed. Ungated actions are unaffected (recordHumanApproval returns
+  // before the hash check for them).
   const approval = await recordHumanApproval({
     businessId: session.businessId,
     auditId,
     approverUserId: session.sub,
     presentedPayloadHash:
       typeof body?.payloadHash === "string" && /^[0-9a-f]{64}$/.test(body.payloadHash) ? body.payloadHash : null,
-    requirePresentedHash: false,
+    requirePresentedHash: true,
   });
   if (!approval.ok) {
     if (approval.error === "approval_stale" || approval.error === "approval_binding_required") {

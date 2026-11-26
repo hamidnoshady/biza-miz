@@ -248,6 +248,11 @@ async function wasteExpenseRial(): Promise<number> {
   return Number(rows[0].total);
 }
 
+/** GH #1567 F7 — what the hub sends with an approval: the hash it showed for each pending gated action. */
+function hubApprovals(run: { actions: { id: string; status: string; approvalHash: string | null }[] }): Record<string, string> {
+  return Object.fromEntries(run.actions.filter((a) => a.status === "pending" && a.approvalHash).map((a) => [a.id, a.approvalHash as string]));
+}
+
 async function approveOnlyRun() {
   const [run] = await runs();
   return dbLib.withTenant(shop.businessId, () =>
@@ -255,6 +260,7 @@ async function approveOnlyRun() {
       businessId: shop.businessId,
       runId: run.id,
       decision: "approve",
+      approvals: hubApprovals(run),
       actorUserId: shop.userId,
     }),
   );
@@ -364,6 +370,49 @@ describe("a shift closing sets the coworker going", () => {
 });
 
 describe("the approval boundary", () => {
+  // GH #1567 F7 — the hub's approval is bound to the exact payload it showed.
+  async function heldRun() {
+    await enableWasteAutopilot({ maxAmountRial: 20_000_000 });
+    await createWasteJob({ approvalMode: "ask" });
+    await closeAShift();
+    await tick();
+    const [run] = await runs();
+    expect(run.status).toBe("pending_approval");
+    expect(run.actions.some((a) => a.status === "pending" && a.approvalHash)).toBe(true);
+    return run;
+  }
+  const decide = (runId: string, approvals?: Record<string, string>) => dbLib.withTenant(shop.businessId, () =>
+    coworker.decideCoworkerRun({ businessId: shop.businessId, runId, decision: "approve", actorUserId: shop.userId, approvals }));
+
+  it("refuses an approval that presents no hash, and nothing moves", async () => {
+    const run = await heldRun();
+    expect(await decide(run.id)).toEqual({ ok: false, error: "approval_binding_required" });
+    expect(await onHand()).toBe("12");
+    expect((await runs())[0].status).toBe("pending_approval");
+  });
+
+  it("refuses a modified/stale hash, and nothing moves", async () => {
+    const run = await heldRun();
+    const tampered = Object.fromEntries(Object.keys(hubApprovals(run)).map((id) => [id, "0".repeat(64)]));
+    expect(await decide(run.id, tampered)).toEqual({ ok: false, error: "approval_stale" });
+    expect(await onHand()).toBe("12");
+  });
+
+  it("refuses an approval after the approval window, and nothing moves", async () => {
+    const run = await heldRun();
+    await db.query("UPDATE ai_coworker_runs SET created_at = now() - interval '73 hours' WHERE id = $1", [run.id]);
+    expect(await decide(run.id, hubApprovals(run))).toEqual({ ok: false, error: "approval_expired" });
+    expect(await onHand()).toBe("12");
+  });
+
+  it("two simultaneous approvals run the write-off exactly once", async () => {
+    const run = await heldRun();
+    const results = await Promise.all([decide(run.id, hubApprovals(run)), decide(run.id, hubApprovals(run))]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => !r.ok)).toEqual([{ ok: false, error: "coworker_run_already_decided" }]);
+    expect(await wasteExpenseRial()).toBe(600_000);
+  });
+
   it("writes nothing while the owner has asked to be asked, then writes on approval", async () => {
     await enableWasteAutopilot({ maxAmountRial: 20_000_000 });
     await createWasteJob({ approvalMode: "ask" });
@@ -385,6 +434,7 @@ describe("the approval boundary", () => {
         businessId: shop.businessId,
         runId: pending.id,
         decision: "approve",
+        approvals: hubApprovals(pending),
         actorUserId: shop.userId,
       }),
     );
@@ -456,6 +506,7 @@ describe("the approval boundary", () => {
         businessId: shop.businessId,
         runId: run.id,
         decision: "approve",
+        approvals: hubApprovals(run),
         actorUserId: shop.userId,
       }),
     );
