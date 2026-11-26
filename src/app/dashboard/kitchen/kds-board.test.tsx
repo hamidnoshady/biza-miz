@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { KdsBoard } from "./kds-board";
 import { useRealtime } from "../use-realtime";
 
@@ -215,6 +215,35 @@ describe("KdsBoard operational controls", () => {
     fireEvent.click(screen.getByRole("button", { name: /آمادهٔ تحویل/ }));
     expect(document.body.textContent).toContain("سفارش ۳");
     expect(document.body.textContent).not.toContain("سفارش ۲");
+  });
+
+  it("keeps status counts equal to the filtered queue and keeps the selection across a live refresh", async () => {
+    // Issue #1049: the counts must describe the queue the filters leave
+    // visible, and a realtime event must neither reset the selection nor hide
+    // work that the selection still matches.
+    const state = installApi();
+    render(<KdsBoard />);
+    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۱"));
+
+    const tabText = () =>
+      within(screen.getByRole("navigation", { name: "فیلتر وضعیت سفارش‌های آشپزخانه" }))
+        .getAllByRole("button")
+        .map((button) => button.textContent);
+
+    expect(tabText()).toEqual(["همه۳", "جدید۱", "در حال آماده‌سازی۱", "آماده۱"]);
+
+    fireEvent.change(screen.getByLabelText("نوع سفارش"), { target: { value: "takeaway" } });
+    expect(tabText()).toEqual(["همه۱", "جدید۰", "در حال آماده‌سازی۱", "آماده۰"]);
+    expect(document.body.textContent).not.toContain("سفارش ۱");
+
+    state.items = [...state.items, line("order-5", "line-5", "sent", 5, "takeaway", 1)];
+    await act(async () => {
+      realtimeCallbacks()[0]({ type: "order.created" });
+    });
+    await waitFor(() => expect(document.body.textContent).toContain("سفارش ۵"));
+    expect(tabText()).toEqual(["همه۲", "جدید۱", "در حال آماده‌سازی۱", "آماده۰"]);
+    // The selection survived the refresh — the dine-in ticket is still hidden.
+    expect(document.body.textContent).not.toContain("سفارش ۱");
   });
 
   it("groups mixed rounds by order, shows status counts, and renders the order note", async () => {
