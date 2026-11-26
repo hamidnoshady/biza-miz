@@ -35,7 +35,7 @@ import {
 } from "@/lib/tailoring-workflow";
 import { DataTable, DataTableBody, DataTableHead, DataTableRow, Td, Th } from "../data-table";
 import { FilterChip, FilterChipRow } from "../filters";
-import { EmptyState, SectionCard, StatusBadge } from "../page-chrome";
+import { EmptyState, SectionCard, SectionCardSkeleton, StatusBadge } from "../page-chrome";
 import { api, ErrorBox, InfoBox } from "../ui";
 import { tailoringErrorMessage } from "./tailoring-errors";
 
@@ -110,6 +110,9 @@ export function MeasurementsPanel({
   const [current, setCurrent] = useState<CurrentMeasurements | null>(null);
   const [versions, setVersions] = useState<MeasurementVersionMeta[]>([]);
   const [busy, setBusy] = useState(false);
+  // The decrypting read is the panel's first fetch; its region shows a
+  // skeleton while it is in flight instead of a frozen purpose form.
+  const [opening, setOpening] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [editing, setEditing] = useState(false);
@@ -147,6 +150,7 @@ export function MeasurementsPanel({
       return;
     }
     setBusy(true);
+    setOpening(true);
     setError("");
     const params = new URLSearchParams({ partyId, purpose: text });
     const res = await api<{ current: CurrentMeasurements | null; versions: MeasurementVersionMeta[]; error?: string }>(
@@ -154,6 +158,7 @@ export function MeasurementsPanel({
       { cache: "no-store" },
     );
     setBusy(false);
+    setOpening(false);
     if (!res.ok) {
       setError(tailoringErrorMessage(res.data.error));
       return;
@@ -278,7 +283,9 @@ export function MeasurementsPanel({
         <ErrorBox>{error}</ErrorBox>
         {notice ? <InfoBox>{notice}</InfoBox> : null}
 
-        {!openedFor ? (
+        {opening ? (
+          <SectionCardSkeleton label="در حال بازکردن اندازه‌ها" />
+        ) : !openedFor ? (
           <form
             className="space-y-3"
             onSubmit={(event) => {
