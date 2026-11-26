@@ -93,4 +93,10 @@ describe("AI product description draft", () => {
     expect(parseProductDescriptionReply(JSON.stringify({ short: "کوتاه", long: `متن بلند ${TINY}` }))).toBeNull();
     expect(parseProductDescriptionReply(JSON.stringify({ short: "کوتاه", long: "بلند" }))).toEqual({ shortDescription: "کوتاه", longDescription: "بلند" });
   });
+
+  it("checks the raw reply before tag-stripping, so an <img src=data:…> is refused rather than silently cleaned", () => {
+    expect(parseProductDescriptionReply(JSON.stringify({ short: "کوتاه", long: `<p>بلند</p><img src="${TINY}">` }))).toBeNull();
+    expect(parseProductDescriptionReply(JSON.stringify({ shortDescription: ENCODED, longDescription: "بلند" }))).toBeNull();
+    expect(parseProductDescriptionReply(JSON.stringify({ short: "کوتاه", long: `<p>${RAW_PNG}</p>` }))).toBeNull();
+  });
 });

@@ -34,6 +34,7 @@
  * Field names, limits and the envelope are Torob's and live in `contract.ts`
  * beside the document they come from.
  */
+import { findEmbeddedMedia, parseMediaUrl } from "@/lib/embedded-media-guard";
 import { TorobPriceError, sellingPriceInToman, type RialAmount, type TorobPriceProblem } from "./currency";
 import {
   TOROB_PAGE_SIZE,
@@ -58,6 +59,7 @@ export type TorobFeedSkipReason =
   | "missing_url"
   | "unusable_url"
   | "missing_image"
+  | "unusable_image"
   | "missing_date"
   | "unsupported_currency"
   | "price_not_whole_toman"
@@ -138,6 +140,8 @@ export const TOROB_FEED_SKIP_COPY: Readonly<Record<TorobFeedSkipReason, string>>
   missing_url: "نشانی صفحهٔ محصول روی وب‌سایت ثبت نشده است.",
   unusable_url: "نشانی صفحهٔ محصول قابل استفاده نیست.",
   missing_image: "برای محصول تصویری ثبت نشده است؛ در ترب بدون تصویر دیده نمی‌شود.",
+  unusable_image:
+    "تصویر این محصول نشانی اینترنتی معتبر ندارد (مثلاً تصویر جاسازی‌شده data: است)؛ تصویر را در کتابخانهٔ رسانه بارگذاری کنید.",
   missing_date: "تاریخ ثبت محصول خوانده نمی‌شود؛ ترب برای هر محصول تاریخ افزودن می‌خواهد.",
   unsupported_currency: "قیمت این محصول به ارزی جز ریال یا تومان ثبت شده است.",
   price_not_whole_toman: "قیمت این محصول به تومان صحیح تبدیل نمی‌شود.",
@@ -292,6 +296,13 @@ export function buildTorobFeed(input: {
       continue;
     }
 
+    // Only real http(s) URLs within Torob's 1000-char field (GH #1567 F5).
+    const imageLinks = product.imageUrls.flatMap((url) => {
+      const parsed = parseMediaUrl(url);
+      const trimmed = url.trim();
+      return parsed.ok && parsed.value && trimmed.length <= 1000 ? [trimmed] : [];
+    });
+
     const variants = (product.variants ?? []).filter((variant) => variant.id);
     const pages: { variant: CatalogueVariant | null; url: string | null; unique: string }[] =
       variants.length > 0
@@ -320,6 +331,13 @@ export function buildTorobFeed(input: {
         skip(product, variant, "missing_image");
         continue;
       }
+      if (imageLinks.length === 0) {
+        // GH #1567 F5 — a legacy `data:` image (or any non-URL) is never sent,
+        // and never cut to 1000 chars into a broken blob: the page is skipped
+        // with a reason the merchant can act on.
+        skip(product, variant, "unusable_image");
+        continue;
+      }
       if (seenUniques.has(page.unique) || seenUrls.has(page.url!)) {
         // Two catalogue rows pointing at one page — `menu_items` can hold a
         // duplicate after an import. Sending both lets Torob pick one at random.
@@ -339,15 +357,13 @@ export function buildTorobFeed(input: {
         page_url: page.url!,
         title,
         ...priced,
-        image_links: product.imageUrls
-          .map((url) => clampField(url, 1000))
-          .filter((url): url is string => Boolean(url)),
+        image_links: imageLinks,
         // Required by the contract, empty when there is nothing to say.
         spec: cleanSpec(variant ? { ...product.spec, ...variant.attributes } : product.spec),
         date_added: dateAdded,
       };
 
-      const subtitle = clampField(product.subtitle ?? undefined, 500);
+      const subtitle = findEmbeddedMedia(product.subtitle) ? undefined : clampField(product.subtitle ?? undefined, 500);
       if (subtitle) item.subtitle = subtitle;
       // Variants of one product share a group id, which is how Torob knows they
       // are the same thing in different colours rather than unrelated listings.
@@ -356,7 +372,8 @@ export function buildTorobFeed(input: {
       if (old !== undefined) item.old_price = old;
       const category = clampField(product.categoryName ?? undefined, 200);
       if (category) item.category_name = category;
-      const shortDesc = clampField(product.description ?? undefined, 500);
+      // A legacy description carrying an embedded file is left out, not clipped.
+      const shortDesc = findEmbeddedMedia(product.description) ? undefined : clampField(product.description ?? undefined, 500);
       if (shortDesc) item.short_desc = shortDesc;
       const guarantee = clampField(product.guarantee ?? undefined, 200);
       if (guarantee) item.guarantee = guarantee;

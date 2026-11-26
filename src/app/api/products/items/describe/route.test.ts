@@ -128,4 +128,26 @@ describe("POST /api/products/items/describe", () => {
     expect(response.status).toBe(504);
     expect(aiWalletBilling.settleAiTurn).not.toHaveBeenCalled();
   });
+
+  it("refuses an embedded file in any fact before the wallet or the model is touched (GH #1567 F5)", async () => {
+    const tiny = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+    for (const body of [
+      { name: "پیراهن", existingLong: `<p>متن</p><img src="${tiny}">` },
+      { name: "پیراهن", attributes: [{ name: "رنگ", value: tiny }] },
+      { name: tiny },
+    ]) {
+      const response = await POST(req(body));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: "embedded_media", message: expect.stringContaining("data:") });
+    }
+    expect(aiWalletBilling.gateAiTurn).not.toHaveBeenCalled();
+    expect(descriptionService.runProductDescriptionDraft).not.toHaveBeenCalled();
+  });
+
+  it("refuses an over-long current description instead of cutting it before the model sees it", async () => {
+    const response = await POST(req({ name: "پیراهن", existingShort: "کوتاه ".repeat(400) }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "too_long", field: "existingShort" });
+    expect(descriptionService.runProductDescriptionDraft).not.toHaveBeenCalled();
+  });
 });

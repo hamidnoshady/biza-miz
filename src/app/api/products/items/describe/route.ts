@@ -14,6 +14,7 @@ import {
 import { ProductDescriptionError, runProductDescriptionDraft } from "@/lib/ai-product-description-service";
 import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "@/lib/product-content";
 import type { ProductDescriptionFacts } from "@/lib/product-description-ai";
+import { EMBEDDED_MEDIA_MESSAGE, findEmbeddedMediaDeep } from "@/lib/embedded-media-guard";
 
 /**
  * Metered AI draft of a product's short and long description.
@@ -74,6 +75,33 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  // GH #1567 F5 — refuse an embedded file in ANY fact before anything is
+  // trimmed or clipped (a clipped blob can slip under the detector) and before
+  // the wallet is reserved, so a blob is never metered or sent to the model.
+  const blob = findEmbeddedMediaDeep(body);
+  if (blob) {
+    return NextResponse.json(
+      { error: "embedded_media", field: blob.path || null, message: EMBEDDED_MEDIA_MESSAGE },
+      { status: 400 },
+    );
+  }
+  // The current descriptions are context for the draft: a longer text than the
+  // product can store is refused, not silently cut before the model sees it.
+  if (!(body && typeof body === "object")) {
+    return NextResponse.json({ error: "bad_request" }, { status: 400 });
+  }
+  for (const [key, max] of [
+    ["existingShort", PRODUCT_SHORT_DESCRIPTION_MAX],
+    ["existingLong", PRODUCT_LONG_DESCRIPTION_MAX],
+  ] as const) {
+    const value = (body as Record<string, unknown>)[key];
+    if (typeof value === "string" && value.trim().length > max) {
+      return NextResponse.json(
+        { error: "too_long", field: key, message: "متن فعلی توضیحات بلندتر از حد مجاز است؛ ابتدا آن را کوتاه کنید." },
+        { status: 400 },
+      );
+    }
   }
   const facts = parseFacts(body);
   if (!facts) {
