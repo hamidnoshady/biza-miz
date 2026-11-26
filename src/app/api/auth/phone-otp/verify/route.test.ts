@@ -535,6 +535,13 @@ describe("trusted-device exemption before MFA (gap 3)", () => {
  * distinct-method list was empty). The new rule keeps stronger factors and
  * privileged roles, and drops only the duplicate.
  */
+/** The (unverified) claims of the session cookie a response set. */
+function sessionClaims(res: Response & { cookies: { get(name: string): { value: string } | undefined } }) {
+  const jwt = res.cookies.get("pos_session")?.value ?? "";
+  const payload = jwt.split(".")[1] ?? "";
+  return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
+}
+
 describe("#1386 — routine OTP is the whole ceremony unless a stronger factor is due", () => {
   function identityMember(role: string) {
     mocks.query.mockResolvedValue({
@@ -603,6 +610,46 @@ describe("#1386 — routine OTP is the whole ceremony unless a stronger factor i
     expect(body.mfaRequired).toBe(true);
     expect(body.availableMethods).toEqual([]);
     expect(res.cookies.get("pos_session")).toBeUndefined();
+  });
+
+  /*
+   * Scenario 8 — the session a routine OTP login mints says what it proved.
+   * Sensitive security changes read this claim and ask an account holding a
+   * TOTP for that TOTP first (`requireSensitiveRecentAuth`).
+   */
+  it("marks the routine OTP session as OTP-only assurance", async () => {
+    identityMember("cashier");
+    mocks.distinctSecondFactorMethods.mockReturnValue([]);
+
+    const res = await POST(request("123456"));
+
+    expect(sessionClaims(res)).toMatchObject({ otpOnlyAssurance: true, mfaVerified: false });
+  });
+
+  it("marks it OTP-only even when device trust waived an enrolled TOTP", async () => {
+    // The waiver is the existing explicit exemption for a routine sign-in; it
+    // must not also authorise removing that TOTP on the strength of SMS alone.
+    identityMember("cashier");
+    mocks.getAccountMfaEnrolments.mockResolvedValue([{ method: "totp", confirmed_at: new Date() }]);
+    mocks.distinctSecondFactorMethods.mockReturnValue(["totp"]);
+    mocks.verifyTrustedDevice.mockResolvedValue({ trusted: true, expiresAt: new Date() });
+
+    const res = await POST(request("123456"));
+
+    expect((await res.json()).mfaRequired).toBeUndefined();
+    expect(sessionClaims(res)).toMatchObject({ otpOnlyAssurance: true });
+  });
+
+  it("mints no session (and so no claim) while a distinct factor is still due", async () => {
+    identityMember("cashier");
+    mocks.distinctSecondFactorMethods.mockReturnValue(["totp"]);
+
+    const res = await POST(request("123456"));
+
+    expect(res.cookies.get("pos_session")).toBeUndefined();
+    expect(mocks.signMfaPendingToken).toHaveBeenCalledWith(
+      expect.objectContaining({ primaryAuth: "phone_otp" }),
+    );
   });
 });
 

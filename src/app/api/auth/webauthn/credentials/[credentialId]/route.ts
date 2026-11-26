@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
-import { requireRecentAuth } from "@/lib/recent-auth";
+import { requireSensitiveRecentAuth } from "@/lib/sensitive-step-up";
 import { EmployeeError, revokeCredential } from "@/lib/employee-service";
 import { resolveWebauthnPolicy, webauthnPolicyDenial } from "@/lib/webauthn-access";
 
@@ -27,8 +27,9 @@ export const DELETE = withTenantScope(
     /**
      * Issue #854 (P1.8): removing a factor is as sensitive as adding one — and
      * an attacker who cannot register a key will settle for deleting one.
+     * #1386: and an SMS-only proof cannot do it while a TOTP is enrolled.
      */
-    const recentAuthError = requireRecentAuth(session);
+    const recentAuthError = await requireSensitiveRecentAuth(session);
     if (recentAuthError) return recentAuthError;
 
     const { credentialId } = await context.params;

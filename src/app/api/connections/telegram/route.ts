@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
 import { requireRecentAuth } from "@/lib/recent-auth";
+import { requireSensitiveRecentAuth } from "@/lib/sensitive-step-up";
 import {
   issueTelegramLinkChallenge,
   readTelegramConnectionStatus,
@@ -58,7 +59,12 @@ export const POST = withTenantScope(async () => {
   const { session } = guard;
   if (!session) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
-  const recentAuthError = requireRecentAuth(session);
+  /*
+   * #1386 — linking adds a login door (the `tenant_telegram` realm), like
+   * registering a passkey, so an SMS-only proof cannot do it while the account
+   * holds a TOTP. Unlinking (DELETE) is protective and stays on plain recency.
+   */
+  const recentAuthError = await requireSensitiveRecentAuth(session);
   if (recentAuthError) return recentAuthError;
   const availability = await telegramBusinessAvailability(session.businessId);
   if (!availability.available) {

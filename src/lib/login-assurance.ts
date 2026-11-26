@@ -142,3 +142,94 @@ export function decidePasswordAssurance(params: {
   if (params.hasConfirmedEnrolment) return true;
   return params.appliesToRole && params.requirement === "required";
 }
+
+// ---------------------------------------------------------------------------
+// Sensitive-action step-up after an OTP-only authentication (#1386, Scenario 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Step-up methods that prove a factor **distinct** from the SMS number.
+ *
+ * TOTP is the separately enrolled authenticator; a recovery code is its
+ * break-glass stand-in (it is minted with the TOTP enrolment and is one-time).
+ * Deliberately absent:
+ *
+ *  - `sms_otp` — the same factor the OTP login already proved. Two SMS codes
+ *    are one factor, not two.
+ *  - `password` — the password door itself would demand the distinct factor
+ *    from this account (`decidePasswordAssurance`), so password + SMS is not
+ *    enough to strip that factor either.
+ *  - `pin` — a device-local quick-unlock code, not an independent factor.
+ */
+export const DISTINCT_FACTOR_STEP_UP_METHODS = ["totp", "recovery"] as const;
+export type DistinctFactorStepUpMethod = (typeof DISTINCT_FACTOR_STEP_UP_METHODS)[number];
+
+/** Whether a successful step-up with `method` proves the distinct factor. */
+export function stepUpProvesDistinctFactor(method: string): method is DistinctFactorStepUpMethod {
+  return (DISTINCT_FACTOR_STEP_UP_METHODS as readonly string[]).includes(method);
+}
+
+/**
+ * The `otpOnlyAssurance` claim a step-up should leave on the session.
+ *
+ *  - A distinct factor (TOTP / recovery) clears it.
+ *  - An `sms_otp` step-up sets it: SMS alone is what was just proved.
+ *  - Any other method (password, PIN) refreshes the clock but cannot upgrade
+ *    an OTP-only session, so the previous value is kept.
+ */
+export function otpOnlyAssuranceAfterStepUp(
+  method: string,
+  previous: boolean | undefined,
+): boolean {
+  if (stepUpProvesDistinctFactor(method)) return false;
+  if (method === "sms_otp") return true;
+  return previous === true;
+}
+
+export interface SensitiveStepUpInput {
+  /** The session's `otpOnlyAssurance` claim. */
+  otpOnlyAssurance: boolean | undefined;
+  /**
+   * The account's confirmed factors that are distinct from SMS — the same
+   * `distinctSecondFactorMethods(active, "phone_otp")` list the OTP login
+   * policy uses, so "which factor is stronger" cannot drift between the two.
+   */
+  distinctFactors: readonly MfaMethod[];
+}
+
+export interface SensitiveStepUpDecision {
+  /** Must the caller prove a distinct factor before this mutation runs? */
+  distinctFactorRequired: boolean;
+  /** The step-up methods that satisfy it (empty when not required). */
+  allowedMethods: DistinctFactorStepUpMethod[];
+}
+
+/**
+ * Decide whether a sensitive security mutation needs a distinct-factor step-up
+ * on top of an ordinary fresh `recentAuthAt`.
+ *
+ * Applies to the changes that would let SMS possession alone take over or
+ * entrench control of an account: adding/replacing/removing an MFA factor or
+ * regenerating recovery codes, changing the verified login phone, and
+ * registering or removing a passkey (itself a login door).
+ *
+ * Deliberately *not* applied to protective actions — signing out other
+ * sessions, revoking trusted devices — so the legitimate owner is never
+ * slowed down defending the account. Password change/creation is also not
+ * gated: SMS-based recovery already resets a password without TOTP by design,
+ * and a new password never removes the TOTP the password door demands.
+ *
+ * Only bites when the account *holds* a distinct factor. A phone-first account
+ * whose only factor is SMS (or none) is managed with the SMS proof it signed
+ * in with — there is nothing stronger to ask for, and refusing would lock the
+ * member out of setting up the very factor that would protect them.
+ */
+export function decideSensitiveStepUp(input: SensitiveStepUpInput): SensitiveStepUpDecision {
+  if (input.otpOnlyAssurance !== true || input.distinctFactors.length === 0) {
+    return { distinctFactorRequired: false, allowedMethods: [] };
+  }
+  const allowed: DistinctFactorStepUpMethod[] = [];
+  // Recovery codes exist only alongside a TOTP enrolment.
+  if (input.distinctFactors.includes("totp")) allowed.push("totp", "recovery");
+  return { distinctFactorRequired: true, allowedMethods: allowed };
+}

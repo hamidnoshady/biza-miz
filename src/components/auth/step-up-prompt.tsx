@@ -58,6 +58,12 @@ interface StepUpStatus {
   hasPassword?: boolean;
   hasPin?: boolean;
   loginManagedByCloud?: boolean;
+  /**
+   * #1386 — the session was opened with an SMS code alone and the account
+   * holds an authenticator app, so only that factor (or a recovery code) can
+   * authorise a security change. `availableMethods` is already narrowed.
+   */
+  distinctFactorRequired?: boolean;
   error?: string;
 }
 
@@ -184,6 +190,13 @@ export function StepUpPrompt({
           <p className="mt-1 text-xs text-muted-foreground">{description}</p>
         ) : null}
       </div>
+
+      {status?.distinctFactorRequired ? (
+        <p className="text-xs text-muted-foreground">
+          شما با کد پیامکی وارد شده‌اید. برای این تغییر امنیتی، کد برنامهٔ احرازکننده یا یک کد
+          بازیابی لازم است.
+        </p>
+      ) : null}
 
       <ErrorBox>{error}</ErrorBox>
       {notice ? <InfoBox>{notice}</InfoBox> : null}
