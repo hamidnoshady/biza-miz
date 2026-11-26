@@ -6,7 +6,7 @@
  */
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HeadingFocusManager } from "./heading-focus";
+import { HeadingFocusManager, resetHeadingFocusMemory } from "./heading-focus";
 import { PAGE_HEADING_ID } from "./page-heading-id";
 
 let currentPathname = "/accounting/overview";
@@ -48,6 +48,7 @@ function Harness({ title }: { title: string }) {
 
 afterEach(() => {
   cleanup();
+  resetHeadingFocusMemory();
   currentPathname = "/accounting/overview";
   currentSearch = "";
 });
@@ -69,6 +70,33 @@ describe("useFocusHeadingOnNavigate — heading focus after a committed navigati
 
     expect(document.activeElement).toBe(document.getElementById(PAGE_HEADING_ID));
     expect(document.activeElement?.textContent).toBe("تراز آزمایشی");
+  });
+
+  it("follows a shell-to-shell navigation that remounts the manager (issue #1553)", async () => {
+    // Launching an app from the workspace rail crosses route segments, so the
+    // whole shell — and this manager with it — unmounts and mounts again at
+    // the destination. That is a navigation, not the browser's first landing.
+    const first = render(<Harness title="داشبورد" />);
+    await flushFrames();
+    first.unmount();
+
+    currentPathname = "/growth/overview";
+    render(<Harness title="رشد و بازاریابی" />);
+    await flushFrames();
+
+    expect(document.activeElement).toBe(document.getElementById(PAGE_HEADING_ID));
+    expect(document.activeElement?.textContent).toBe("رشد و بازاریابی");
+  });
+
+  it("does not steal focus when a shell remounts on the same route", async () => {
+    const first = render(<Harness title="نمای کلی" />);
+    await flushFrames();
+    first.unmount();
+
+    render(<Harness title="نمای کلی" />);
+    await flushFrames();
+
+    expect(document.activeElement).not.toBe(document.getElementById(PAGE_HEADING_ID));
   });
 
   it("moves focus on a query-only committed navigation too (e.g. Directory's ?view= tabs)", async () => {

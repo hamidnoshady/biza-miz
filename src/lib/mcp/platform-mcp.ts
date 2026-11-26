@@ -117,6 +117,15 @@ import {
 import { businessDestructivePhrase } from "../platform-admin";
 import { listPairingCodes, listPairingLocations } from "../pairing-service";
 import { listSiteDevices } from "../site-device-service";
+// Issue #1432 — read-only operational diagnostics: local installations,
+// managed-backup diagnosis and service activation/retention. Every one of
+// these is a READ of a service the console already owns; the matching writes
+// (credential minting/rotation, backup run/restore/delete, activation and
+// retention changes) deliberately have no verb here.
+import { listLocalInstallations } from "../local-activation-cloud-service";
+import { diagnoseBusinessBackup } from "../platform-tenant-backup-ops";
+import { listBusinessServices, listServiceRuntimeSummary } from "../service-activation/activation-service";
+import { listBusinessRetentionOverrides } from "../service-activation/retention-service";
 // Batch BN2 — the last exception rows: exception-inbox reads, per-business
 // app availability, and the access-control revocations (mirroring the
 // revoke_entitlement doctrine: withdrawing access is honest ops; issuing it
@@ -1312,8 +1321,33 @@ export const PLATFORM_MCP_TOOLS: PlatformMcpTool[] = [
   },
   {
     name: "list_provision_devices",
-    description: "Provision-link issue history for one business (the key-maker lane shares business.provision).",
+    description:
+      "Read-only device inventory for one business, with the four different things the console's device page shows kept apart: `installations` (site devices the cloud pushes to), `codes` (pairing codes, including their validity state), `locations` (pairing locations) and `localInstallations` (self-hosted/offline installs: status, masked installation id, app/schema version, last seen/validated, lease and credential-rotation-pending flag). Never returns a secret or a reusable credential: the key-maker POST lanes that mint pairing links, enrollment codes and local-installation credentials stay console-only.",
     capability: "business.provision",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: { businessId: { type: "string" } },
+      required: ["businessId"],
+    },
+  },
+  {
+    name: "get_business_backup_diagnostics",
+    description:
+      "Read-only managed-backup diagnosis for one business (issue #903's diagnoseBusinessBackup): destination/custody availability, artifact counts by state (pending_upload, uploading, verifying, ready, failed, expired, superseded), open/verified standing, last drill result, RPO objective and standing, and the operator action codes the console raises. States are reported as they are — missing, stale, pending, failed, verified, unavailable — never smoothed into 'ok'. It cannot run, verify, upload, delete, restore or change retention, and it returns no object keys, URLs, provider credentials or artifact bytes.",
+    capability: "tenant_backup.read",
+    bridged: true,
+    inputSchema: {
+      type: "object",
+      properties: { businessId: { type: "string" } },
+      required: ["businessId"],
+    },
+  },
+  {
+    name: "get_business_service_status",
+    description:
+      "Read-only service activation and retention visibility for one business: the tenant's service list with live state, setup-paid flag, retention deadline and purge state; the running intervals with settled and upcoming hourly charges; and the audited per-business retention overrides in force. It cannot quote, enable, disable, re-enable, hold, settle, charge, purge or start a consent flow — those are the console's money-and-consent lanes.",
+    capability: "business.reports.read",
     bridged: true,
     inputSchema: {
       type: "object",
@@ -2550,12 +2584,40 @@ async function executePlatformTool(
             results[id] = { ok: false, error: "not_found" };
             continue;
           }
-          const [installations, codes, locations] = await Promise.all([
+          const [installations, codes, locations, localInstallations] = await Promise.all([
             listSiteDevices(id),
             listPairingCodes(id),
             listPairingLocations(id),
+            listLocalInstallations(id),
           ]);
-          results[id] = { ok: true, installations, codes, locations };
+          results[id] = { ok: true, installations, codes, locations, localInstallations };
+        }
+        return { perBusiness: results };
+      }
+      case "get_business_backup_diagnostics": {
+        for (const id of targets) {
+          if (!(await getBusiness(id))) {
+            results[id] = { ok: false, error: "not_found" };
+            continue;
+          }
+          // The console's own diagnosis, unchanged: this verb adds reach, not
+          // judgement, and every state it names is a state the service holds.
+          results[id] = { ok: true, diagnostics: await diagnoseBusinessBackup(id) };
+        }
+        return { perBusiness: results };
+      }
+      case "get_business_service_status": {
+        for (const id of targets) {
+          if (!(await getBusiness(id))) {
+            results[id] = { ok: false, error: "not_found" };
+            continue;
+          }
+          const [services, runtime, retentionOverrides] = await Promise.all([
+            listBusinessServices(id),
+            listServiceRuntimeSummary(id),
+            listBusinessRetentionOverrides(id),
+          ]);
+          results[id] = { ok: true, services, runtime, retentionOverrides };
         }
         return { perBusiness: results };
       }

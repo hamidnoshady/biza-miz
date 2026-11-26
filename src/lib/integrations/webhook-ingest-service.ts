@@ -43,6 +43,12 @@ import {
 import { wooAmountToRial } from "./woo-money";
 import { writeIntegrationAudit } from "./audit";
 import { insertNewMappingOnClient, lockRemoteIdentity } from "./mapping-service";
+import {
+  findLocalSkuMatches,
+  isAmbiguousLocalMatch,
+  lockProductSkuIdentity,
+  PRODUCT_IDENTITY_REVIEW_REQUIRED,
+} from "./product-identity-guard";
 import { getBusinessIndustry } from "../industry-guard";
 import {
   completePluginCustomerSync,
@@ -537,6 +543,24 @@ async function dispatchIngestEvent(
     return { status: "processed" };
   } catch (err) {
     const message = (err as Error).message;
+    // Issue #1592: a product whose identity is now under review is not a
+    // delivery failure. Keep it durable and park it until the reconciliation
+    // run applies; otherwise the plugin retries a create that is correctly
+    // refused, forever.
+    if (message === PRODUCT_IDENTITY_REVIEW_REQUIRED) {
+      await query(
+        `UPDATE integration_webhook_events SET status = 'deferred', error = NULL, processed_at = NULL WHERE id = $1`,
+        [inboxId],
+      );
+      await writeIntegrationAudit({
+        businessId,
+        connectionId: connection.id,
+        action: "inbox.deferred_for_reconciliation",
+        entityType: event.topic,
+        remoteId,
+      });
+      return { status: "deferred" };
+    }
     await query(`UPDATE integration_webhook_events SET status = 'failed', error = $2 WHERE id = $1`, [inboxId, message]);
     return { status: "failed", error: message };
   }
@@ -833,6 +857,30 @@ async function ensureVariationStub(
     if (mapped) {
       await db.query("RELEASE SAVEPOINT variation_stub");
       return mapped;
+    }
+    // Issue #1592: a variation stub is still a product create. If the branch
+    // already carries this SKU on a row this connection does not own, a new
+    // child would be another duplicate. Leave the line on the parent (no
+    // duplicate row, no invented stock) and let the product reconciliation run
+    // settle identity; the sale itself must still import.
+    await lockProductSkuIdentity(db, locationId, line.sku ?? null);
+    const matches = await findLocalSkuMatches(db, {
+      businessId: connection.business_id,
+      locationId,
+      connectionId: connection.id,
+      sku: line.sku ?? null,
+    });
+    if (matches.some((match) => isAmbiguousLocalMatch(match, connection.id))) {
+      await db.query("RELEASE SAVEPOINT variation_stub");
+      await writeIntegrationAudit({
+        businessId: connection.business_id,
+        connectionId: connection.id,
+        action: "product.identity_review_required",
+        entityType: "product",
+        remoteId: String(variationId),
+        error: "variation_stub_duplicate_sku",
+      });
+      return null;
     }
     const { rows } = await db.query<{ id: string }>(
       `INSERT INTO items (location_id, parent_item_id, name, sku, kind, tracking)

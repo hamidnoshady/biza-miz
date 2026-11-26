@@ -3,7 +3,7 @@
 import { SetupDataSkeleton } from "../ui";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import type { AccountType, TemplateAccount } from "@/lib/coa-template";
 import { toPersianDigits } from "@/lib/digits";
@@ -43,26 +43,38 @@ export default function AccountsStep() {
   const [rows, setRows] = useState<TemplateAccount[]>([]);
   const [existingCount, setExistingCount] = useState(0);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
-  useEffect(() => {
-    api<AccountsResponse>("/api/setup/accounts").then(({ data }) => {
-      if (data.existing?.length) {
-        setExistingCount(data.existing.length);
-        setRows(
-          data.existing.map((a) => ({
-            code: a.code,
-            name: a.name,
-            type: a.type,
-            parentCode: a.parent_code ?? undefined,
-          })),
-        );
-      } else if (data.template) {
-        setRows(data.template);
-      }
-    }).finally(() => setLoaded(true));
+  const load = useCallback(async () => {
+    setLoadError("");
+    const { ok, data, status } = await api<AccountsResponse>("/api/setup/accounts");
+    if (!ok) {
+      // Issue #1583 — the same class of bug as the opening step: a failed read
+      // must not render as "the template is empty", because then the chart is
+      // never created and the next step has no accounts.
+      setLoadError(errorMessage(data.error, undefined, status));
+      return;
+    }
+    if (data.existing?.length) {
+      setExistingCount(data.existing.length);
+      setRows(
+        data.existing.map((a) => ({
+          code: a.code,
+          name: a.name,
+          type: a.type,
+          parentCode: a.parent_code ?? undefined,
+        })),
+      );
+    } else if (data.template) {
+      setRows(data.template);
+    }
   }, []);
+
+  useEffect(() => {
+    load().finally(() => setLoaded(true));
+  }, [load]);
 
   function update(i: number, patch: Partial<TemplateAccount>) {
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
@@ -96,6 +108,25 @@ export default function AccountsStep() {
   }
 
   if (!loaded) return <SetupDataSkeleton rows={4} />;
+
+  if (loadError) {
+    return (
+      <StepShell
+        step="accounts"
+        description="سرفصل حساب‌ها پیش‌نیاز ثبت سند و مانده‌های افتتاحیه است."
+      >
+        <ErrorBox>{loadError}</ErrorBox>
+        <SecondaryButton
+          onClick={() => {
+            setLoaded(false);
+            load().finally(() => setLoaded(true));
+          }}
+        >
+          تلاش دوباره
+        </SecondaryButton>
+      </StepShell>
+    );
+  }
 
   return (
     <StepShell

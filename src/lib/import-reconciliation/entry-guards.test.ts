@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockQuery, mockWithTenantTransaction, mockIsRemoteEditSuppressed } = vi.hoisted(() => ({
+const { mockQuery, mockWithTenantTransaction, mockIsRemoteEditSuppressed, mockDuplicateStockConflict } = vi.hoisted(() => ({
   mockQuery: vi.fn(),
   mockWithTenantTransaction: vi.fn(),
   mockIsRemoteEditSuppressed: vi.fn(),
+  mockDuplicateStockConflict: vi.fn(),
 }));
 
 vi.mock("../db", () => ({
@@ -13,6 +14,13 @@ vi.mock("../db", () => ({
 
 vi.mock("./service", () => ({
   isRemoteEditSuppressed: mockIsRemoteEditSuppressed,
+}));
+
+// The outbound authority guard is its own DB read; mocked here so these tests
+// keep asserting the guard's decision order rather than a query count.
+vi.mock("../integrations/product-authority-guard", () => ({
+  duplicateStockConflictForRemote: mockDuplicateStockConflict,
+  listDuplicateStockConflicts: vi.fn(async () => new Map()),
 }));
 
 import {
@@ -34,6 +42,8 @@ describe("import-reconciliation entry & outbound guards (#1118)", () => {
     mockWithTenantTransaction.mockReset();
     mockIsRemoteEditSuppressed.mockReset();
     mockIsRemoteEditSuppressed.mockResolvedValue(false);
+    mockDuplicateStockConflict.mockReset();
+    mockDuplicateStockConflict.mockResolvedValue(null);
   });
 
   it("maps webhook topics to reconciliation domains cleanly", () => {
@@ -249,5 +259,19 @@ describe("import-reconciliation entry & outbound guards (#1118)", () => {
         regular_price: "175000",
       }),
     ).toEqual({ ok: true });
+  });
+
+  it("refuses a manual stock/price push while an unmapped twin holds the stock (issue #1592)", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }); // no active run
+    mockDuplicateStockConflict.mockResolvedValueOnce({
+      localId: "item-1",
+      twinItemId: "item-2",
+      twinQuantity: "5",
+    });
+    await expect(
+      checkManualProductOutboundGuard("biz-1", { id: "conn-1", source_of_truth: "pos" }, "42", {
+        stock_quantity: 9,
+      }),
+    ).resolves.toEqual({ ok: false, reason: "duplicate_stock_conflict" });
   });
 });

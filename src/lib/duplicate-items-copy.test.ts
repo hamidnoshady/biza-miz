@@ -40,6 +40,7 @@ describe("the duplicate review's words", () => {
   it("names every verdict, including the two legitimate ones", () => {
     expect(Object.keys(DUPLICATE_VERDICT_COPY).sort()).toEqual([
       "distinct_remote_records",
+      "historical_duplicate_candidate",
       "per_branch_copies",
       "race_orphan",
       "same_remote_mapped_twice",
@@ -53,7 +54,10 @@ describe("the duplicate review's words", () => {
   it("names every blocker a plan can raise", () => {
     expect(Object.keys(ORPHAN_BLOCKER_COPY).sort()).toEqual([
       "ambiguous_twin",
+      "different_name",
       "has_references",
+      "inventory_unchecked",
+      "nonzero_stock",
       "twin_inactive",
       "twin_not_woo_product",
     ]);

@@ -245,8 +245,155 @@ describe("one remote product is one local item, however many deliveries race", (
     expect(rows.map((r) => r.kind).sort()).toEqual(["variant_child", "variant_child", "variant_parent"]);
   });
 
-  it("makes one variation stub when an order carries the same unmapped variation twice", async () => {
-    await db.query(
+  it("refuses a blind create from a relinked connection and stages exactly one review", async () => {
+    // Issue #1592's mechanism: a re-linked store is a *new* connection row, so
+    // its mapping namespace is empty even though the August rows exist.
+    const original = (await connections.getConnection(biz.id, biz.connectionId))!;
+    await dbLib.withTenant(biz.id, () =>
+      sync.upsertProductFromWoo(original, biz.locationId, simpleProduct(800, "RECONNECT-1", 2)),
+    );
+    const webhookSecret = "relink-webhook-secret";
+    const second = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections
+         (business_id, location_id, name, base_url, link_mode, link_token_hash, link_token_ciphertext,
+          webhook_secret_ciphertext, currency_unit)
+       VALUES ($1, $2, 'Store (plugin)', 'https://www.beauty.example.com/', 'plugin', $3, 'x', $4, 'toman')
+       RETURNING id::text AS id`,
+      [biz.id, biz.locationId, `hash-${randomUUID()}`, encryptSecret(webhookSecret, Buffer.from(KEY, "hex"))],
+    );
+    const relinked = (await connections.getConnection(biz.id, second.rows[0].id))!;
+
+    await expect(
+      dbLib.withTenant(biz.id, () =>
+        sync.upsertProductFromWoo(relinked, biz.locationId, simpleProduct(800, "RECONNECT-1", 2)),
+      ),
+    ).rejects.toThrow("product_identity_review_required");
+
+    // One local row, owned by the original connection, and no mapping on the
+    // new one: the duplicate was refused rather than created.
+    expect(await itemsWithSku("RECONNECT-1")).toHaveLength(1);
+    const mapped = await db.query(
+      `SELECT 1 FROM integration_mappings WHERE connection_id = $1 AND remote_id = '800'`,
+      [second.rows[0].id],
+    );
+    expect(mapped.rowCount).toBe(0);
+
+    // The incoming record is staged in the shared reconciliation run, not lost.
+    const run = await db.query<{ id: string; status: string }>(
+      `SELECT id::text, status FROM import_reconciliation_runs WHERE connection_id = $1 AND domain = 'product'`,
+      [second.rows[0].id],
+    );
+    expect(run.rows).toHaveLength(1);
+    expect(["discovering", "staged", "in_review"]).toContain(run.rows[0].status);
+    const staged = await db.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM import_reconciliation_items WHERE run_id = $1`,
+      [run.rows[0].id],
+    );
+    expect(staged.rows[0].n).toBe(1);
+    const audit = await db.query(
+      `SELECT 1 FROM integration_audit_log WHERE connection_id = $1 AND action = 'product.identity_review_required'`,
+      [second.rows[0].id],
+    );
+    expect(audit.rowCount).toBeGreaterThan(0);
+
+    // A second delivery is refused too, and does not open a second run or add
+    // a second staged copy of the same record.
+    await expect(
+      dbLib.withTenant(biz.id, () =>
+        sync.upsertProductFromWoo(relinked, biz.locationId, simpleProduct(800, "RECONNECT-1", 2)),
+      ),
+    ).rejects.toThrow("product_identity_review_required");
+    expect(
+      (
+        await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM import_reconciliation_runs WHERE connection_id = $1`,
+          [second.rows[0].id],
+        )
+      ).rows[0].n,
+    ).toBe(1);
+    expect(
+      (
+        await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM import_reconciliation_items WHERE run_id = $1`,
+          [run.rows[0].id],
+        )
+      ).rows[0].n,
+    ).toBe(1);
+
+    // The plugin/webhook delivery of the same product takes the same gate: the
+    // event is parked `deferred` for the open run instead of creating a twin.
+    const body = JSON.stringify(simpleProduct(800, "RECONNECT-1", 2));
+    const response = await ingest.handleWooCommerceWebhook(
+      second.rows[0].id,
+      body,
+      new Headers({
+        "x-wc-webhook-signature": wooWebhookSignature(body, webhookSecret),
+        "x-wc-webhook-delivery-id": `relink-${randomUUID()}`,
+        "x-wc-webhook-topic": "product.created",
+      }),
+    );
+    expect(response.status).toBeLessThan(300);
+    const inbox = await db.query<{ status: string }>(
+      `SELECT status FROM integration_webhook_events WHERE connection_id = $1 AND remote_id = '800'`,
+      [second.rows[0].id],
+    );
+    expect(inbox.rows[0]?.status).toBe("deferred");
+    expect(await itemsWithSku("RECONNECT-1")).toHaveLength(1);
+  });
+
+  it("keeps the source's own shared SKU between two remote records", async () => {
+    // Two different store records with one code are a source-side problem the
+    // report calls distinct_remote_records. The new guard must not confuse
+    // that with a reimport and block the second saleable product.
+    const connection = (await connections.getConnection(biz.id, biz.connectionId))!;
+    await dbLib.withTenant(biz.id, async () => {
+      await sync.upsertProductFromWoo(connection, biz.locationId, simpleProduct(710, "SOURCE-DUP", 1));
+      await sync.upsertProductFromWoo(connection, biz.locationId, simpleProduct(711, "SOURCE-DUP", 1));
+    });
+    expect(await itemsWithSku("SOURCE-DUP")).toHaveLength(2);
+  });
+
+  it("creates one row when two different connections race the same SKU", async () => {
+    // Two writers, two connection ids, one physical product. The identity lock
+    // alone would not serialise them; the branch+SKU lock must, and the loser
+    // must refuse to create a twin. Neither connection is the suite's primary
+    // one, so the open review run does not gate this file's other tests.
+    const makeConnection = async (name: string, host: string): Promise<string> =>
+      (
+        await db.query<{ id: string }>(
+          `INSERT INTO integration_connections
+             (business_id, location_id, name, base_url,
+              consumer_key_ciphertext, consumer_secret_ciphertext, webhook_secret_ciphertext,
+              currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'toman', true, true, true, false, false)
+           RETURNING id::text AS id`,
+          [
+            biz.id,
+            biz.locationId,
+            name,
+            `https://${host}`,
+            encryptSecret(`ck-${host}`, Buffer.from(KEY, "hex")),
+            encryptSecret(`cs-${host}`, Buffer.from(KEY, "hex")),
+            encryptSecret(`ws-${host}`, Buffer.from(KEY, "hex")),
+          ],
+        )
+      ).rows[0].id;
+    const first = (await connections.getConnection(biz.id, await makeConnection("Race A", "race-a.example.com")))!;
+    const second = (await connections.getConnection(biz.id, await makeConnection("Race B", "race-b.example.com")))!;
+
+    const results = await dbLib.withTenant(biz.id, () =>
+      Promise.allSettled([
+        sync.upsertProductFromWoo(first, biz.locationId, simpleProduct(820, "CROSS-RACE", 1)),
+        sync.upsertProductFromWoo(second, biz.locationId, simpleProduct(820, "CROSS-RACE", 1)),
+      ]),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result) => result.status === "rejected") as PromiseRejectedResult | undefined;
+    expect(String(rejected?.reason)).toContain("product_identity_review_required");
+    expect(await itemsWithSku("CROSS-RACE")).toHaveLength(1);
+  });
+
+  it("makes one variation stub when an order carries the same unmapped variation twice", async () => {    await db.query(
       `INSERT INTO accounts (business_id, code, name, type) VALUES
          ($1, '1120', 'Card clearing', 'asset'), ($1, '2200', 'VAT', 'liability'),
          ($1, '1350', 'Inventory', 'asset'), ($1, '4570', 'Sales', 'revenue'),
@@ -327,9 +474,22 @@ describe("the duplicate-SKU report explains each group without writing anything"
     );
     await dbLib.withTenant(biz.id, async () => {
       await sync.upsertProductFromWoo(connection, biz.locationId, simpleProduct(900, "RELINK", 1));
-      const relinked = (await connections.getConnection(biz.id, second.rows[0].id))!;
-      await sync.upsertProductFromWoo(relinked, biz.locationId, simpleProduct(900, "RELINK", 1));
     });
+    // Pre-#1592, the re-linked connection created a second local row and mapped
+    // its own copy. The current sync refuses that (proved in the race suite
+    // above), so reproduce the stored shape directly for the report to explain.
+    const relinkCopy = await db.query<{ id: string }>(
+      `WITH i AS (INSERT INTO items (location_id, name, sku, kind)
+                  VALUES ($1, 'اسپری دوفاز ضد موخوره', 'RELINK', 'simple') RETURNING id),
+            s AS (INSERT INTO item_stock (item_id, quantity) SELECT id, 0 FROM i)
+       SELECT id::text AS id FROM i`,
+      [biz.locationId],
+    );
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'product', '900', $3)`,
+      [biz.id, second.rows[0].id, relinkCopy.rows[0].id],
+    );
   });
 
   it("classifies every kind of group and carries the provenance an owner needs", async () => {
@@ -343,6 +503,7 @@ describe("the duplicate-SKU report explains each group without writing anything"
       lip: "variant_family",
       "manual-1": "unmapped_duplicate",
       relink: "same_remote_mapped_twice",
+      "source-dup": "distinct_remote_records",
       zza05023: "race_orphan",
       zza06379: "distinct_remote_records",
     });

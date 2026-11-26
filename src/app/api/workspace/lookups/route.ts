@@ -5,6 +5,11 @@ import { AGENCY_INDUSTRY } from "@/lib/agency";
 import { listAecParticipantRoleOptions, loadAecProjectCockpit } from "@/lib/aec-service";
 import { getBusinessIndustry } from "@/lib/industry-guard";
 import { listWorkspaceProjects } from "@/lib/workspace";
+import {
+  WORKSPACE_PARTY_INITIAL_PAGE_SIZE,
+  emptyWorkspacePartyPage,
+  searchWorkspaceParties,
+} from "@/lib/workspace-lookups";
 import { PERMISSIONS, handleWorkspaceError, workspaceOwner } from "../guard";
 
 /**
@@ -57,6 +62,15 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     // because naming the counterparty is part of recording the contract.
     const partyPickers = pickers || owner.access?.canManageContracts === true;
     const none = { rows: [] as never[] };
+    // Issue #907 F10 — the embedded party list is the first page of the same
+    // query the paginated picker search uses, and the response now carries the
+    // true total beside it, so a caller can tell a page from the whole list.
+    // `/lookups/parties` is how a picker reaches the rest.
+    const partiesPage = partyPickers
+      ? searchWorkspaceParties(owner.businessId, {
+          pageSize: WORKSPACE_PARTY_INITIAL_PAGE_SIZE,
+        })
+      : Promise.resolve(emptyWorkspacePartyPage(WORKSPACE_PARTY_INITIAL_PAGE_SIZE));
     const [members, parties, projects, media, participantRoles] = await Promise.all([
       pickers
         ? query<{ id: string; full_name: string; role: string }>(
@@ -66,15 +80,7 @@ export const GET = withTenantScope(async (request: NextRequest) => {
             [owner.businessId],
           )
         : none,
-      partyPickers
-        ? query<{ id: string; name: string }>(
-            `SELECT id, name FROM parties
-              WHERE business_id = $1 AND is_active AND merged_into_id IS NULL
-              ORDER BY name
-              LIMIT 500`,
-            [owner.businessId],
-          )
-        : none,
+      partiesPage,
       listWorkspaceProjects(owner, { status: "all", limit: 200 }),
       pickers
         ? query<{ id: string; file_name: string }>(
@@ -99,7 +105,9 @@ export const GET = withTenantScope(async (request: NextRequest) => {
     const isAgency = (await getBusinessIndustry(owner.businessId)) === AGENCY_INDUSTRY;
     return NextResponse.json({
       members: members.rows.map((r) => ({ id: r.id, fullName: r.full_name, role: r.role })),
-      parties: parties.rows,
+      parties: parties.parties,
+      partiesTotal: parties.total,
+      partiesHasMore: parties.hasMore,
       projects: projects.map((p) => ({ id: p.id, name: p.name })),
       media: media.rows.map((r) => ({ id: r.id, fileName: r.file_name })),
       // Omitted entirely outside AEC rather than sent empty, so a picker can

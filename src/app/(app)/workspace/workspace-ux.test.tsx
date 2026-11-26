@@ -15,7 +15,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PickerField, FormActions, WorkspaceFormPanel } from "./workspace-ui";
 import { TeamsSection } from "./teams-section";
-import { EMPTY_LOOKUPS } from "./use-workspace-lookups";
+import { EMPTY_LOOKUPS, partyPickerOptions } from "./use-workspace-lookups";
 import { useWorkspaceUrlFlag, useWorkspaceUrlState } from "./use-workspace-url-state";
 
 const mocks = vi.hoisted(() => ({ params: new URLSearchParams() }));
@@ -102,6 +102,95 @@ describe("PickerField — searchable large relations (#907 F10)", () => {
     );
     await user.type(screen.getByLabelText(/جست‌وجو… طرف قرارداد/), "دلتا");
     expect(screen.getByText("موردی با این نام پیدا نشد.")).toBeTruthy();
+  });
+});
+
+describe("PickerField — server-searched parties (#907 F10)", () => {
+  it("sends the term to the server, says it is working and keeps the selected row", async () => {
+    const onSearch = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <PickerField
+        label="طرف قرارداد"
+        value="selected"
+        onChange={() => {}}
+        options={[
+          { id: "selected", label: "طرف حساب انتخاب‌شده" },
+          { id: "found", label: "شرکت آلفا" },
+        ]}
+        searchable
+        searchPlaceholder="جست‌وجو…"
+        onSearch={onSearch}
+        searching
+        searchNote="۲ مورد از ۱۲۰ مورد نمایش داده شد؛ نام را دقیق‌تر کنید."
+      />,
+    );
+
+    // Loading is stated, and the selection the server resolved by id survives
+    // the page it did not match.
+    expect(screen.getByLabelText("در حال جست‌وجو…")).toBeTruthy();
+    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    expect(Array.from(select.querySelectorAll("option")).map((option) => option.value)).toEqual([
+      "",
+      "selected",
+      "found",
+    ]);
+
+    await user.type(screen.getByLabelText(/جست‌وجو… طرف قرارداد/), "آلف");
+    expect(onSearch.mock.calls.at(-1)?.[0]).toBe("آلف");
+  });
+
+  it("keeps the current selection in front of the server page that omits it", () => {
+    const options = partyPickerOptions(
+      [
+        { id: "1", name: "آلفا" },
+        { id: "2", name: "بتا" },
+      ],
+      {
+        parties: [{ id: "3", name: "گاما" }],
+        selected: [{ id: "2", name: "بتا" }],
+        total: 40,
+        hasMore: true,
+        loading: false,
+        active: true,
+      },
+      "2",
+    );
+    expect(options).toEqual([
+      { id: "2", label: "بتا" },
+      { id: "3", label: "گاما" },
+    ]);
+  });
+
+  it("shows the page the lookups carried until a term is long enough to search", () => {
+    expect(
+      partyPickerOptions(
+        [{ id: "1", name: "آلفا" }],
+        { parties: [], selected: [], total: 0, hasMore: false, loading: false, active: false },
+        "",
+      ),
+    ).toEqual([{ id: "1", label: "آلفا" }]);
+  });
+
+  it("keeps naming a party chosen from search after the search box is cleared", () => {
+    // Inactive again, but the id remembered from the search is still resolved.
+    expect(
+      partyPickerOptions(
+        [{ id: "1", name: "آلفا" }],
+        {
+          parties: [],
+          selected: [{ id: "99", name: "طرف حساب دوردست" }],
+          total: 0,
+          hasMore: false,
+          loading: false,
+          active: false,
+        },
+        "99",
+      ),
+    ).toEqual([
+      { id: "99", label: "طرف حساب دوردست" },
+      { id: "1", label: "آلفا" },
+    ]);
   });
 });
 

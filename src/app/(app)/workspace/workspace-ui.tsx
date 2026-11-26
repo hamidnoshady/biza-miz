@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "@/app/dashboard/page-chrome";
 import { Field, inputClass, errorMessageOrRaw, SecondaryButton } from "@/app/dashboard/ui";
+import { Skeleton } from "@/components/ui/skeleton";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
 import {
   Sheet,
@@ -345,6 +346,13 @@ export function SelectField<T extends string>({
  * rather than replacing it with a hand-rolled listbox. The current selection
  * always stays in the list, even when it does not match the filter, so opening
  * a form never silently clears a field.
+ *
+ * `onSearch` (issue #907 F10) makes that filter a server search instead of a
+ * filter over the page already loaded: the caller keeps the term, asks the
+ * authorised party search for its matches, and hands them back as `options`.
+ * The select itself does not change — a native control keeps its RTL layout,
+ * its keyboard behaviour and its announcement — and `searching`/`searchNote`
+ * let the picker say it is working and that more rows exist.
  */
 export function PickerField({
   label,
@@ -355,6 +363,9 @@ export function PickerField({
   hint,
   searchable,
   searchPlaceholder = "جست‌وجو…",
+  onSearch,
+  searching,
+  searchNote,
 }: {
   label: string;
   value: string;
@@ -364,15 +375,24 @@ export function PickerField({
   hint?: string;
   searchable?: boolean;
   searchPlaceholder?: string;
+  /** Search on the server; `options` are already the matches for the term. */
+  onSearch?: (term: string) => void;
+  searching?: boolean;
+  /** A short line under the select — e.g. «only the first 25 of 120». */
+  searchNote?: string;
 }) {
   const [filter, setFilter] = useState("");
+  const remote = typeof onSearch === "function";
   const visible = useMemo(() => {
     const needle = filter.trim().toLowerCase();
-    if (!searchable || !needle) return options;
+    if (!searchable) return options;
+    // A server search has already matched the term; filtering again here would
+    // drop a selected row the server deliberately resolved by id.
+    if (remote || !needle) return options;
     return options.filter(
       (option) => option.id === value || option.label.toLowerCase().includes(needle),
     );
-  }, [filter, options, searchable, value]);
+  }, [filter, options, remote, searchable, value]);
 
   return (
     <Field label={label} hint={hint}>
@@ -382,7 +402,10 @@ export function PickerField({
             type="search"
             className={inputClass}
             value={filter}
-            onChange={(event) => setFilter(event.target.value)}
+            onChange={(event) => {
+              setFilter(event.target.value);
+              onSearch?.(event.target.value);
+            }}
             placeholder={searchPlaceholder}
             aria-label={`${searchPlaceholder} ${label}`}
           />
@@ -399,7 +422,13 @@ export function PickerField({
             </option>
           ))}
         </select>
-        {searchable && visible.length === 0 ? (
+        {searching ? (
+          <Skeleton aria-label="در حال جست‌وجو…" className="h-3 w-28" />
+        ) : null}
+        {!searching && searchNote ? (
+          <span className="text-xs text-muted-foreground">{searchNote}</span>
+        ) : null}
+        {searchable && !searching && visible.length === 0 ? (
           <span className="text-xs text-muted-foreground">موردی با این نام پیدا نشد.</span>
         ) : null}
       </div>
