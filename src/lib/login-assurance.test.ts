@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   decideOtpAssurance,
   decidePasswordAssurance,
+  decideSensitiveStepUp,
+  DISTINCT_FACTOR_STEP_UP_METHODS,
+  otpOnlyAssuranceAfterStepUp,
+  stepUpProvesDistinctFactor,
 } from "./login-assurance";
 
 /**
@@ -184,5 +188,65 @@ describe("password login assurance (unchanged by #1386)", () => {
         requirement: "not_required",
       }),
     ).toBe(false);
+  });
+});
+
+/**
+ * #1386 Scenario 8 — what an OTP-only session may change.
+ *
+ * Routine OTP sign-in is complete on the SMS proof (above). These pin the
+ * other half of the owner-approved policy: that proof can never *by itself*
+ * strip, replace or add a credential on an account holding a separately
+ * enrolled authenticator.
+ */
+describe("sensitive-action step-up after an OTP-only sign-in", () => {
+  it("demands the distinct factor when the account holds a TOTP", () => {
+    expect(decideSensitiveStepUp({ otpOnlyAssurance: true, distinctFactors: ["totp"] })).toEqual({
+      distinctFactorRequired: true,
+      allowedMethods: ["totp", "recovery"],
+    });
+  });
+
+  it("leaves a phone-first account with nothing stronger to its SMS proof", () => {
+    // Refusing here would lock the member out of enrolling the very factor
+    // that would protect them.
+    expect(decideSensitiveStepUp({ otpOnlyAssurance: true, distinctFactors: [] })).toEqual({
+      distinctFactorRequired: false,
+      allowedMethods: [],
+    });
+  });
+
+  it("never bites a session that did not come from an OTP-only proof", () => {
+    for (const claim of [undefined, false]) {
+      expect(
+        decideSensitiveStepUp({ otpOnlyAssurance: claim, distinctFactors: ["totp"] })
+          .distinctFactorRequired,
+      ).toBe(false);
+    }
+  });
+
+  it("does not count SMS, password or PIN as the distinct factor", () => {
+    expect(DISTINCT_FACTOR_STEP_UP_METHODS).toEqual(["totp", "recovery"]);
+    for (const method of ["sms_otp", "password", "pin", "webauthn"]) {
+      expect(stepUpProvesDistinctFactor(method)).toBe(false);
+    }
+    expect(stepUpProvesDistinctFactor("totp")).toBe(true);
+    expect(stepUpProvesDistinctFactor("recovery")).toBe(true);
+  });
+
+  it("records what each step-up proved on the session", () => {
+    // Distinct factor upgrades an OTP-only session.
+    expect(otpOnlyAssuranceAfterStepUp("totp", true)).toBe(false);
+    expect(otpOnlyAssuranceAfterStepUp("recovery", true)).toBe(false);
+    // An SMS step-up is SMS-only, even on a session that started stronger:
+    // two SMS codes are one factor, not two.
+    expect(otpOnlyAssuranceAfterStepUp("sms_otp", undefined)).toBe(true);
+    expect(otpOnlyAssuranceAfterStepUp("sms_otp", false)).toBe(true);
+    // Password / PIN refresh the clock but cannot upgrade an OTP-only session…
+    expect(otpOnlyAssuranceAfterStepUp("password", true)).toBe(true);
+    expect(otpOnlyAssuranceAfterStepUp("pin", true)).toBe(true);
+    // …and do not downgrade a session that never was one.
+    expect(otpOnlyAssuranceAfterStepUp("password", undefined)).toBe(false);
+    expect(otpOnlyAssuranceAfterStepUp("pin", false)).toBe(false);
   });
 });

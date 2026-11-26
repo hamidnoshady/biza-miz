@@ -134,13 +134,15 @@ describe("Phase 38 Wave 2 — Payload adapter, the pure half", () => {
 });
 
 describe("Phase 38 Wave 2 — Payload adapter against recorded fixtures (no live service)", () => {
-  it("tests the connection and reports the site name; forwards Host and the bearer key", async () => {
+  it("tests the connection and reports the site name; carries the bearer key as the tenant", async () => {
     const { fetchImpl, seen } = fakeFetch({
       "/api/site": { body: { id: "s1", name: "کافه نمونه", domain: "cafe.example.test", media: { origin: "https://cdn.example.test" } } },
     });
     const adapter = new PayloadWebsiteAdapter({ config, currency: "IRT", fetchImpl });
     expect(await adapter.testConnection()).toEqual({ ok: true, siteName: "کافه نمونه" });
-    expect(seen[0].headers.get("host")).toBe("cafe.example.test");
+    // No `Host` override: `fetch` drops it and the CMS's proxy routes on it — the
+    // site key is the tenant (see `src/lib/cms/client.ts`'s header).
+    expect(seen[0].headers.get("host")).toBeNull();
     expect(seen[0].headers.get("authorization")).toBe("Bearer eshobe_live_x");
   });
 

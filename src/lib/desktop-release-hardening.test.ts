@@ -25,6 +25,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -398,6 +399,36 @@ describe("packaged acceptance harness", () => {
       ].join("\n"),
     );
     expect(harness.readinessFromLog(profile)).toMatchObject({ appPort: 3077, instanceId: "inst-2" });
+  });
+
+  it("finds the running business's own config and log under businesses/<id>", () => {
+    const profile = temporaryDir();
+    // #1571: each saved business keeps its own Configuration/ and Logs/ root.
+    const businessRoot = path.join(profile, "businesses", "b-1");
+    write(
+      path.join(businessRoot, "Configuration", "config.json"),
+      JSON.stringify({ appPort: 3210, instanceId: "biz-1" }),
+    );
+    write(
+      path.join(businessRoot, "Logs", "desktop.log"),
+      [
+        'INFO server: > Ready on http://127.0.0.1:3210 (WebSocket sync on /ws)',
+        'INFO Desktop backend is ready {"appUrl":"http://127.0.0.1:3210","instanceId":"biz-1"}',
+      ].join("\n"),
+    );
+    expect(harness.readDesktopConfig(profile)).toMatchObject({ appPort: 3210 });
+    expect(harness.readinessFromLog(profile)).toMatchObject({ appPort: 3210, instanceId: "biz-1" });
+  });
+
+  it("prefers the business log this launch wrote over an older saved business's", () => {
+    const profile = temporaryDir();
+    const staleRoot = path.join(profile, "businesses", "a-stale");
+    const liveRoot = path.join(profile, "businesses", "b-live");
+    const staleLog = path.join(staleRoot, "Logs", "desktop.log");
+    write(staleLog, '> Ready on http://127.0.0.1:3100 (WebSocket sync on /ws)');
+    utimesSync(staleLog, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    write(path.join(liveRoot, "Logs", "desktop.log"), '> Ready on http://127.0.0.1:3200 (WebSocket sync on /ws)');
+    expect(harness.readinessFromLog(profile)).toMatchObject({ appPort: 3200 });
   });
 
   it("treats a pre-migration flat config as an initialised install", () => {

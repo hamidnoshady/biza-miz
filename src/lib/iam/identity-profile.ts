@@ -163,29 +163,36 @@ export async function readNationalId(input: {
   const self = input.actorPlatformUserId === input.platformUserId;
   if (!self && !input.actorPlatformAdminId) return { ok: false, error: "forbidden" };
 
-  const { rows } = await withoutTenantScope("identity", () =>
-    query<{ national_id_ciphertext: string | null }>(
+  return withoutTenantScopeTransaction("identity", async () => {
+    const { rows } = await query<{ national_id_ciphertext: string | null }>(
       `SELECT national_id_ciphertext FROM platform_users WHERE id = $1`,
       [input.platformUserId],
-    ),
-  );
-  const row = rows[0];
-  if (!row) return { ok: false, error: "identity_missing" };
-  if (!row.national_id_ciphertext) return { ok: true, nationalId: null };
+    );
+    const row = rows[0];
+    if (!row) return { ok: false as const, error: "identity_missing" as const };
+    if (!row.national_id_ciphertext) return { ok: true as const, nationalId: null };
 
-  const key = getMasterKey();
-  if (!key) return { ok: false, error: "encryption_unavailable" };
+    const key = getMasterKey();
+    if (!key) return { ok: false as const, error: "encryption_unavailable" as const };
 
-  const nationalId = decryptSecret(row.national_id_ciphertext, key);
-  await recordIdentityEvent({
-    platformUserId: input.platformUserId,
-    action: "national_id_read",
-    /** NULL when a platform admin read it; the admin id below names them. */
-    actorPlatformUserId: self ? input.platformUserId : null,
-    actorPlatformAdminId: self ? null : (input.actorPlatformAdminId ?? null),
-    actorBusinessId: input.actorBusinessId ?? null,
+    let nationalId: string;
+    try {
+      nationalId = decryptSecret(row.national_id_ciphertext, key);
+    } catch {
+      // Fail closed without echoing ciphertext, IV, tag or key material.
+      return { ok: false as const, error: "encryption_unavailable" as const };
+    }
+
+    await recordIdentityEvent({
+      platformUserId: input.platformUserId,
+      action: "national_id_read",
+      /** NULL when a platform admin read it; the admin id below names them. */
+      actorPlatformUserId: self ? input.platformUserId : null,
+      actorPlatformAdminId: self ? null : (input.actorPlatformAdminId ?? null),
+      actorBusinessId: input.actorBusinessId ?? null,
+    });
+    return { ok: true as const, nationalId };
   });
-  return { ok: true, nationalId };
 }
 
 /**
@@ -205,7 +212,7 @@ export async function hasNationalId(platformUserId: string): Promise<boolean> {
   return rows[0]?.identified === true;
 }
 
-function nationalIdBlindIndex(digits: string, key: Buffer): string {
+export function nationalIdBlindIndex(digits: string, key: Buffer): string {
   return createHmac("sha256", key).update(`platform_users.national_id:${digits}`).digest("hex");
 }
 

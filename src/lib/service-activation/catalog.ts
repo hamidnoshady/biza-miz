@@ -457,11 +457,17 @@ export interface ActivationQuote {
   balanceAfterSetupRial: number;
   additionalCharges: readonly string[];
   /**
+   * True when an active complimentary grant waives enabled-time rental for the
+   * interval being quoted (GitHub #1579). The first hour then needs no cover,
+   * and the 24h/30d estimates are zero because the covered period is free.
+   */
+  rentalWaived?: boolean;
+  /**
    * Why the setup fee is not the published amount, when it is not:
    * a `billing_plan_benefits` inclusion (ESH-193) or a published zero tariff.
    * Null means "the tariff was charged as published".
    */
-  setupWaivedReason: "plan_included" | "published_free" | null;
+  setupWaivedReason: "plan_included" | "published_free" | "complimentary_grant" | null;
 }
 
 /**
@@ -480,7 +486,12 @@ export function quoteServiceActivation(input: {
   walletBalanceRial: number;
   nowIso?: string;
   setupRialOverride?: number | null;
-  setupWaivedReason?: "plan_included" | "published_free" | null;
+  setupWaivedReason?: "plan_included" | "published_free" | "complimentary_grant" | null;
+  /**
+   * A valid complimentary grant waives enabled-time rental for this quote, so
+   * the first interval needs no wallet cover and the estimates are zero.
+   */
+  rentalWaived?: boolean;
 }): ActivationQuote {
   const balance = Number.isFinite(input.walletBalanceRial)
     ? Math.max(0, Math.floor(input.walletBalanceRial))
@@ -518,7 +529,8 @@ export function quoteServiceActivation(input: {
         ? "published_free"
         : null;
   const hourly = nonNegativeInt(tariff.hourlyRateRial);
-  const firstHour = firstHourRial(tariff);
+  const rentalWaived = input.rentalWaived === true;
+  const firstHour = rentalWaived ? 0 : firstHourRial(tariff);
   const reserve = setup + firstHour;
   return {
     identity: input.identity,
@@ -529,11 +541,14 @@ export function quoteServiceActivation(input: {
     hourlyRial: hourly,
     firstHourRial: firstHour,
     reserveRial: reserve,
-    estimated24hRial: enabledRialForSeconds(24 * SECONDS_PER_HOUR, hourly),
-    estimated30dRial: enabledRialForSeconds(30 * 24 * SECONDS_PER_HOUR, hourly),
+    estimated24hRial: rentalWaived ? 0 : enabledRialForSeconds(24 * SECONDS_PER_HOUR, hourly),
+    estimated30dRial: rentalWaived
+      ? 0
+      : enabledRialForSeconds(30 * 24 * SECONDS_PER_HOUR, hourly),
     walletBalanceRial: balance,
     balanceAfterSetupRial: Math.max(0, balance - setup),
     additionalCharges: SERVICE_ADDITIONAL_CHARGES[input.identity.kind],
+    rentalWaived,
     setupWaivedReason: waived,
   };
 }

@@ -45,6 +45,8 @@ import {
   type ServiceIdentity,
 } from "../../service-activation/catalog";
 import { postWalletEntryTx, WalletInsufficientFundsError } from "../../wallet-service";
+import { readActiveComplimentaryGrant } from "../../complimentary-grant-service";
+import type { ComplimentaryGrant } from "../../complimentary-grants";
 
 /** A query executor: the pool, or a transaction client whose snapshot must be used. */
 export interface ResolverExecutor {
@@ -243,6 +245,8 @@ export interface ServiceChargeContext {
   setupBenefit: PlanBenefitRow | null;
   rentalBenefit: PlanBenefitRow | null;
   activeTerm: PrepaidServiceTerm | null;
+  /** GitHub #1579: the active complimentary grant, if any, for this identity. */
+  complimentaryGrant: ComplimentaryGrant | null;
   activationState: string | null;
   setupPaid: boolean;
 }
@@ -295,11 +299,18 @@ export async function readServiceChargeContext(input: {
     const planKey = biz.rows[0]?.plan ?? "free";
     const benefits = await readPlanBenefits(planKey, policy.policyVersion);
     const tariff = await serviceTariffAt(identity, at);
-    const activeTerm = await readActiveServiceTerm({
-      businessId: input.businessId,
-      identity,
-      at,
-    });
+    const [activeTerm, complimentaryGrant] = await Promise.all([
+      readActiveServiceTerm({
+        businessId: input.businessId,
+        identity,
+        at,
+      }),
+      readActiveComplimentaryGrant({
+        businessId: input.businessId,
+        identity,
+        at,
+      }),
+    ]);
     return {
       businessId: input.businessId,
       planKey,
@@ -309,6 +320,7 @@ export async function readServiceChargeContext(input: {
       setupBenefit: benefits.get(benefitId(setupBenefitIdentity(identity))) ?? null,
       rentalBenefit: benefits.get(benefitId(rentalBenefitIdentity(identity))) ?? null,
       activeTerm,
+      complimentaryGrant,
       activationState: activation.rows[0]?.state ?? null,
       setupPaid: Boolean(activation.rows[0]?.setup_paid),
     };
@@ -416,15 +428,20 @@ export async function readRentalSettlementContext(
   rentalIncluded: boolean;
   policyVersion: number;
   planKey: string;
+  /** The governing grant's expiry, so a settlement cannot bill past it. */
+  grantExpiresAt: string | null;
 }> {
   const { rows } = await client.query<{
     plan: string;
     term_id: string | null;
     period_start: Date | string | null;
     period_end: Date | string | null;
+    grant_start: Date | string | null;
+    grant_end: Date | string | null;
   }>(
     `SELECT b.plan,
-            t.id AS term_id, t.period_start, t.period_end
+            t.id AS term_id, t.period_start, t.period_end,
+            g.starts_at AS grant_start, g.expires_at AS grant_end
        FROM business_service_activations a
        JOIN businesses b ON b.id = a.business_id
        LEFT JOIN LATERAL (
@@ -437,11 +454,30 @@ export async function readRentalSettlementContext(
           ORDER BY period_start DESC
           LIMIT 1
        ) t ON true
+       LEFT JOIN LATERAL (
+         SELECT starts_at, expires_at
+           FROM business_complimentary_grants
+          WHERE activation_id = a.id
+            AND status = 'active'
+            AND waive_rental
+            AND starts_at < $4::timestamptz
+            AND (expires_at IS NULL OR expires_at > $3::timestamptz)
+          ORDER BY starts_at DESC
+          LIMIT 1
+       ) g ON true
       WHERE a.id = $1 AND a.business_id = $2`,
     [input.activationId, input.businessId, input.from, input.to],
   );
   const row = rows[0];
-  if (!row) return { coverage: null, rentalIncluded: false, policyVersion: 0, planKey: "free" };
+  if (!row) {
+    return {
+      coverage: null,
+      rentalIncluded: false,
+      policyVersion: 0,
+      planKey: "free",
+      grantExpiresAt: null,
+    };
+  }
 
   const policy = await readCommercialPolicy(input.businessId, clientExec(client));
   const benefits = await readPlanBenefits(row.plan, policy.policyVersion, clientExec(client));
@@ -460,18 +496,31 @@ export async function readRentalSettlementContext(
     }),
   );
 
+  const toIso = (value: Date | string): string =>
+    value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+  // A complimentary grant outranks a prepaid term for the instant asked
+  // about: both mean "this second is covered", and the grant's exact expiry
+  // must be the boundary the settlement sees.
+  const grantCoverage =
+    row.grant_start != null
+      ? {
+          start: toIso(row.grant_start),
+          end: row.grant_end != null
+            ? toIso(row.grant_end)
+            : new Date("9999-12-31T23:59:59.999Z").toISOString(),
+        }
+      : null;
   return {
     coverage:
-      row.term_id && row.period_start && row.period_end
-        ? {
-            start: row.period_start instanceof Date ? row.period_start.toISOString() : new Date(row.period_start).toISOString(),
-            end: row.period_end instanceof Date ? row.period_end.toISOString() : new Date(row.period_end).toISOString(),
-          }
-        : null,
+      grantCoverage ??
+      (row.term_id && row.period_start && row.period_end
+        ? { start: toIso(row.period_start), end: toIso(row.period_end) }
+        : null),
     // An inclusion is charged only when an explicit policy permits the tariff.
     rentalIncluded: benefit?.inclusion === "included" && benefit.chargesTariffWhenIncluded !== true,
     policyVersion: policy.policyVersion,
     planKey: row.plan,
+    grantExpiresAt: row.grant_end != null ? toIso(row.grant_end) : null,
   };
 }
 
@@ -504,6 +553,9 @@ export function setupChargeFromContext(context: ServiceChargeContext, at?: strin
         quantity: 1,
         price,
         planBenefit: context.setupBenefit,
+        // A grant relaxes the paid setup for its activation; it can never be
+        // inferred from a missing tariff (that still fails closed above).
+        waivedByGrant: context.complimentaryGrant?.waiveSetup === true,
         at: at ?? new Date().toISOString(),
         policyVersion: context.policyVersion,
       },
@@ -536,15 +588,35 @@ export async function resolveServiceRentalCharge(input: {
               }
             : null,
         planBenefit: context.rentalBenefit,
-        coverage: context.activeTerm
-          ? { start: context.activeTerm.periodStart, end: context.activeTerm.periodEnd }
-          : null,
+        coverage: rentalCoverage(context),
         at,
         policyVersion: context.policyVersion,
       },
     ],
   });
   return { context, charge };
+}
+
+/**
+ * The coverage window the resolver applies to enabled-time rental.
+ *
+ * A complimentary grant wins over a purchased prepaid term for the instant it
+ * is asked about: both mean "this second is already covered", and choosing the
+ * grant first keeps a free grant's expiry boundary exact even when the
+ * business also bought a term. An indefinite grant has no end, so the window
+ * is open-ended and every covered second is waived.
+ */
+export function rentalCoverage(context: ServiceChargeContext): { start: string; end: string } | null {
+  const grant = context.complimentaryGrant;
+  if (grant && grant.waiveRental) {
+    return {
+      start: grant.startsAt,
+      end: grant.expiresAt ?? new Date("9999-12-31T23:59:59.999Z").toISOString(),
+    };
+  }
+  return context.activeTerm
+    ? { start: context.activeTerm.periodStart, end: context.activeTerm.periodEnd }
+    : null;
 }
 
 // ---------------------------------------------------------------------------

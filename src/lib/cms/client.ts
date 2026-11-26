@@ -10,13 +10,21 @@ import { connectionFetch, connectionUrl } from "../integrations/outbound-http";
  *
  * ## How the tenant is chosen (the hard rule)
  *
- * The CMS resolves the tenant from the request's `Host` header or from a
- * per-site API key (`Authorization: Bearer eshobe_live_…`) — never from a
- * query filter (WAVE-9 §1/§6 of the eshobe-cms repo). So a `CmsConfig`
- * always carries the customer site's domain; we forward it as the `Host`
- * header even when the API is reached through the CMS's control-plane
- * origin. A caller that could pick `?where[site][equals]=…` and change the
- * tenant would be able to read another customer's content.
+ * The CMS resolves the tenant from the per-site API key
+ * (`Authorization: Bearer eshobe_live_…`) — never from a query filter
+ * (WAVE-9 §1/§6 of the eshobe-cms repo). A `CmsConfig` still carries the
+ * customer site's domain, but only to *check* it: `testConnection()` compares
+ * it with the descriptor the CMS answers for that key. A caller that could
+ * pick `?where[site][equals]=…` and change the tenant would be able to read
+ * another customer's content, so the where-filter rule stands.
+ *
+ * We deliberately do **not** forward the domain as a `Host` header.
+ * `fetch` — undici, the implementation in Node and in Next — silently drops a
+ * caller-supplied `Host` and derives it from the URL, so the header was never
+ * actually sent; and where a proxy in front of the CMS routes by `Host`, a
+ * request to the control plane wearing a customer's domain would land on that
+ * customer's theme app instead of the CMS. The key is the tenant and it
+ * survives every proxy hop.
  *
  * ## Auth model
  *
@@ -45,7 +53,7 @@ import type {
 export interface CmsConfig {
   /** CMS control-plane origin, e.g. `https://cms.eshobe.com`. No trailing slash. */
   baseUrl: string;
-  /** The customer site's domain — forwarded as `Host`; this IS the tenant. */
+  /** The customer site's domain — used to check the descriptor the key answers for; never sent as `Host` (see the header above). */
   siteDomain?: string;
   /** Per-site (`eshobe_live_…`) or platform API key. */
   apiKey?: string;
@@ -119,13 +127,12 @@ export function cmsUrl(config: Pick<CmsConfig, "baseUrl">, options: CmsRequestOp
 }
 
 /**
- * Headers for one CMS call. `Host` carries the tenant — it is a normal HTTP
- * header server-to-server, and the CMS's access layer consults it exactly
- * once per request (memoised on `req.context`).
+ * Headers for one CMS call. The site key is the tenant (see this file's header):
+ * no `Host` is set — `fetch` drops it, and a proxy in front of the CMS routes on
+ * it, so sending it would only be able to send the request somewhere else.
  */
 export function cmsHeaders(config: CmsConfig, options: CmsRequestOptions): Headers {
   const headers = new Headers(options.headers);
-  if (config.siteDomain) headers.set("Host", config.siteDomain);
   if (config.apiKey) headers.set("Authorization", `Bearer ${config.apiKey}`);
   if (options.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
@@ -682,9 +689,10 @@ export function cmsMediaPreviewPath(doc: Pick<CmsMedia, "url" | "thumbnailURL" |
 }
 
 /**
- * One media preview's bytes, for the dashboard's media grid. Same `Host` and key as every
- * other call, so the CMS serves it under the site's own access rules. Refuses anything
- * that is not a raster image or is over 10 MB rather than relaying it.
+ * One media preview's bytes, for the dashboard's media grid. Same key — and so the
+ * same tenant — as every other call, so the CMS serves it under the site's own access
+ * rules. Refuses anything that is not a raster image or is over 10 MB rather than
+ * relaying it.
  */
 export async function fetchMediaPreview(
   config: CmsConfig,

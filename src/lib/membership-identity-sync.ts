@@ -7,7 +7,7 @@
 /** What to copy from the identity down onto every membership row. */
 export interface MembershipIdentitySync {
   /** New login email for every membership of the identity. */
-  email?: string;
+  email?: string | null;
   /** null clears the phone; a changed number always loses verification. */
   phoneE164?: string | null;
 }

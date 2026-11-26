@@ -336,4 +336,108 @@ describe("national ID", () => {
       await profile.readNationalId({ platformUserId: identityId, actorPlatformUserId: identityId }),
     ).toEqual({ ok: true, nationalId: null });
   });
+
+  it("enforces FORCE RLS and append-only audit on 0303 identity tables, while allowing tenant-scoped readNationalId and FK cascades", async () => {
+    const identityId = await insertIdentity({
+      email: `rls-${randomUUID()}@example.com`,
+      passwordHash: "hash",
+    });
+    const { rows: bizRows } = await db.withoutTenantScope("platform", () =>
+      db.query<{ id: string }>(
+        `INSERT INTO businesses (name, slug) VALUES ('کافه امنیت', $1) RETURNING id`,
+        [`sec-${randomUUID().slice(0, 8)}`],
+      ),
+    );
+    const businessId = bizRows[0].id;
+
+    expect(
+      await profile.setNationalId({
+        platformUserId: identityId,
+        nationalId: "0499370899",
+        actorPlatformUserId: identityId,
+        actorBusinessId: businessId,
+      }),
+    ).toEqual({ ok: true });
+
+    // Called from inside a tenant-scoped request, readNationalId still succeeds
+    // and writes its audit row inside withoutTenantScopeTransaction("identity").
+    await expect(
+      db.withTenant(businessId, () =>
+        profile.readNationalId({
+          platformUserId: identityId,
+          actorPlatformUserId: identityId,
+          actorBusinessId: businessId,
+        }),
+      ),
+    ).resolves.toEqual({ ok: true, nationalId: "0499370899" });
+
+    // Verify RLS flags on both 0303 tables in pg_class.
+    const { rows: rlsFlags } = await db.withoutTenantScope("platform", () =>
+      db.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+        `SELECT relname, relrowsecurity, relforcerowsecurity
+           FROM pg_class
+          WHERE relname IN ('platform_email_verifications', 'platform_identity_events')
+          ORDER BY relname`,
+      ),
+    );
+    expect(rlsFlags).toEqual([
+      {
+        relname: "platform_email_verifications",
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+      },
+      {
+        relname: "platform_identity_events",
+        relrowsecurity: true,
+        relforcerowsecurity: true,
+      },
+    ]);
+
+    // Append-only trigger blocks UPDATE and direct DELETE even with bypass on.
+    await expect(
+      db.withoutTenantScope("platform", () =>
+        db.query(
+          `UPDATE platform_identity_events SET action = 'national_id_cleared' WHERE platform_user_id = $1`,
+          [identityId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+
+    await expect(
+      db.withoutTenantScope("platform", () =>
+        db.query(
+          `DELETE FROM platform_identity_events WHERE platform_user_id = $1`,
+          [identityId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+
+    // Deleting the referenced business permits FK ON DELETE SET NULL on actor_business_id.
+    await expect(
+      db.withoutTenantScope("platform", () =>
+        db.query(`DELETE FROM businesses WHERE id = $1`, [businessId]),
+      ),
+    ).resolves.toBeTruthy();
+
+    // Deleting the parent identity permits FK ON DELETE CASCADE.
+    await expect(
+      db.withoutTenantScope("platform", () =>
+        db.query(`DELETE FROM platform_users WHERE id = $1`, [identityId]),
+      ),
+    ).resolves.toBeTruthy();
+  });
+
+  it("refuses clearing email on an email-only identity instead of throwing 23514", async () => {
+    const emailOnlyId = await insertIdentity({
+      email: `only-${randomUUID()}@example.com`,
+      passwordHash: "hash",
+    });
+    expect(
+      await credentials.setIdentityEmail({
+        platformUserId: emailOnlyId,
+        actorPlatformUserId: emailOnlyId,
+        email: null,
+      }),
+    ).toEqual({ ok: false, error: "credential_channel_required" });
+  });
 });

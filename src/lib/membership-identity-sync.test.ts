@@ -23,6 +23,12 @@ describe("syncMembershipIdentity", () => {
     expect(params).toEqual(["pu-9", "mirror@ex.com"]);
   });
 
+  it("clears membership email for an accepted phone-only identity", async () => {
+    const client = fakeClient();
+    await syncMembershipIdentity(client, "pu-9", { email: null });
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining("SET email = $2"), ["pu-9", null]);
+  });
+
   it("writes users.phone_e164 and drops verification", async () => {
     const q = fakeClient().query;
     const client = { query: q };

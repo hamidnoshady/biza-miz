@@ -78,7 +78,7 @@ interface ProjectSummary {
   budgetRial: number;
   tasks: number;
 }
-import type { WorkspaceLookups } from "./use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "./use-workspace-lookups";
 
 export interface ProjectRow {
   id: string;
@@ -366,6 +366,9 @@ function NewProjectDialog({
   const [priority, setPriority] = useState<WorkspacePriority | "">("normal");
   const [templateKey, setTemplateKey] = useState("");
   const [partyId, setPartyId] = useState("");
+  // Issue #907 F10 — «مشتری / طرف حساب» searches the directory on the server
+  // instead of filtering the page the lookups happen to carry.
+  const partyPicker = usePartyPicker(lookups.parties, partyId, partyPageFrom(lookups));
   const [ownerUserId, setOwnerUserId] = useState("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -461,9 +464,12 @@ function NewProjectDialog({
           label="مشتری / طرف حساب"
           value={partyId}
           onChange={setPartyId}
-          options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+          options={partyPicker.options}
           searchable
           searchPlaceholder="جست‌وجوی طرف حساب…"
+          onSearch={partyPicker.setTerm}
+          searching={partyPicker.searching}
+          searchNote={partyPicker.note}
         />
         <PickerField
           label="مسئول پروژه"

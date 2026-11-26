@@ -573,6 +573,42 @@ describe("which menu entry is the page you are on", () => {
     expect(workspaceEntryIsActive(all, pathname, "view=customers")).toBe(false);
   });
 
+  it("keeps the parent row lit for the explicit default `?view=all` (issue #1554)", () => {
+    // `/accounting/directory?view=all` is the bare directory — `partyDirectoryHref`
+    // omits the parameter for «همه اشخاص» — so a user-edited URL must not leave
+    // the whole rail dark.
+    const all = entry(partyDirectoryHref("all"), { section: "directory" });
+    const customers = entry(partyDirectoryHref("customers"), { section: "directory" });
+    const suppliers = entry(partyDirectoryHref("suppliers"), { section: "directory" });
+    const pathname = partyDirectoryHref().split("?")[0];
+
+    expect(workspaceEntryIsActive(all, pathname, "view=all")).toBe(true);
+    expect(workspaceEntryIsActive(customers, pathname, "view=all")).toBe(false);
+    expect(workspaceEntryIsActive(suppliers, pathname, "view=all")).toBe(false);
+
+    // The named views keep their own active state, with and without the default.
+    expect(workspaceEntryIsActive(customers, pathname, "view=customers")).toBe(true);
+    expect(workspaceEntryIsActive(suppliers, pathname, "view=suppliers")).toBe(true);
+    expect(workspaceEntryIsActive(all, pathname, "view=suppliers")).toBe(false);
+    expect(workspaceEntryIsActive(customers, pathname, "view=suppliers")).toBe(false);
+  });
+
+  it("lights exactly one directory row for every directory view", () => {
+    const groups = accountingWorkspaceGroups({ permissions: of("owner"), navItems: [] });
+    const directoryRows = groups
+      .flatMap((group) => group.entries)
+      .filter((candidate) => candidate.section === "directory");
+    const pathname = partyDirectoryHref().split("?")[0];
+
+    for (const search of ["", "view=all", "view=customers", "view=suppliers"]) {
+      const lit = directoryRows.filter((row) => workspaceEntryIsActive(row, pathname, search));
+      expect(lit, search || "(no query)").toHaveLength(1);
+    }
+    expect(
+      directoryRows.filter((row) => workspaceEntryIsActive(row, pathname, "view=all"))[0].href,
+    ).toBe(partyDirectoryHref("all"));
+  });
+
   it("never lights two entries of the real menu at once", () => {
     const groups = accountingWorkspaceGroups({ permissions: of("owner"), navItems: [] });
     const entries = groups.flatMap((group) => group.entries);

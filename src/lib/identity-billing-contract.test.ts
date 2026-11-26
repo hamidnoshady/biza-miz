@@ -16,6 +16,7 @@ import {
   commercialActorRefusalMessage,
   purchaseBlockerMessage,
   purchaseReadiness,
+  purchaseReadinessDeniedPayload,
   purchaseReadinessForAssurance,
   readIdentityAssurance,
   resolveCommercialActor,
@@ -254,10 +255,17 @@ describe("purchaseReadiness", () => {
     ).toEqual({ ok: true, phoneE164: "+989121234567" });
   });
 
-  it("gives each blocker its own Persian sentence", () => {
+  it("gives each blocker its own Persian sentence and canonical 403 payload", () => {
     expect(purchaseBlockerMessage("phone_not_verified")).not.toBe(
       purchaseBlockerMessage("phone_not_mobile"),
     );
+    const denied = purchaseReadinessForAssurance(null);
+    if (denied.ok) throw new Error("expected blocked");
+    expect(purchaseReadinessDeniedPayload(denied)).toEqual({
+      error: "phone_verification_required",
+      blockedBy: ["phone_not_verified"],
+      message: purchaseBlockerMessage("phone_not_verified"),
+    });
   });
 });
 

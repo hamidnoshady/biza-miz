@@ -25,6 +25,8 @@ let recovery: typeof import("../src/lib/password-recovery");
 let provisioning: typeof import("../src/lib/business-provisioning");
 let employeeService: typeof import("../src/lib/employee-service");
 let passwordReset: typeof import("../src/lib/password-reset");
+let teamService: typeof import("../src/lib/team-service");
+let phoneOtp: typeof import("../src/lib/phone-otp");
 
 const owner = {
   platformUserId: "",
@@ -75,6 +77,8 @@ beforeAll(async () => {
   provisioning = await import("../src/lib/business-provisioning");
   employeeService = await import("../src/lib/employee-service");
   passwordReset = await import("../src/lib/password-reset");
+  teamService = await import("../src/lib/team-service");
+  phoneOtp = await import("../src/lib/phone-otp");
 
   const business = await provisioning.provisionBusiness({
     businessName: "کافهٔ بازیابی",
@@ -213,5 +217,111 @@ describe("phone password recovery", () => {
       [owner.platformUserId],
     );
     expect(await bcrypt.compare("first-password-123", rows[0].password_hash)).toBe(true);
+  });
+});
+
+/**
+ * #1386 — the single-use guarantee under real concurrency.
+ *
+ * `redeemOtpChallenge` locks the challenge row `FOR UPDATE`, so of N verifies
+ * racing on one code exactly one may consume it. The unit suites mock the
+ * database and cannot prove that; these run N requests in parallel against
+ * real Postgres on separate pool connections.
+ */
+describe("concurrent redemption of one code (#1386)", () => {
+  const RACERS = 5;
+
+  it("lets exactly one of N parallel recoveries replace the password", async () => {
+    await issueRecoveryCode("333333");
+    const passwords = Array.from({ length: RACERS }, (_, i) => `racer-password-${i}-123`);
+
+    const results = await Promise.all(
+      passwords.map((newPassword) =>
+        recovery.verifyPhonePasswordRecovery({
+          phone: owner.phone,
+          code: "333333",
+          newPassword,
+          confirmPassword: newPassword,
+        }),
+      ),
+    );
+
+    const winners = results.flatMap((result, i) => (result.ok ? [i] : []));
+    expect(winners).toHaveLength(1);
+    for (const [i, result] of results.entries()) {
+      if (i !== winners[0]) expect(result).toEqual({ ok: false, error: "invalid_code" });
+    }
+
+    // The stored password is the winner's, and no loser's write landed.
+    const { rows } = await db.query<{ password_hash: string }>(
+      `SELECT password_hash FROM platform_users WHERE id = $1`,
+      [owner.platformUserId],
+    );
+    expect(await bcrypt.compare(passwords[winners[0]], rows[0].password_hash)).toBe(true);
+
+    const { rows: audits } = await db.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM platform_audit_log
+        WHERE entity_id = $1 AND action = 'auth.password_recovered_by_phone'`,
+      [owner.platformUserId],
+    );
+    // One from the earlier sequential test, one from this race — never RACERS.
+    expect(Number(audits[0].n)).toBe(2);
+  });
+
+  it("consumes a phone-OTP login code exactly once under parallel verifies", async () => {
+    const subjectId = await otp.phoneDerivedSubject(owner.phone);
+    await otp.issueOtpChallenge({
+      subjectRealm: phoneOtp.PENDING_PHONE_REALM,
+      subjectId,
+      purpose: "login",
+      candidatePhoneE164: owner.phone,
+      code: "444444",
+    });
+
+    const results = await Promise.all(
+      Array.from({ length: RACERS }, () =>
+        otp.redeemOtpChallenge({
+          subjectRealm: phoneOtp.PENDING_PHONE_REALM,
+          subjectId,
+          purpose: "login",
+          code: "444444",
+          expectedPhoneE164: owner.phone,
+        }),
+      ),
+    );
+
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(results.filter((result) => !result.ok)).toHaveLength(RACERS - 1);
+
+    const { rows } = await db.query<{ consumed: number }>(
+      `SELECT count(*)::int AS consumed FROM mfa_challenges
+        WHERE subject_realm = $1 AND subject_id = $2 AND purpose = 'login'
+          AND consumed_at IS NOT NULL`,
+      [phoneOtp.PENDING_PHONE_REALM, subjectId],
+    );
+    expect(rows[0].consumed).toBe(1);
+
+    // And a later sequential replay of the same code is refused too.
+    const replay = await otp.redeemOtpChallenge({
+      subjectRealm: phoneOtp.PENDING_PHONE_REALM,
+      subjectId,
+      purpose: "login",
+      code: "444444",
+      expectedPhoneE164: owner.phone,
+    });
+    expect(replay.ok).toBe(false);
+  });
+});
+
+describe("verifyPassword on a passwordless identity (#1386)", () => {
+  it("returns false for a NULL hash instead of throwing out of bcrypt", async () => {
+    await db.query(`UPDATE platform_users SET password_hash = NULL WHERE id = $1`, [
+      owner.platformUserId,
+    ]);
+
+    await expect(teamService.verifyPassword(owner.membershipId, "")).resolves.toBe(false);
+    await expect(teamService.verifyPassword(owner.membershipId, "anything-123")).resolves.toBe(
+      false,
+    );
   });
 });

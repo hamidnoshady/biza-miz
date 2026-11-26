@@ -526,7 +526,10 @@ export async function syncHybridLoginCredentials(
       identitiesApplied = applied.identitiesApplied;
       // What remains wrong after the pass is the health signal; what was
       // repaired is transient evidence, reported but not a failure.
-      identityMismatches = applied.bindingsStillBroken + applied.identityEmailConflicts;
+      identityMismatches =
+        applied.bindingsStillBroken +
+        applied.identityEmailConflicts +
+        applied.identityPhoneConflicts;
       identityBindingsRepaired = applied.bindingsRepaired;
       identitiesRekeyed = applied.identitiesRekeyed;
       context.identitiesApplied = identitiesApplied;

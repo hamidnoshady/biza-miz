@@ -2525,14 +2525,17 @@ export async function verifyPassword(
   password: string,
 ): Promise<boolean> {
   return withoutTenantScope("login", async () => {
-    const { rows } = await query<{ password_hash: string }>(
+    const { rows } = await query<{ password_hash: string | null }>(
       `SELECT p.password_hash FROM users u
          JOIN platform_users p ON p.id = u.platform_user_id
         WHERE u.id = $1`,
       [userId],
     );
-    if (!rows[0]) return false;
-    return bcrypt.compare(password, rows[0].password_hash);
+    // #1386 — a passwordless (phone-first) identity has a NULL hash. That is a
+    // failed verification, not an argument error thrown out of bcrypt as a 500.
+    const hash = rows[0]?.password_hash;
+    if (!hash) return false;
+    return bcrypt.compare(password, hash);
   });
 }
 

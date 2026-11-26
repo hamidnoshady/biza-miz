@@ -76,7 +76,7 @@ interface ContractSummary {
   pending: number;
   valueRial: number;
 }
-import type { WorkspaceLookups } from "./use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "./use-workspace-lookups";
 
 export interface ContractRow {
   id: string;
@@ -397,6 +397,10 @@ function ContractDialog({
   const statusOwnedByWorkflow = contract ? contractStatusIsWorkflowOwned(contract.status) : false;
   const [projectId, setProjectId] = useState(contract?.projectId ?? defaultProjectId ?? "");
   const [partyId, setPartyId] = useState(contract?.partyId ?? "");
+  // Issue #907 F10 — «طرف قرارداد» searches the directory on the server, so a
+  // party beyond the page the lookups carry is still findable. The selected id
+  // rides along, which keeps the field named even when it does not match.
+  const partyPicker = usePartyPicker(lookups.parties, partyId, partyPageFrom(lookups));
   const [value, setValue] = useState(
     contract?.valueRial != null ? String(money.toInput(contract.valueRial)) : "",
   );
@@ -497,9 +501,12 @@ function ContractDialog({
           label="طرف قرارداد"
           value={partyId}
           onChange={setPartyId}
-          options={lookups.parties.map((p) => ({ id: p.id, label: p.name }))}
+          options={partyPicker.options}
           searchable
           searchPlaceholder="جست‌وجوی طرف قرارداد…"
+          onSearch={partyPicker.setTerm}
+          searching={partyPicker.searching}
+          searchNote={partyPicker.note}
         />
         <Field label={`مبلغ (${money.unitLabel})`}>
           <input

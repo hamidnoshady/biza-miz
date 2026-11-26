@@ -113,6 +113,14 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   fixed_asset_depreciation: "استهلاک دارایی ثابت",
   fixed_asset_disposal: "واگذاری دارایی ثابت",
   fixed_asset_acquisition: "خرید دارایی ثابت",
+  // Intangible assets (issue #1326) — a register of its own, so its documents
+  // are named for it rather than borrowing the tangible labels above: a reader
+  // of the journal must be able to tell «استهلاک دارایی نامشهود» from
+  // «استهلاک دارایی ثابت» at a glance.
+  intangible_asset_acquisition: "تحصیل دارایی نامشهود",
+  intangible_asset_amortization: "استهلاک دارایی نامشهود",
+  intangible_asset_impairment: "کاهش ارزش دارایی نامشهود",
+  intangible_asset_disposal: "واگذاری دارایی نامشهود",
   // Internal transfers between the business's own financial accounts
   // (issue #862). One code for the document and one for its reversal, because
   // the journal shows both and a reader has to be able to tell them apart.
