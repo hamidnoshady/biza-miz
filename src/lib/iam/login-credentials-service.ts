@@ -8,6 +8,7 @@ import { STAFF_PIN_ROLES_SQL } from "../login-eligibility";
 import { PIN_ROLES } from "../roles";
 import { getPool, query, withTenant, withoutTenantScope } from "../db";
 import { lockMembership, lockMemberships } from "../membership-lock";
+import { syncMembershipIdentity } from "../membership-identity-sync";
 import { decryptTotpSecret, encryptTotpSecret } from "../mfa-service";
 import {
   loginCredentialsFingerprint,
@@ -234,6 +235,8 @@ export async function applyLoginCredentials(
         const incomingTokenVersion = credential.tokenVersion ?? 1;
         let platformUserId: string;
         let writeFields = true;
+        /** Whether this pass ends up writing the payload's email onto the identity. */
+        let emailApplied = false;
         if (plan.rekeyFrom) {
           // Same person under a pre-v2 local UUID. The canonical row is
           // created first (under a unique placeholder email — the real one is
@@ -284,6 +287,7 @@ export async function applyLoginCredentials(
           );
           platformUserId = inserted.rows[0].id;
           writeFields = false;
+          emailApplied = true;
         } else {
           platformUserId = plan.platformUserId as string;
         }
@@ -323,6 +327,7 @@ export async function applyLoginCredentials(
                 [platformUserId, credential.fullName, credential.passwordHash, credential.isActive, incomingTokenVersion],
               ];
           await client.query(sql, params);
+          emailApplied = writeEmail;
         }
         result.changed = true;
         // Bind (or re-bind) the membership to the identity the cloud named —
@@ -335,6 +340,11 @@ export async function applyLoginCredentials(
         if (relinked.rowCount) {
           result.bindingsRepaired += relinked.rowCount;
           result.changed = true;
+        }
+        // Mirror only an accepted identity email. Run after relinking so new
+        // memberships are included; per-business unique violations propagate.
+        if (emailApplied) {
+          await syncMembershipIdentity(client, platformUserId, { email });
         }
 
         await client.query(
