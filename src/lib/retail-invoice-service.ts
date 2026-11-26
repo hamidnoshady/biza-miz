@@ -138,6 +138,12 @@ export type RetailInvoiceLineInput =
       unitPrice?: number;
       discount?: number;
       vatPercent: number;
+      /**
+       * GH #1567 6C — set only by the size-pack expansion
+       * (`fashion-size-pack-service.ts`): this line is one component of a sold
+       * pack at its negotiated wholesale price, so automatic promotions skip it.
+       */
+      sizePackId?: string;
     }
   | {
       /**
@@ -864,6 +870,8 @@ async function retailPromotionDiscounts(
   for (let i = 0; i < input.lines.length; i++) {
     const line = input.lines[i];
     if (line.kind !== "accessory" && line.kind !== "cosmetic" && line.kind !== "stocked") continue;
+    // A size-pack component is already at its negotiated wholesale price.
+    if (line.kind === "stocked" && line.sizePackId) continue;
     itemIds.push(line.itemId);
     indexes.push(i);
   }

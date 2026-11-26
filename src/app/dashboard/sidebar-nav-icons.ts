@@ -95,6 +95,7 @@ const BUSINESS_NAV_ICONS: Record<string, LucideIcon> = {
   // GH #1567 6A — the fashion trade's alteration / made-to-measure desk.
   "/accounting/tailoring": ScissorsIcon,
   "/accounting/production-orders": FactoryIcon,
+  "/accounting/size-packs": PackageIcon,
   "/settings/billing": WalletIcon,
   "/settings": SettingsIcon,
   // Phase 36b — the Growth & Marketing app's home; the trend glyph the

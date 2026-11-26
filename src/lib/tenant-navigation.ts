@@ -209,6 +209,16 @@ export function navItemsFor(industry: Industry, ctx: NavContext): NavItem[] {
           requiredAnyPermission: [PERMISSIONS.inventoryView],
         }]
       : []),
+    // GH #1567 6C — wholesale size packs.
+    ...(industry === "fashion_apparel"
+      ? [{
+          label: "بسته‌های سایزی",
+          module: "fashion_apparel" as const,
+          href: ACCOUNTING_WORKSPACE_HREFS.sizePacks,
+          roles: ["owner", "manager"] as Role[],
+          requiredAnyPermission: [PERMISSIONS.inventoryView],
+        }]
+      : []),
     // The «حسابداری» sub-menu — the Accounting app's sections, each a real
     // route under the app's own prefix (`/accounting/…`). This tree is the
     // href *registry* the flattened-nav consumers read (the mobile header's

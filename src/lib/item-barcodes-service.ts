@@ -99,6 +99,13 @@ export async function assignBarcode(
       [item.locationId, code],
     );
     if (existing[0]) throw new BarcodeConflictError();
+    // GH #1567 6C — a size pack's barcode is a scannable code at this branch
+    // too; an item may not take it, or a scan would be ambiguous.
+    const { rows: packCode } = await run<{ id: string }>(
+      `SELECT id FROM item_size_packs WHERE location_id = $1 AND barcode = $2`,
+      [item.locationId, code],
+    );
+    if (packCode[0]) throw new BarcodeConflictError();
   }
 
   const finalSymbology = symbology ?? "internal";

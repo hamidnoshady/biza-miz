@@ -1316,6 +1316,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/fashion-production.integration.test.ts",
   },
   {
+    id: "misc.fashion-size-packs",
+    module: "Size packs (fashion)",
+    entity: "Virtual size packs: variant compositions with wholesale prices, derived availability and sale snapshots (GH #1567 6C)",
+    routes: ["size-packs"],
+    status: "route-only (by design)",
+    note: "a pack owns no stock — selling one goes through POST /api/sales/invoices (a size_pack line expanded into per-variant lines in the sale transaction); definitions need inventory.adjust; no MCP/AI write verb until an approval-gated design exists (GH #1567 F7)",
+    test: "integration/fashion-size-packs.integration.test.ts",
+  },
+  {
     id: "misc.product-embedded-media",
     module: "Products (retail)",
     entity: "Legacy embedded-media report (GH #1567 F5)",
