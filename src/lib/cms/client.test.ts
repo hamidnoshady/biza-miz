@@ -80,9 +80,13 @@ describe("cmsUrl", () => {
 });
 
 describe("cmsHeaders", () => {
-  it("carries the tenant in Host and the site key in Authorization", () => {
+  it("carries the tenant as the site key in Authorization, never as Host", () => {
+    // `fetch` drops a caller-supplied `Host` and derives it from the URL, and a
+    // proxy in front of the CMS routes on it — so a domain set here could only
+    // send the request to the customer's theme app instead of the CMS. The key
+    // is the tenant (see `client.ts`'s header).
     const headers = cmsHeaders(CONFIG, { path: "/api/site" });
-    expect(headers.get("Host")).toBe("acme.ir");
+    expect(headers.get("Host")).toBeNull();
     expect(headers.get("Authorization")).toBe("Bearer eshobe_live_testkey");
   });
   it("sets JSON content-type only when there is a body", () => {
@@ -102,7 +106,8 @@ describe("cmsRequest", () => {
     const result = await cmsRequest<{ docs: unknown[] }>(CONFIG, { path: "/api/pages", fetchImpl });
     expect(result).toEqual({ docs: [] });
     expect(calls[0][0]).toBe("https://cms.eshobe.com/api/pages");
-    expect((calls[0][1].headers as Headers).get("Host")).toBe("acme.ir");
+    expect((calls[0][1].headers as Headers).get("Authorization")).toBe("Bearer eshobe_live_testkey");
+    expect((calls[0][1].headers as Headers).get("Host")).toBeNull();
   });
 
   it("preserves the CMS cafe payment amount mismatch code when redacting the response", async () => {
