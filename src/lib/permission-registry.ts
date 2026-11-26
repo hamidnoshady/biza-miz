@@ -208,6 +208,8 @@ const DRAFTS: Draft[] = [
   { key: P.crmExport, group: "crm", label: "خروجی گرفتن از مشتریان", description: "دانلود فهرست مشتریان. راهی است که یک بانک اطلاعاتی از سازمان خارج می‌شود.", risk: "high", audit: true },
   { key: P.crmConfigure, group: "crm", label: "پیکربندی CRM", description: "تغییر مراحل قیف، تعریف بخش‌ها و ساختار گزارش‌ها.", risk: "medium", audit: true },
   { key: P.crmDelete, group: "crm", label: "حذف رکورد CRM", description: "حذف کامل پرونده یا فعالیت مشتری همراه با تاریخچه آن.", risk: "high", audit: true },
+  { key: P.tailoringManage, group: "crm", label: "مدیریت سفارش‌های دوخت و اصلاح", description: "پذیرش، برآورد، تأیید مشتری، پرو، کنترل کیفیت و تحویل سفارش‌های خیاطی؛ بدون دسترسی به اندازه‌های بدن.", risk: "medium", audit: true },
+  { key: P.tailoringMeasurements, group: "crm", label: "اندازه‌های بدن مشتری", description: "ثبت، مشاهده (با ذکر هدف)، خروجی و حذف اندازه‌های رمزنگاری‌شدهٔ مشتری. هر دسترسی ثبت می‌شود و در دسترس هوش مصنوعی نیست.", risk: "high", audit: true },
 
   // --- Workspace -----------------------------------------------------------
   { key: P.workspaceView, group: "workspace", label: "مشاهده میز کار", description: "دیدن پروژه‌ها، وظایف و اسناد.", risk: "low", audit: false },

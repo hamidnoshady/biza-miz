@@ -1298,6 +1298,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "src/app/api/products/duplicates/route.test.ts",
   },
   {
+    id: "misc.tailoring",
+    module: "Tailoring (fashion)",
+    entity: "Alteration / made-to-measure jobs and encrypted body measurements (GH #1567 6A)",
+    routes: ["tailoring"],
+    status: "route-only (by design)",
+    note: "customer body measurements are sensitive personal data: encrypted at rest, every access logged with a purpose, retention/export/erase — and never an AI input, so no MCP/AI read tool or write verb may reach these routes (tailoring.measurements is excluded from system AI read permissions); the job workflow stays a human desk until an approval-gated verb is designed",
+    test: "integration/tailoring.integration.test.ts",
+  },
+  {
     id: "misc.product-embedded-media",
     module: "Products (retail)",
     entity: "Legacy embedded-media report (GH #1567 F5)",

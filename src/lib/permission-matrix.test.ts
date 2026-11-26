@@ -97,7 +97,7 @@ describe("built-in role presets", () => {
       "settings.manage",
       "shifts.manage", "shifts.self",
       "store_credit.issue", "store_credit.payout",
-      "tables.edit", "tables.manage",
+      "tables.edit", "tables.manage", "tailoring.manage",
       "tax.inquiry", "tax.prepare", "tax.send", "tax.view",
       // Issue #894 — a manager already runs the websites a Torob channel publishes
       // from, so the channel comes with them; `torob.configure` too, because it is

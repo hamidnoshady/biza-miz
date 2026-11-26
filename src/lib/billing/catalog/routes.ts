@@ -87,6 +87,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   // (the entry that invoice posts). Classifying them as their own declaration
   // would bill twice for one document.
   agency: keys("operations.shared"),
+  // GH #1567 6A — the alteration desk and encrypted measurements. Operational
+  // registers like agency's: the money a job earns is the linked ordinary
+  // order (`orders`/`sales`) and its ledger entry, so it is not billed twice.
+  tailoring: keys("operations.shared"),
   knowledge: keys("operations.shared"),
   support: keys("operations.shared"),
   "support-access": keys("operations.shared"),

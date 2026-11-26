@@ -257,7 +257,14 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
 /** Explicit context for trusted tenant-scoped background/MCP reads. The
  * caller has already passed its own job/connection scope; this set is never
  * exposed to browser turns, which always use effective member permissions. */
-export const SYSTEM_AI_READ_PERMISSIONS: ReadonlySet<Permission> = new Set(ALL_PERMISSIONS);
+/**
+ * GH #1567 6A: a customer's body measurements are never an AI input. No tool,
+ * action or MCP verb maps to them, and the system AI read set excludes the key
+ * so a future tool gated on it is denied by construction.
+ */
+export const AI_EXCLUDED_PERMISSIONS: ReadonlySet<Permission> = new Set([PERMISSIONS.tailoringMeasurements]);
+export const SYSTEM_AI_READ_PERMISSIONS: ReadonlySet<Permission> =
+  new Set(ALL_PERMISSIONS.filter(permission => !AI_EXCLUDED_PERMISSIONS.has(permission)));
 
 export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permission>>> = {
   "setup.business": PERMISSIONS.settingsManage,
