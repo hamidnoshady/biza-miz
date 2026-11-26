@@ -15,7 +15,10 @@ import { isPlanTermMonths, type PlanQuote } from "@/lib/billing/quote/plan-quote
 import { createPlanCheckoutQuote } from "@/lib/billing/quote/checkout-quote";
 import { assertQuotePayable, consumeQuote, loadQuote } from "@/lib/billing/quote/quote-store";
 import { applyTaxAndRounding } from "@/lib/billing/rating/engine";
-import { purchaseReadinessForAssurance } from "@/lib/identity-billing-contract";
+import {
+  purchaseReadinessDeniedPayload,
+  purchaseReadinessForAssurance,
+} from "@/lib/identity-billing-contract";
 import { readPlatformIdentityAssurance } from "@/lib/iam/global-identity-service";
 import { parseSafeIntInput } from "@/lib/platform-money";
 import { GatewayError, gatewayErrorMessage } from "@/lib/payment-gateway";
@@ -81,14 +84,7 @@ export const POST = withTenantScope(async (req: Request) => {
     : null;
   const readiness = purchaseReadinessForAssurance(assurance);
   if (!readiness.ok) {
-    return NextResponse.json(
-      {
-        error: "phone_verification_required",
-        blockedBy: readiness.blockedBy,
-        message: readiness.message,
-      },
-      { status: 403 },
-    );
+    return NextResponse.json(purchaseReadinessDeniedPayload(readiness), { status: 403 });
   }
 
   let body: Record<string, unknown>;

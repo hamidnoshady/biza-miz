@@ -51,6 +51,21 @@ const PLATFORM_REFERENCE_COLUMNS: Record<string, readonly string[]> = {
   kavenegar_lookup_templates: ["master_template_id"],
 };
 
+/**
+ * Global-identity secret and personal-PII columns that must never leave the
+ * platform in a tenant export or archive (ESH-199 / #1384).
+ *
+ * `platform_users` is included in logical tenant exports only so `users.platform_user_id`
+ * foreign keys remain restorable in a clean database; a business owner must
+ * never receive a member's password hash or personal national-ID ciphertext /
+ * blind index (which are encrypted under the platform master key, not the
+ * business DEK). All three columns are nullable, so omitting them preserves
+ * clean-database SQL restore compatibility.
+ */
+const PLATFORM_SECRET_COLUMNS: Record<string, readonly string[]> = {
+  platform_users: ["password_hash", "national_id_ciphertext", "national_id_bidx"],
+};
+
 /** Postgres identifiers can't be parameterised; table/column names here come only from information_schema, but validate anyway rather than trust that blindly. */
 function assertSafeIdentifier(name: string): string {
   if (!/^[a-z_][a-z0-9_]*$/.test(name)) throw new Error(`unsafe_identifier: ${name}`);
@@ -118,6 +133,7 @@ export async function exportTenantData(businessId: string): Promise<TenantExport
       // feed order.
       for (const column of TRANSPORT_LOCAL_COLUMNS[name] ?? []) derived.add(column);
       for (const column of PLATFORM_REFERENCE_COLUMNS[name] ?? []) derived.add(column);
+      for (const column of PLATFORM_SECRET_COLUMNS[name] ?? []) derived.add(column);
       const columns = fields.map((f) => f.name).filter((c) => !generated?.has(c) && !derived.has(c));
       out.push({ name, columns, rows: orderedRows });
     }

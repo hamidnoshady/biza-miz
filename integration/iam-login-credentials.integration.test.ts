@@ -233,4 +233,63 @@ describe("global login replication", () => {
     await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials)))
       .resolves.toMatchObject({ changed: false });
   }, 180_000);
+
+  it("replicates a phone-first passwordless global identity onto the site and converges idempotently (ESH-199)", async () => {
+    await useDatabase(cloudDb);
+    const phone = "+989128887766";
+    const phoneIdentityId = randomUUID();
+    await withoutTenantScope("platform", () =>
+      query(
+        `INSERT INTO platform_users (id, email, password_hash, phone_e164, phone_verified_at, full_name, is_active)
+         VALUES ($1, NULL, NULL, $2, now(), 'مالک موبایل‌محور', true)`,
+        [phoneIdentityId, phone],
+      ),
+    );
+    const cloud = await provisionBusiness({
+      businessName: "کافه ابر ۴",
+      ownerName: "مالک موبایل‌محور",
+      platformUserId: phoneIdentityId,
+      seedChartOfAccounts: false,
+    });
+    const credentials = await buildLoginCredentials(cloud.businessId);
+    expect(credentials).toHaveLength(1);
+    expect(credentials[0]).toMatchObject({
+      platformUserId: phoneIdentityId,
+      email: null,
+      passwordHash: null,
+      phoneE164: phone,
+      phoneVerified: true,
+    });
+
+    await useDatabase(siteDb);
+    const site = await provisionBusiness({
+      businessName: "کافه محلی ۴",
+      ownerName: "مدیر محلی",
+      email: `local4-${randomUUID()}@example.com`,
+      password: "local-password",
+      seedChartOfAccounts: false,
+    });
+    await withTenant(site.businessId, () =>
+      query(
+        `INSERT INTO users (id, business_id, role, full_name, email, phone_e164, location_id)
+         VALUES ($1, $2, 'owner', 'مالک موبایل‌محور', NULL, $3, $4)`,
+        [cloud.userId, site.businessId, phone, site.locationId],
+      ),
+    );
+
+    await expect(
+      withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials)),
+    ).resolves.toMatchObject({
+      changed: true,
+      identitiesApplied: 1,
+      bindingsStillBroken: 0,
+      identityEmailConflicts: 0,
+      identityPhoneConflicts: 0,
+    });
+
+    // Second pass converges with zero rewrites.
+    await expect(
+      withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials)),
+    ).resolves.toMatchObject({ changed: false, bindingsStillBroken: 0 });
+  }, 180_000);
 });

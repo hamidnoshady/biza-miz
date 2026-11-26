@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requirePermission, withTenantScope } from "@/lib/auth";
+import { readPlatformIdentityAssurance } from "@/lib/iam/global-identity-service";
+import {
+  purchaseReadinessDeniedPayload,
+  purchaseReadinessForAssurance,
+} from "@/lib/identity-billing-contract";
 import { PERMISSIONS } from "@/lib/permissions";
 import {
   activateService,
@@ -150,6 +155,18 @@ export const POST = withTenantScope(async (request: NextRequest, ctx: Ctx) => {
   // blocked, and settlement already refuses to bill beyond the wallet.
   const gated = action === "activate" || action === "reenable" || action === "term_purchase";
   if (gated) {
+    // ESH-199 / #1384 — commercial service activation and prepaid term
+    // purchases share the exact global verified-mobile gate used by
+    // `/api/billing/payments`. `disable`, `settle` and `term_quote` remain
+    // reachable without phone verification.
+    const assurance = session.platformUserId
+      ? await readPlatformIdentityAssurance(session.platformUserId)
+      : null;
+    const readiness = purchaseReadinessForAssurance(assurance);
+    if (!readiness.ok) {
+      return NextResponse.json(purchaseReadinessDeniedPayload(readiness), { status: 403 });
+    }
+
     const access = await enforceCommercialServiceAccess({
       businessId,
       identity: fullIdentity,
