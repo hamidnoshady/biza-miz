@@ -20,13 +20,13 @@ import { query } from "./db";
 export const WORKSPACE_PARTY_PAGE_SIZE = 25;
 export const WORKSPACE_PARTY_MAX_PAGE_SIZE = 100;
 /**
- * The list that still travels with the shared lookups read, for the pickers
- * that have no search box yet. Kept at the width the response already had so
- * those screens do not silently lose rows; the response now also reports the
- * true total and whether more exist, so the truncation is visible rather than
- * implied, and a search box is the way past it.
+ * The list that still travels with the shared lookups read: the first page of
+ * the same search every party picker can now call. It is a page, not the
+ * directory — a picker resolves a selection the page does not carry, and a
+ * search reaches the rest, so this stays small instead of shipping the whole
+ * directory to every form that opens.
  */
-export const WORKSPACE_PARTY_INITIAL_PAGE_SIZE = 500;
+export const WORKSPACE_PARTY_INITIAL_PAGE_SIZE = WORKSPACE_PARTY_PAGE_SIZE;
 export const WORKSPACE_PARTY_MAX_TERM = 80;
 export const WORKSPACE_PARTY_MAX_SELECTED = 50;
 

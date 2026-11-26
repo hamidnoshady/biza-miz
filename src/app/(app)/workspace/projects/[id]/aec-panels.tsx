@@ -40,7 +40,7 @@ import {
 import { api, ErrorBox, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
 import { PersianNumberInput } from "@/components/ui/persian-number-input";
 import { toPersianDigits } from "@/lib/digits";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "../../use-workspace-lookups";
 import { DateCell, DateField, PickerField, ProgressBar, workspaceError } from "../../workspace-ui";
 
 /* ---------------------------------------------------------------------------
@@ -406,6 +406,10 @@ function AecProfileDialog({
 }) {
   const [form, setForm] = useState<ProfileForm>(() => formFrom(profile));
   const [saving, setSaving] = useState(false);
+  const partyPage = partyPageFrom(lookups);
+  const employerPicker = usePartyPicker(lookups.parties, form.employerPartyId, partyPage);
+  const consultantPicker = usePartyPicker(lookups.parties, form.leadConsultantPartyId, partyPage);
+  const contractorPicker = usePartyPicker(lookups.parties, form.mainContractorPartyId, partyPage);
 
   const set = (key: keyof ProfileForm) => (value: string) =>
     setForm((current) => ({ ...current, [key]: value }));
@@ -493,19 +497,34 @@ function AecProfileDialog({
             label="کارفرما"
             value={form.employerPartyId}
             onChange={set("employerPartyId")}
-            options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+            options={employerPicker.options}
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={employerPicker.setTerm}
+            searching={employerPicker.searching}
+            searchNote={employerPicker.note}
           />
           <PickerField
             label="مشاور / طراح"
             value={form.leadConsultantPartyId}
             onChange={set("leadConsultantPartyId")}
-            options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+            options={consultantPicker.options}
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={consultantPicker.setTerm}
+            searching={consultantPicker.searching}
+            searchNote={consultantPicker.note}
           />
           <PickerField
             label="پیمانکار اصلی"
             value={form.mainContractorPartyId}
             onChange={set("mainContractorPartyId")}
-            options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+            options={contractorPicker.options}
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={contractorPicker.setTerm}
+            searching={contractorPicker.searching}
+            searchNote={contractorPicker.note}
           />
           <PickerField
             label="مدیر پروژه"
@@ -741,6 +760,7 @@ function ParticipantDialog({
   onError: (message: string) => void;
 }) {
   const [partyId, setPartyId] = useState(participant?.partyId ?? "");
+  const partyPicker = usePartyPicker(lookups.parties, partyId, partyPageFrom(lookups));
   const [role, setRole] = useState(participant?.role ?? roles[0]?.key ?? "");
   const [contactName, setContactName] = useState(participant?.contactName ?? "");
   const [notes, setNotes] = useState(participant?.notes ?? "");
@@ -798,7 +818,12 @@ function ParticipantDialog({
               hint="از دفترچهٔ طرف‌های کسب‌وکار"
               value={partyId}
               onChange={setPartyId}
-              options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+              options={partyPicker.options}
+              searchable
+              searchPlaceholder="جست‌وجوی طرف…"
+              onSearch={partyPicker.setTerm}
+              searching={partyPicker.searching}
+              searchNote={partyPicker.note}
             />
           )}
 
