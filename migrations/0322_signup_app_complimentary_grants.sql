@@ -165,6 +165,19 @@ CREATE INDEX IF NOT EXISTS business_complimentary_grants_business
 -- ---------------------------------------------------------------------------
 -- 3. Tenant isolation (forced RLS, same policy shape as the rest of the schema)
 -- ---------------------------------------------------------------------------
+-- The policy catalogue is platform-owned, but a `business`-scope revision names
+-- a tenant, so it carries `business_id` and must not become an RLS outlier: any
+-- table with a tenant column gets the one approved policy. Global and
+-- business-type revisions have no `business_id` and are therefore visible only
+-- under the documented platform bypass, which is exactly how every read and
+-- write in `src/lib/complimentary-grant-service.ts` reaches the catalogue — a
+-- client-scoped connection can never read or forge another business's override.
+ALTER TABLE signup_app_policies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE signup_app_policies FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON signup_app_policies FOR ALL
+    USING (app_rls_bypass() OR business_id = app_current_business())
+    WITH CHECK (app_rls_bypass() OR business_id = app_current_business());
+
 ALTER TABLE business_complimentary_grants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE business_complimentary_grants FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation ON business_complimentary_grants FOR ALL

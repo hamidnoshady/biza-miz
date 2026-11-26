@@ -1631,6 +1631,16 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     test: "integration/billing-usage-invoice.integration.test.ts",
   },
   {
+    id: "platform.billing-grants",
+    module: "Platform — Billing",
+    entity: "Per-business complimentary grants (free coverage windows)",
+    routes: ["platform/billing/grants"],
+    status: "route-only (by design)",
+    note:
+      "issue #1579: extending or revoking a complimentary grant changes what a business is charged, so it stays a named operator act with a reason and a platform audit row — never a chat-channel verb. The read half names one tenant's commercial exception, which the console's billing page already shows.",
+    test: "src/lib/complimentary-grants.test.ts",
+  },
+  {
     id: "platform.services",
     module: "Platform — Billing",
     entity: "Per-service setup/hourly tariffs and data-retention policy",

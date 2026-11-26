@@ -11,7 +11,7 @@
 > API exposes has an MCP path; **partial** means some do; **MCP gap** means
 > none do; **backend gap** means neither side supports it.
 
-Route files scanned: **1319**. Rows: tenant **122**, platform **25**.
+Route files scanned: **1321**. Rows: tenant **122**, platform **26**.
 
 ## Summary of remaining gaps
 
@@ -173,7 +173,7 @@ Counts — covered: 62 · partial: 3 · MCP gap: 15 · backend gap: 0 · n/a (in
 
 Each tool carries a per-tool \`platformCan\` capability re-checked on every call; step-up rules mirror the tenant ones (billing/credits/restore/access/secrets/mass mutation/deletion/financial posting/large exports).
 
-Counts — covered: 7 · partial: 1 · MCP gap: 0 · backend gap: 0 · n/a (infra): 2 · duplicate surface: 0 · route-only (by design): 15
+Counts — covered: 7 · partial: 1 · MCP gap: 0 · backend gap: 0 · n/a (infra): 2 · duplicate surface: 0 · route-only (by design): 16
 
 | module | entity | list/search/detail | create | update | delete/lifecycle | bulk/import/export | permission | approval | MCP tool | test | status |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -189,6 +189,7 @@ Counts — covered: 7 · partial: 1 · MCP gap: 0 · backend gap: 0 · n/a (infr
 | Platform — Billing | Managed-message retail pricing versions, slabs and exceptions<br>_the operator's price policy for managed messaging (markup, surcharge, volume slabs, per-business exceptions) is published only through billing.manage with a platform audit before/after, and it reveals the platform's margin over the supplier — the console's own commercial surface, never a chat-channel verb_ | (route only) | (route only) | — | — | — | — | — | — | integration/kavenegar-retail-pricing.integration.test.ts | route-only (by design) |
 | Platform — Billing | Supplier statements reconciled against the wholesale cost ledger<br>_issue #902 §9 item 3: recording a supplier statement, comparing it with billing_vendor_cost_events and accepting a difference with a reason are audited billing.manage actions on wholesale data — the supplier name and the margin never reach a chat channel, same rule as the retail price catalogue row._ | (route only) | (route only) | — | — | — | — | — | — | integration/billing-supplier-invoices.integration.test.ts | route-only (by design) |
 | Platform — Billing | Usage invoices emitted from the rating ledger<br>_issue #902 §9 item 3: turning a month's ratings into an invoice line (and citing the price version that produced each line) is a money action with a platform audit, and the read half is a preview of what a month would bill. Both stay on the console: a chat-channel verb that issues invoices would post a receivable on someone else's word._ | (route only) | (route only) | — | — | — | — | — | — | integration/billing-usage-invoice.integration.test.ts | route-only (by design) |
+| Platform — Billing | Per-business complimentary grants (free coverage windows)<br>_issue #1579: extending or revoking a complimentary grant changes what a business is charged, so it stays a named operator act with a reason and a platform audit row — never a chat-channel verb. The read half names one tenant's commercial exception, which the console's billing page already shows._ | (route only) | (route only) | — | — | — | — | — | — | src/lib/complimentary-grants.test.ts | route-only (by design) |
 | Platform — Billing | Per-service setup/hourly tariffs and data-retention policy<br>_issue #1041: publishing a tariff and editing a retention window decide money and data destruction, and every write is audited with before/after. The retention write is owner-only (retention.manage) and no chat-side verb may arm a purge; the per-business activation/hold/retry lanes live on the same console surface._ | (route only) | (route only) | (route only) | — | — | — | — | — | integration/service-activation.integration.test.ts | route-only (by design) |
 | Platform — AI | AI config: models, gateway (LiteLLM), modes, prompts, agents, research, widgets<br>_the AI control plane is ai.config.manage (owner-only): the LiteLLM gateway lanes carry provider API keys, and the prompts/agents/widgets lanes edit the mind every tenant's assistant runs on — both are the console's own secret-and-identity surface and stay out of the chat channel_ | (route only) | (route only) | (route only) | — | — | — | — | — | integration/platform-ai.integration.test.ts | route-only (by design) |
 | Platform — Integrations | Cloud exceptions, messaging, notification/SMS config<br>_batch BN2: the support/bug-report inbox rides support.manage read-side; every other lane under these prefixes mints or rotates provider credentials — cloud-exception install keys (the one-time plaintext POST), messaging/sms provider configs, the platform MFA provisioning pair — the connection-provisioning tier, same doctrine as the device key-maker_ | list_cloud_exceptions | (route only) | (route only) | (route only) | — | — | — | list_cloud_exceptions | integration/platform-cloud-exceptions.integration.test.ts | route-only (by design) |
