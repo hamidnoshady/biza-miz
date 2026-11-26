@@ -23,6 +23,7 @@ import {
   ContactIcon,
   GemIcon,
   GlobeIcon,
+  HandshakeIcon,
   ImageIcon,
   LayoutDashboardIcon,
   LifeBuoyIcon,
@@ -96,6 +97,7 @@ const BUSINESS_NAV_ICONS: Record<string, LucideIcon> = {
   "/accounting/tailoring": ScissorsIcon,
   "/accounting/production-orders": FactoryIcon,
   "/accounting/size-packs": PackageIcon,
+  "/accounting/consignment": HandshakeIcon,
   "/settings/billing": WalletIcon,
   "/settings": SettingsIcon,
   // Phase 36b — the Growth & Marketing app's home; the trend glyph the

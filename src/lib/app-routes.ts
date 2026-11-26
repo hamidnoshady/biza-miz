@@ -171,6 +171,8 @@ export const ACCOUNTING_WORKSPACE_HREFS = {
   productionOrders: "/accounting/production-orders",
   // GH #1567 6C — wholesale size packs (variant compositions, no own stock).
   sizePacks: "/accounting/size-packs",
+  // GH #1567 6D — consignment by contract (کالای امانی).
+  consignment: "/accounting/consignment",
   reports: "/accounting/reports",
   floor: "/accounting/floor",
   kitchen: "/accounting/kitchen",

@@ -742,6 +742,8 @@ export const PAGE_MODULE_PREFIXES: readonly (readonly [string, ModuleKey])[] = [
   ["/accounting/production-orders", "fashion_apparel"],
   // GH #1567 6C — fashion size packs; the API refuses other trades too.
   ["/accounting/size-packs", "fashion_apparel"],
+  // GH #1567 6D — fashion consignment by contract; the API refuses other trades too.
+  ["/accounting/consignment", "fashion_apparel"],
   // Phase 36b — the Growth & Marketing app's home. Anchored on `loyalty`
   // (core for every trade) like its nav entry: the app is the container for
   // loyalty, promotions and commission, and a business that had any of the

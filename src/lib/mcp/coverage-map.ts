@@ -1325,6 +1325,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/fashion-size-packs.integration.test.ts",
   },
   {
+    id: "misc.fashion-consignment",
+    module: "Consignment (fashion)",
+    entity: "Consignment-by-contract (کالای امانی): owners, contracts with owner-price/commission terms, receipts, returns to owner, settlements (GH #1567 6D)",
+    routes: ["consignment-contracts"],
+    status: "route-only (by design)",
+    note: "consigned units are sold through POST /api/sales/invoices (owner share → 2110, commission → 4700, no COGS); receipts and returns to the owner move quantity only; settlement posts Dr 2110 / Cr cash or bank and needs inventory.adjust + ledger.post; idempotent and version-checked; no MCP/AI write verb until an approval-gated design exists (GH #1567 F7)",
+    test: "integration/fashion-consignment.integration.test.ts",
+  },
+  {
     id: "misc.product-embedded-media",
     module: "Products (retail)",
     entity: "Legacy embedded-media report (GH #1567 F5)",

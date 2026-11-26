@@ -96,6 +96,7 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   "production-orders": keys("accounting.inventory"),
   "production-boms": keys("accounting.inventory"),
   "size-packs": keys("accounting.inventory"),
+  "consignment-contracts": keys("accounting.inventory"),
   knowledge: keys("operations.shared"),
   support: keys("operations.shared"),
   "support-access": keys("operations.shared"),

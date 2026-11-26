@@ -835,3 +835,22 @@ export async function consignedOnHandByItem(client: PoolClient, businessId: stri
   }
   return map;
 }
+
+/**
+ * The fashion till's variant board: a consigned variant has no item_stock
+ * row, so its sellable quantity is the contract's consigned on-hand, and the
+ * contract's retail price (when set) is what the till offers by default.
+ */
+export async function withConsignedStock<T extends { id: string; quantity: string; unitPrice: number | null }>(
+  businessId: string,
+  locationId: string,
+  items: T[],
+): Promise<(T & { consigned?: true })[]> {
+  const consigned = await withTenantTransaction(businessId, (client) => consignedOnHandByItem(client, businessId, locationId));
+  if (consigned.size === 0) return items;
+  return items.map((item) => {
+    const hit = consigned.get(item.id);
+    if (!hit) return item;
+    return { ...item, quantity: String(hit.onHand), unitPrice: hit.retailPriceRial ?? item.unitPrice, consigned: true as const };
+  });
+}
