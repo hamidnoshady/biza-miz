@@ -1433,6 +1433,13 @@ export function KdsBoard() {
         </button>
       ) : null}
 
+      {/*
+        Orders carry no per-line kitchen-station assignment anywhere in the
+        data model (`kitchen_dispatch`'s "cloud_station" is where printing runs,
+        not which station cooks a line), so a station facet would have to invent
+        the data. It is deliberately absent until a station is configured and
+        persisted (issue #1049); every other facet below reads a stored value.
+      */}
       <section className={`${cardClass} flex flex-wrap items-end gap-3 p-3`} aria-label="فیلترهای صف آشپزخانه">
         <label className="grid min-w-36 gap-1 text-xs font-semibold text-muted-foreground">
           نوع سفارش

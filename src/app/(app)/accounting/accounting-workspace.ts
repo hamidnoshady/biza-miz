@@ -398,7 +398,11 @@ export function workspaceEntryIsActive(
     if (!isAccountingSectionPathname(pathname, entry.section)) return false;
     const view = new URLSearchParams(entry.href.split("?")[1] ?? "").get("view");
     const current = new URLSearchParams(search).get("view");
-    return view ? current === view : !current;
+    // `?view=all` names the default list — the same screen as the bare
+    // directory, which is why `partyDirectoryHref` omits it. A hand-edited or
+    // externally built URL must therefore keep the parent row lit (issue #1554).
+    if (!view) return !current || current === "all";
+    return current === view;
   }
 
   const [base] = entry.href.split("?");

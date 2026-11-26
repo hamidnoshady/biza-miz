@@ -174,3 +174,119 @@ Checks for this follow-up: `tsc --noEmit` pass; focused suites
 `mcp/registry`, `persistent-tenant-ai`, `tenant-assistant-frame`) — 11 files,
 **96 tests passed**; ESLint on every touched file, exit 0. `docs/mcp/coverage-matrix.md`
 regenerated for the new route (1315 routes, 0 unclassified).
+
+## 8. Phase 2 — server-resolved context and safe tool metadata
+
+Phase 1 narrowed a turn that already had an explicit app focus. Phase 2 adds the
+context the server actually owns, so the default/sidebar path is narrowed too,
+without turning a client hint into authorization.
+
+### 8.1 One metadata source
+
+`src/lib/ai-tool-metadata.ts` maps every catalogue tool to its app, section, task
+lens, required permission and any runtime dependency. It does **not** declare a
+second schema:
+
+| Source of truth | Reused for |
+| --- | --- |
+| `toolDefinitions()` in `ai.ts` | The only tool schemas. |
+| `TOOL_GROUP_MAP` in `ai-tool-routing.ts` | App/section ownership. |
+| `AI_TOOL_PERMISSION_MAP` in `ai-capabilities.ts` | The permission the executor already requires. |
+
+Dependencies are data: `workspace`, `retrieval`, `browserNavigation`,
+`attachment`, `branchWide`, `aecIndustry` (construction-only project reads) and
+`externalMcp`. `get_branch_comparison` is branch-wide; the AEC group requires the
+Workspace and the construction industry; hospitality sub-features require their
+own feature flag. The Phase 1 §3.6 finding was fixed here: the declared
+`search_business_knowledge` tool now has its `ai.use` permission entry instead of
+being silently dropped by the fail-closed filter.
+
+### 8.2 One selector
+
+`src/lib/ai-tool-selection.ts` computes the active set from:
+
+- server-resolved effective permissions;
+- usable apps (`effectiveAppAvailability`);
+- resolved tenant features (`resolveTenantTaskFeatures`, with usable apps);
+- current project (`projectScoped`), active location and branch scope;
+- the assigned agent's app focus and read allowlist;
+- the selected task lens;
+- explicit app focus and the member's own words;
+- the new route-path hint the compact sidebar sends (`routePath` →
+  `appForPagePath`).
+
+A client focus or route is only a hint. A disabled/unknown focus is dropped; it
+never widens. `routeTools` still has its safe fallback: no app context at all
+sends the full catalogue, and an app focus with no section sends the whole app.
+An explicit cross-app request keeps the focused app and adds the named groups.
+Non-dashboard surfaces (floor, wizard, platform, proactive) are returned
+untouched.
+
+### 8.3 Measured cases after Phase 2
+
+Measured with the application estimator over the dashboard catalogue
+(`browserNavigation`, `retrieval`, attachment-capable owner payload):
+
+| Case | Tools | Schema tokens / round | vs 35,768 |
+| --- | ---: | ---: | ---: |
+| No context / ambiguous («سلام») | 152 | 35,768 | 0% (safe fallback) |
+| Sidebar on Accounting, vague question | 120 | 29,494 | 17.5% fewer |
+| Accounting · sales question | 50 | 13,417 | **62.5% fewer** |
+| Accounting · inventory question | 42 | 11,738 | **67.2% fewer** |
+| Accounting · ledger/tax question | 51 | 14,636 | **59.1% fewer** |
+| CRM · churn question | 35 | 11,465 | **67.9% fewer** |
+| Growth · campaign question | 40 | 12,307 | **65.6% fewer** |
+| Website · status question | 28 | 9,543 | **73.3% fewer** |
+| Cross-app (sales + CRM + website + inventory) | 81 | 19,642 | 45.1% fewer (safety, not the token target) |
+| CRM project conversation (non-AEC; general Workspace reads kept, AEC reads removed) | 71 | 18,828 | 47.4% fewer |
+| Branch-scoped Accounting vague question | 119 | 29,295 | 18.1% fewer |
+| Focus on a disabled app | 18 | 7,788 | 78.2% fewer (shared safety surface only) |
+| `ai.use`-only member, sales question | 10 | 6,316 | 82.3% fewer |
+| Agent allowlist (`find_customers`, `get_customer_profile`) | 4 | 4,954 | 86.1% fewer |
+
+The app-focused criterion is still enforced by
+`src/lib/ai-tool-selection.test.ts`; the new context cases are enforced by the
+same suite. The full fallback is deliberate: an ambiguous request must not lose
+a capability silently.
+
+### 8.4 Sanitized diagnostics
+
+The existing `ai.turn.latency` line now carries a `toolSelection` object:
+
+- selection `source` (`explicit_focus`, `route_hint`, `agent_focus`,
+  `workspace_focus`, `message`, `task`, `no_context`);
+- focused/route/agent app, apps in scope, ambiguity flag, project/branch/location
+  booleans (never ids);
+- included and excluded groups with counts and reasons (`permission`,
+  `app_disabled`, `feature_disabled`, `dependency_unmet`, `agent_allowlist`,
+  `not_selected`);
+- catalogue vs offered tool count and estimated schema tokens with the rounded
+  reduction.
+
+There is no field for a prompt, message, tool argument, customer record,
+business name, user id or credential. The suite asserts that a sentinel message
+does not appear in the serialized diagnostics.
+
+### 8.5 Execution is still the authority
+
+The selector runs before provider serialization; `runAgentTurn` still calls
+`filterAiToolsByPermissions`, and every read/action executor re-checks tenant,
+permission, branch/project and approval state at execution time. Filtering the
+tool list is not authorization. The SDK adapter exposes
+`sdkToolsFromSelection`, which runs the same selector before `sdkToolsFrom`, so a
+transport change cannot create a second schema or a different active set.
+
+### 8.6 Checks for Phase 2
+
+| Check | Result |
+| --- | --- |
+| `node --max-old-space-size=6144 node_modules/typescript/lib/tsc.js --noEmit` | pass, exit 0 |
+| Focused suites (`ai-tool-selection`, `ai-tool-routing`, `ai-service`, `ai-latency`, `ai-sdk-adapter`, `api/ai/chat/route`, `ai-permission-matrix`, `ai.test`) | 8 files, **158 tests passed** |
+| `npm run lint` | pass, exit 0 |
+| `npm run test:design` | 5 files, **47 tests passed** |
+| `npm run build` | pass (route table generated) |
+| `npm test` | **1651 files passed, 1 skipped; 20,119 tests passed, 12 skipped**; 9 files failed on environment-only cases (Windows temp-directory `EPERM`, WSL `/bin/bash`, and filesystem-walk timeouts), not on the AI changes. The timeout suites pass when run in isolation except `client-bundle-boundary`, which exceeds its 15 s budget on this host. |
+
+Not run here: `npm run test:db` (needs Postgres) and `npm run test:visual`.
+Live p50/p95, real alias verification and Fast TTFT remain **blocked** on gateway
+credentials, as in §4; no number is claimed for them.

@@ -33,6 +33,9 @@ nothing rewrites `users`.
 | `0306_identity_phone_backfill_repair.sql` | Forward repair for one person with several verified legacy numbers; adds `v_platform_verified_phone_identity_conflicts` and the `phone_backfill_cleared` audit action. |
 | `0307_identity_national_id_pair_repair.sql` | Forward repair for one-sided national-ID rows; replaces the NULL-tolerant CHECK with an explicit both-present rule; adds `national_id_pair_cleared`. |
 | `0311_identity_audit_admin_actor.sql` | Adds `actor_platform_admin_id`, so a privileged national-ID read names the platform admin who performed it. |
+| `0314_identity_password_without_email.sql` | Drops `platform_users_password_needs_email` so phone-first owners can set a password without an email address. |
+| `0316_short_business_onboarding.sql` | Extends `platform_identity_events_action_check` with `email_changed` and `email_cleared`. |
+| `0322_global_identity_integrity_hardening.sql` | Adds immutable `canonical_iran_mobile_e164(text)`, upgrades conflict views to compare canonical mobiles across Persian/Arabic digits and legacy prefixes, adds `v_platform_verified_phone_anomalies`, clears landline/cross-format-ambiguous backfills and orphan verification stamps, backfills unambiguous format-variant single-mobile identities (`phone_backfilled_normalized`), enforces `phone_verified_at IS NULL OR phone_e164 IS NOT NULL`, enables `FORCE ROW LEVEL SECURITY` (`platform_only`) on `platform_email_verifications` and `platform_identity_events`, and makes `platform_identity_events` append-only via DB trigger. |
 
 0302 and 0303 are frozen (the runner checksums applied migrations). Their defects
 are corrected by the forward migrations above, never by editing the old files.
@@ -114,9 +117,35 @@ The test uses synthetic numbers in the reserved test range and never prints a
 real phone number or national ID. It is a production-*like* shape rehearsal; it
 is not evidence that any production database was migrated.
 
+## Read-only diagnostic report (`npm run db:identity-report`)
+
+Before or after applying migrations on any environment, run the read-only,
+PII-redacted health report:
+
+```bash
+DATABASE_URL=postgres://... npm run db:identity-report
+DATABASE_URL=postgres://... npm run db:identity-report -- --strict
+```
+
+`collectIdentityMigrationReport()` (`src/lib/iam/identity-migration-repair.ts`)
+emits masked phone prefixes/suffixes only — never full phone numbers, email
+addresses, national IDs, ciphertexts, or blind-index digests — and summarizes:
+
+- Global identity counts (verified global phones/emails, passwordless accounts,
+  phone-only accounts, stored national IDs).
+- Normalized cross-identity phone conflicts (`v_platform_verified_phone_conflicts`)
+  and single-identity multi-phone conflicts (`v_platform_verified_phone_identity_conflicts`).
+- Landline or unparseable verified-phone anomalies (`v_platform_verified_phone_anomalies`).
+- National-ID envelope integrity (`decrypt_failed`, `invalid_decrypted_shape`,
+  `blind_index_mismatch`, or `key_unavailable`).
+- Unlinked `users` memberships split into expected PIN-only staff roles versus
+  password-role anomalies.
+
+With `--strict`, the CLI exits with status `2` when `healthy === false`.
+
 ## Operator procedure: ambiguous verified phone
 
-1. Inspect both views in the platform realm:
+1. Inspect all three views in the platform realm (or run `npm run db:identity-report`):
 
    ```sql
    SELECT platform_user_id, number_count, last_verified_at
@@ -124,33 +153,45 @@ is not evidence that any production database was migrated.
 
    SELECT phone_e164, identity_count
      FROM v_platform_verified_phone_conflicts;
+
+   SELECT source_scope, platform_user_id, anomaly_kind, verified_at
+     FROM v_platform_verified_phone_anomalies;
    ```
 
-   Neither view is a merge tool. Do not `UPDATE platform_users.phone_e164` by
-   hand, and do not copy a number from one identity to another.
+   None of these views is a merge tool. Do not `UPDATE platform_users.phone_e164`
+   by hand, and do not copy a number from one identity to another.
 
 2. Confirm the person controls the number they want to keep. The supported path
    is the ordinary door: the person signs in through a membership whose phone
    they control and completes the SMS OTP. That call reaches
    `claimVerifiedPhone`, which writes the value and its stamp in one statement;
    the partial unique index rejects a number another identity already verified.
+   Alternatively, after out-of-band verification, an active platform
+   administrator may invoke `repairIdentityVerifiedPhoneConflict`
+   (`src/lib/iam/identity-migration-repair.ts`), which validates membership
+   proof + global uniqueness and appends a `phone_conflict_repaired` event
+   carrying `actor_platform_admin_id` and `reason_code`.
 3. The claim is write-once from a business door: a *different* number is refused
    with `identity_phone_locked`. The person's own self-service ceremony is the
    path to replace it.
 4. If neither number is controlled by the person, leave the identity unresolved
    (no global phone). It remains a valid account — it simply cannot start a paid
    purchase until a mobile is verified.
-5. Record the review outcome in the support case. The cleared backfill is already
-   in `platform_identity_events`; the event carries ids, never the number.
+5. Record the review outcome in the support case. Every automated or operator
+   repair is recorded in `platform_identity_events` (append-only, ids and
+   constrained `reason_code` slugs only — never the phone number or national ID).
 
-## Operator procedure: one-sided national ID
+## Operator procedure: one-sided or undecryptable national ID
 
-0307 clears the invalid half-pair automatically and writes
-`national_id_pair_cleared`. Nothing else is required for safety: the identity
-has no national ID, and no API returns one. If the person needs the value
-restored, they enter it themselves (`setNationalId`, self-only, encrypted,
-audited). Support cannot set or read it without the audited
-`actor_platform_admin_id` read path.
+0307 clears invalid half-pairs automatically and writes
+`national_id_pair_cleared`. If `npm run db:identity-report` reports a corrupted
+or key-mismatched `(national_id_ciphertext, national_id_bidx)` pair
+(`decrypt_failed` or `blind_index_mismatch`), an active platform administrator
+can clear it via `remediateNationalIdAnomaly` (`national_id_remediated`), which
+refuses `not_corrupted` on valid rows so intact values cannot be wiped
+accidentally. If the person needs the value restored, they enter it themselves
+(`setNationalId`, self-only, encrypted, audited). Support cannot set it for
+them, and any privileged read is recorded with `actor_platform_admin_id`.
 
 ## Reversibility
 
@@ -158,18 +199,28 @@ audited). Support cannot set or read it without the audited
 | --- | --- | --- |
 | Additive columns/indexes (0302, 0303, 0311) | Yes, by dropping them | Drops lose the stored value (and any verified phone); they do not restore a legacy state |
 | Legacy phone backfill (0302) | No, and it must not be reversed destructively | The legacy membership rows are untouched; a reviewed re-backfill can restore a number a human chooses |
-| Ambiguous-phone repair (0306) | Forward repair only | Clearing is intentional. Re-running is a no-op. Re-assigning needs the person's proof of control |
+| Ambiguous-phone repair (0306, 0322) | Forward repair only | Clearing is intentional. Re-running is a no-op. Re-assigning needs the person's proof of control |
+| Normalized single-mobile backfill (0322) | Reversible via `repairIdentityVerifiedPhoneConflict` (`clear_global_phone_for_reverification`) | Legacy `users` rows remain untouched; audited as `phone_backfilled_normalized` |
 | One-sided national-ID clear (0307) | Forward repair only | The missing half cannot be reconstructed from the database. The audit says which identities need re-entry |
 | Email-verification rows | Yes, by dropping the table | Proofs are disposable; the address and `email_verified_at` remain |
-| Audit rows (`platform_identity_events`) | Not reversible, by design | Append-only; the record of a repair is deliberately durable |
-| `0305` trigger | Yes, by dropping the trigger/function | Dropping it re-opens the address-change hole; do not do this in production |
+| Audit rows (`platform_identity_events`) | Not reversible, by design | Protected by `FORCE ROW LEVEL SECURITY` and `trg_platform_identity_events_append_only` |
+| `0305` / `0322` triggers & RLS | Yes, by dropping the trigger/policy/function | Dropping them re-opens verification-carryover or audit-mutation holes; do not do this in production |
 
 No migration in this set creates a wallet, subscription, charge, activation,
 business or membership. A run can be verified with:
 
 ```sql
-SELECT count(*) FROM platform_identity_events WHERE action IN
-  ('phone_backfill_cleared', 'national_id_pair_cleared');
+SELECT action, reason_code, count(*)
+  FROM platform_identity_events
+ WHERE action IN (
+   'phone_backfill_cleared',
+   'phone_backfilled_normalized',
+   'phone_conflict_repaired',
+   'national_id_pair_cleared',
+   'national_id_remediated'
+ )
+ GROUP BY action, reason_code
+ ORDER BY action, reason_code;
 ```
 
 ## Production status

@@ -1549,11 +1549,11 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
   {
     id: "platform.biz-devices",
     module: "Platform — Tenants",
-    entity: "Tenant devices",
+    entity: "Tenant devices (site devices, pairing codes/locations, local installations)",
     routes: ["platform/businesses"],
     ops: { listDetail: ["list_provision_devices"] },
     status: "route-only (by design)",
-    note: "the key-maker POST lane mints device-pairing links — a short-lived ops credential into the business — and the read half is the provision-lifecycle row's list_provision_devices; minting ops keys stays in the console, same doctrine as the other connection-provisioning tiers",
+    note: "issue #1432: list_provision_devices is the read half and now keeps the four device kinds apart — site devices, pairing codes, pairing locations and local/offline installations (status, masked id, versions, last seen, lease, credential-rotation pending) — so its fields match what the console shows and it never returns a secret. The write column stays console-side: the key-maker POST lane mints device-pairing links, enrollment codes and local-installation credentials/rotations — short-lived ops credentials into the business — same doctrine as the other connection-provisioning tiers",
   },
   {
     id: "platform.signup-controls",
@@ -1645,9 +1645,9 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     module: "Platform — Billing",
     entity: "Per-service setup/hourly tariffs and data-retention policy",
     routes: ["platform/services", "platform/businesses/[id]/services"],
-    status: "route-only (by design)",
+    ops: { listDetail: ["get_business_service_status"] },
     note:
-      "issue #1041: publishing a tariff and editing a retention window decide money and data destruction, and every write is audited with before/after. The retention write is owner-only (retention.manage) and no chat-side verb may arm a purge; the per-business activation/hold/retry lanes live on the same console surface.",
+      "issue #1041: publishing a tariff and editing a retention window decide money and data destruction, and every write is audited with before/after. The retention write is owner-only (retention.manage) and no chat-side verb may arm a purge; the per-business activation/hold/retry lanes live on the same console surface. Issue #1432 adds one read verb, get_business_service_status: live activation state, setup-paid flag, retention deadline/purge state, running intervals with settled/upcoming charges and the audited per-business overrides — it cannot quote, enable, disable, hold, settle, charge, purge or start consent.",
     test: "integration/service-activation.integration.test.ts",
   },
   {
@@ -1710,11 +1710,10 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     entity: "Backup config, run, status, peers, tokens, restore",
     routes: ["platform/backup"],
     ops: {
-      listDetail: ["list_backup_runs", "get_backup_health"],
+      listDetail: ["list_backup_runs", "get_backup_health", "get_business_backup_diagnostics"],
       lifecycle: ["run_backup_now"],
     },
-    status: "route-only (by design)",
-    note: "batch BN: backup.read gets its runs and health, backup.run gets run_backup_now (stepUp, admin-audited); the write column stays console-side — config writes embed the encryption passphrase, restore/peers/tokens mint or redeem restore credentials, literally capability-split in the role table",
+    note: "batch BN: backup.read gets its runs and health, backup.run gets run_backup_now (stepUp, admin-audited). Issue #1432 adds the per-business managed-backup diagnosis (tenant_backup.read): destination/custody availability, artifact counts by state, drill result, RPO standing and operator action codes — read-only, with no object keys, URLs, credentials, bytes, retention change or restore. The write column stays console-side — config writes embed the encryption passphrase, restore/peers/tokens mint or redeem restore credentials, literally capability-split in the role table",
     test: "integration/platform-backup.integration.test.ts",
   },
   {

@@ -194,8 +194,8 @@ describe("issue #812 §11 — App Focus narrows the live catalogue", () => {
     // called it — so App Focus was a prompt line and nothing more. This reads
     // the two files that close that gap.
     const service = readFileSync("src/lib/ai-service.ts", "utf8");
-    expect(service, "runAgentTurn must import the router").toMatch(/import \{[^}]*\brouteTools\b[^}]*\} from "\.\/ai-tool-routing"/);
-    expect(service, "runAgentTurn must apply the app focus").toMatch(/routeTools\(/);
+    expect(service, "runAgentTurn must import the selector").toMatch(/import \{[^}]*\bselectAiTools\b[^}]*\} from "\.\/ai-tool-selection"/);
+    expect(service, "runAgentTurn must apply the app focus through the selector").toMatch(/selectAiTools\(\{/);
     expect(service, "and must accept the focus as an option").toMatch(/appFocus\?: AppKey \| null/);
 
     const route = readFileSync("src/app/api/ai/chat/route.ts", "utf8");

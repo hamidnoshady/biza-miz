@@ -105,6 +105,27 @@ beforeAll(async () => {
   );
   bizX.locationId = locX.rows[0].id;
 
+  // Global identity linked to bizX's owner, carrying password_hash and
+  // encrypted national-ID material that must NEVER leak into tenant exports.
+  const ownerIdentity = await source.query<{ id: string }>(
+    `INSERT INTO platform_users (
+       email, password_hash, full_name, national_id_ciphertext, national_id_bidx
+     )
+     VALUES (
+       'export-owner@example.com',
+       '$2b$10$secretpasswordhashdonotexport',
+       'صاحب کسب‌وکار',
+       'v1.secretiv.secrettag.secretciphertext',
+       repeat('f', 64)
+     )
+     RETURNING id`,
+  );
+  await source.query(
+    `INSERT INTO users (business_id, platform_user_id, role, full_name, email, location_id)
+     VALUES ($1, $2, 'owner', 'صاحب کسب‌وکار', 'export-owner@example.com', $3)`,
+    [bizX.id, ownerIdentity.rows[0].id, bizX.locationId],
+  );
+
   const y = await source.query<{ id: string }>(
     "INSERT INTO businesses (name, slug) VALUES ('Noise Co', $1) RETURNING id",
     [`export-y-${randomUUID().slice(0, 8)}`],
@@ -222,6 +243,20 @@ describe("exportTenantData", () => {
   it("omits empty tables entirely", async () => {
     const tables = await tenantExport.exportTenantData(bizX.id);
     expect(tables.every((t) => t.rows.length > 0)).toBe(true);
+  });
+
+  it("strips password_hash and national-ID columns from exported platform_users rows (ESH-199)", async () => {
+    const tables = await tenantExport.exportTenantData(bizX.id);
+    const platformUsers = tables.find((t) => t.name === "platform_users");
+    expect(platformUsers).toBeDefined();
+    expect(platformUsers!.columns).not.toContain("password_hash");
+    expect(platformUsers!.columns).not.toContain("national_id_ciphertext");
+    expect(platformUsers!.columns).not.toContain("national_id_bidx");
+
+    const sql = tenantExport.tenantDataToSql(tables);
+    expect(sql).not.toContain("secretpasswordhashdonotexport");
+    expect(sql).not.toContain("v1.secretiv.secrettag.secretciphertext");
+    expect(sql).not.toContain("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
   });
 });
 

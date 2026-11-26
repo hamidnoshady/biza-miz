@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      The saved-business picker (issue #1572 / ESH-223).
+
+      Deliberately a standalone local document: it runs BEFORE any business's
+      application server exists, because choosing a business is what decides
+      which server to start. It therefore has no access to the Next.js app, its
+      design tokens or its components — the palette below mirrors
+      docs/design-system.md's warm neutrals, teal brand and amber selection so the
+      surface does not look like a different product, and nothing here fetches a
+      remote resource (a CSP with no remote origins confirms it).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;"
+    />
+    <title>انتخاب کسب‌وکار — بیزامیز</title>
+    <style>
+      :root {
+        --background: #faf9f7;
+        --card: #ffffff;
+        --foreground: #1c1917;
+        --muted: #78716c;
+        --muted-surface: #f5f4f2;
+        --border: #e7e5e3;
+        --primary: #0f766e;
+        --primary-foreground: #f0fdfa;
+        --amber-surface: #fef3c7;
+        --amber-foreground: #78350f;
+        --danger: #b91c1c;
+        --radius-card: 1rem;
+        --radius-control: 0.625rem;
+        --shadow-card: 0 1px 2px rgb(41 37 36 / 0.035);
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background: var(--background);
+        color: var(--foreground);
+        font-family: "Vazirmatn", "Segoe UI", Tahoma, sans-serif;
+        font-size: 14px;
+        line-height: 1.7;
+        -webkit-font-smoothing: antialiased;
+      }
+      .shell {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 32px 28px 28px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        min-height: 100%;
+      }
+      header { display: flex; flex-direction: column; gap: 6px; }
+      .brand { font-size: 13px; font-weight: 600; color: var(--primary); letter-spacing: 0.01em; }
+      h1 { margin: 0; font-size: 21px; font-weight: 700; }
+      .lede { margin: 0; color: var(--muted); font-size: 13px; }
+
+      ul.profiles { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+      li.profile {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        width: 100%;
+        padding: 14px 16px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-card);
+        box-shadow: var(--shadow-card);
+        transition: border-color 150ms ease-out, background-color 150ms ease-out;
+      }
+      li.profile[data-selected="true"] { border-color: #99f6e4; background: #f0fdfa; }
+      .avatar {
+        flex: 0 0 auto;
+        width: 42px; height: 42px;
+        display: grid; place-items: center;
+        border-radius: var(--radius-control);
+        background: var(--muted-surface);
+        color: var(--primary);
+        font-weight: 700;
+        font-size: 16px;
+      }
+      .meta { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+      .name { font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .sub { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+      .pill {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 1px 8px;
+        border-radius: 999px;
+        background: var(--muted-surface);
+        font-size: 11.5px;
+        font-weight: 500;
+      }
+      .pill.last { background: var(--amber-surface); color: var(--amber-foreground); }
+      .state { display: inline-flex; align-items: center; gap: 5px; }
+      .dot { width: 7px; height: 7px; border-radius: 999px; background: #a8a29e; }
+      .dot.ready { background: #0d9488; }
+      .dot.empty { background: #d6d3d1; }
+
+      .actions { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+      button {
+        font: inherit;
+        cursor: pointer;
+        border-radius: var(--radius-control);
+        border: 1px solid transparent;
+        padding: 8px 14px;
+        min-height: 38px;
+        transition: background-color 150ms ease-out, border-color 150ms ease-out, opacity 150ms ease-out;
+      }
+      button:focus-visible { outline: 2px solid #0d9488; outline-offset: 2px; }
+      button:disabled { opacity: 0.55; cursor: not-allowed; }
+      .btn-primary { background: var(--primary); color: var(--primary-foreground); font-weight: 600; }
+      .btn-primary:hover:not(:disabled) { background: #115e59; }
+      .btn-ghost { background: transparent; border-color: var(--border); color: var(--foreground); }
+      .btn-ghost:hover:not(:disabled) { background: var(--muted-surface); }
+      .btn-quiet { background: transparent; color: var(--muted); padding: 8px 10px; }
+      .btn-quiet:hover:not(:disabled) { color: var(--danger); background: #fef2f2; }
+
+      footer { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 16px; border-top: 1px solid var(--border); }
+      .hint { color: var(--muted); font-size: 12px; }
+      .add-panel {
+        display: none;
+        flex-direction: column;
+        gap: 10px;
+        padding: 16px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-card);
+        background: var(--card);
+      }
+      .add-panel[data-open="true"] { display: flex; }
+      .add-panel label { font-size: 12.5px; font-weight: 600; }
+      .add-panel input {
+        font: inherit;
+        width: 100%;
+        min-height: 40px;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-control);
+        background: #fff;
+        color: var(--foreground);
+      }
+      .add-panel input:focus-visible { outline: 2px solid #0d9488; outline-offset: 1px; }
+      .add-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+      .error { color: var(--danger); font-size: 12.5px; margin: 0; }
+      .error:empty { display: none; }
+      .busy { color: var(--muted); font-size: 12.5px; }
+      .busy:empty { display: none; }
+      .empty-state {
+        padding: 28px 20px;
+        text-align: center;
+        border: 1px dashed var(--border);
+        border-radius: var(--radius-card);
+        color: var(--muted);
+        background: var(--card);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <span class="brand">بیزامیز دسکتاپ</span>
+        <h1>کدام کسب‌وکار را باز کنیم؟</h1>
+        <p class="lede">
+          هر کسب‌وکار داده، تنظیمات و اتصال مستقل خود را دارد. ورود با نام کاربری و گذرواژهٔ همان
+          کسب‌وکار انجام می‌شود.
+        </p>
+      </header>
+
+      <ul class="profiles" id="profiles" role="list" aria-label="کسب‌وکارهای ذخیره‌شده"></ul>
+
+      <div class="empty-state" id="empty" hidden>
+        هنوز کسب‌وکاری روی این رایانه ذخیره نشده است. برای شروع، «افزودن کسب‌وکار» را بزنید.
+      </div>
+
+      <section class="add-panel" id="add-panel" data-open="false" aria-labelledby="add-title">
+        <label id="add-title" for="add-name">نام نمایشی کسب‌وکار روی این رایانه</label>
+        <input
+          id="add-name"
+          type="text"
+          maxlength="120"
+          autocomplete="off"
+          placeholder="مثلاً شعبهٔ مرکزی"
+          aria-describedby="add-help"
+        />
+        <p class="hint" id="add-help">
+          این نام فقط برای شناسایی در همین رایانه است. اتصال به فضای ابری و همگام‌سازی، در گام بعدی
+          با همان روش ثبت و اتصال دستگاه موجود انجام می‌شود.
+        </p>
+        <p class="error" id="add-error" role="alert"></p>
+        <div class="add-row">
+          <button type="button" class="btn-ghost" id="add-cancel">انصراف</button>
+          <button type="button" class="btn-primary" id="add-submit">ساخت و ادامه</button>
+        </div>
+      </section>
+
+      <footer>
+        <p class="busy" id="busy" role="status" aria-live="polite"></p>
+        <div class="actions">
+          <button type="button" class="btn-ghost" id="add-open">افزودن کسب‌وکار</button>
+          <button type="button" class="btn-quiet" id="quit">بستن برنامه</button>
+        </div>
+      </footer>
+    </div>
+
+    <script>
+      (function () {
+        "use strict";
+        var api = window.bizamizProfiles;
+        var listEl = document.getElementById("profiles");
+        var emptyEl = document.getElementById("empty");
+        var addPanel = document.getElementById("add-panel");
+        var addName = document.getElementById("add-name");
+        var addError = document.getElementById("add-error");
+        var addSubmit = document.getElementById("add-submit");
+        var addCancel = document.getElementById("add-cancel");
+        var busyEl = document.getElementById("busy");
+        var lastUsedId = null;
+        var busy = false;
+
+        function setBusy(message) {
+          busy = Boolean(message);
+          busyEl.textContent = message || "";
+          document.querySelectorAll("button").forEach(function (button) {
+            if (button.id === "quit") return;
+            button.disabled = busy;
+          });
+        }
+
+        function modeLabel(mode) {
+          if (mode === "hybrid") return "ترکیبی (آنلاین و آفلاین)";
+          if (mode === "local") return "کاملاً آفلاین";
+          return "ابری";
+        }
+
+        function el(tag, className, text) {
+          var node = document.createElement(tag);
+          if (className) node.className = className;
+          if (text !== undefined) node.textContent = text;
+          return node;
+        }
+
+        function render(profiles) {
+          listEl.textContent = "";
+          emptyEl.hidden = profiles.length !== 0;
+
+          profiles.forEach(function (profile) {
+            var item = el("li", "profile");
+            item.setAttribute("role", "listitem");
+            item.dataset.selected = String(profile.id === lastUsedId);
+
+            var avatar = el("span", "avatar", (profile.displayName || "؟").trim().charAt(0));
+            avatar.setAttribute("aria-hidden", "true");
+
+            var meta = el("div", "meta");
+            meta.appendChild(el("span", "name", profile.displayName));
+
+            var sub = el("div", "sub");
+            var state = el("span", "state");
+            var ready = profile.hasData === true;
+            state.appendChild(el("span", "dot " + (ready ? "ready" : "empty")));
+            state.appendChild(el("span", null, ready ? "آمادهٔ ورود" : "در انتظار راه‌اندازی اولیه"));
+            sub.appendChild(state);
+            sub.appendChild(el("span", "pill", modeLabel(profile.mode)));
+            if (profile.id === lastUsedId) sub.appendChild(el("span", "pill last", "آخرین کسب‌وکار"));
+            meta.appendChild(sub);
+
+            var actions = el("div", "actions");
+            var open = el("button", "btn-primary", "ورود");
+            open.type = "button";
+            open.setAttribute("aria-label", "ورود به " + profile.displayName);
+            open.addEventListener("click", function () {
+              if (busy) return;
+              setBusy("در حال باز کردن " + profile.displayName + "…");
+              api.choose(profile.id);
+            });
+            actions.appendChild(open);
+
+            var remove = el("button", "btn-quiet", "حذف از این رایانه");
+            remove.type = "button";
+            remove.setAttribute("aria-label", "حذف " + profile.displayName + " از این رایانه");
+            remove.addEventListener("click", function () {
+              if (busy) return;
+              setBusy("در حال بررسی…");
+              api.remove(profile.id);
+            });
+            actions.appendChild(remove);
+
+            item.appendChild(avatar);
+            item.appendChild(meta);
+            item.appendChild(actions);
+            listEl.appendChild(item);
+          });
+        }
+
+        function openAddPanel() {
+          addPanel.dataset.open = "true";
+          addError.textContent = "";
+          addName.value = "";
+          addName.focus();
+        }
+
+        function closeAddPanel() {
+          addPanel.dataset.open = "false";
+          addError.textContent = "";
+          document.getElementById("add-open").focus();
+        }
+
+        document.getElementById("add-open").addEventListener("click", openAddPanel);
+        document.getElementById("quit").addEventListener("click", function () {
+          api.quit();
+        });
+        addCancel.addEventListener("click", closeAddPanel);
+
+        addSubmit.addEventListener("click", function () {
+          var name = addName.value.trim();
+          if (!name) {
+            addError.textContent = "یک نام نمایشی برای این کسب‌وکار بنویسید.";
+            addName.focus();
+            return;
+          }
+          addError.textContent = "";
+          setBusy("در حال ساخت پروفایل…");
+          api.add(name);
+        });
+
+        addName.addEventListener("keydown", function (event) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            addSubmit.click();
+          } else if (event.key === "Escape") {
+            closeAddPanel();
+          }
+        });
+
+        document.addEventListener("keydown", function (event) {
+          if (event.key === "Escape" && addPanel.dataset.open !== "true" && !busy) api.quit();
+        });
+
+        /** An error from the main process is shown where the user is looking. */
+        window.addEventListener("bizamiz:profiles-error", function (event) {
+          setBusy("");
+          var message = (event.detail && event.detail.message) || "عملیات انجام نشد. دوباره تلاش کنید.";
+          if (addPanel.dataset.open === "true") {
+            addError.textContent = message;
+            return;
+          }
+          busyEl.textContent = message;
+        });
+
+        api
+          .list()
+          .then(function (payload) {
+            lastUsedId = payload.lastUsedProfileId || null;
+            render(payload.profiles || []);
+          })
+          .catch(function () {
+            setBusy("");
+            emptyEl.hidden = false;
+            emptyEl.textContent = "فهرست کسب‌وکارهای ذخیره‌شده خوانده نشد. برنامه را دوباره باز کنید.";
+          });
+      })();
+    </script>
+  </body>
+</html>

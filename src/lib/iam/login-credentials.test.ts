@@ -337,4 +337,46 @@ describe("planIdentityBinding", () => {
       emailRowId: null,
     })).toEqual({ platformUserId: null, rekeyFrom: null, insert: true });
   });
+
+  it("supports phone-first passwordless identities and refuses channel-less records (ESH-199)", () => {
+    const phoneOnly: ReplicatedLoginCredential = {
+      membershipId: CANONICAL,
+      platformUserId: CANONICAL,
+      email: null,
+      fullName: "کاربر موبایل",
+      passwordHash: null,
+      phoneE164: "+989121234567",
+      phoneVerified: true,
+      isActive: true,
+      mfa: [],
+      recoveryCodes: [],
+    };
+    expect(validateLoginCredentialPayload({ credentials: [phoneOnly] })).toMatchObject({
+      ok: true,
+      identityContract: "canonical",
+    });
+
+    // Neither email nor E.164 phone -> invalid_credential_record.
+    expect(
+      validateLoginCredentialPayload({
+        credentials: [{ ...phoneOnly, phoneE164: null }],
+      }),
+    ).toEqual({ ok: false, code: "invalid_credential_record" });
+
+    // Fingerprint notices verified-phone changes on phone-only identities.
+    expect(loginCredentialsFingerprint([phoneOnly])).not.toBe(
+      loginCredentialsFingerprint([{ ...phoneOnly, phoneVerified: false }]),
+    );
+
+    // Rekeys a pre-existing local verified-phone row onto the canonical ID when email is null.
+    expect(
+      planIdentityBinding({
+        platformUserId: CANONICAL,
+        linkedPlatformUserId: null,
+        canonicalRowExists: false,
+        emailRowId: null,
+        phoneRowId: LEGACY_LOCAL,
+      }),
+    ).toEqual({ platformUserId: CANONICAL, rekeyFrom: LEGACY_LOCAL, insert: false });
+  });
 });

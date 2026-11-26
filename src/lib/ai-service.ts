@@ -39,7 +39,7 @@ import {
 } from "./ai-capabilities";
 import type { Permission } from "./permissions";
 import type { AppKey } from "./apps";
-import { routeTools, toolGroupsOf } from "./ai-tool-routing";
+import { selectAiTools, type AiToolSelectionContext } from "./ai-tool-selection";
 import { toolProgressEvent, type AiToolProgressEvent } from "./ai-tool-progress";
 import {
   logAiTurnDiagnostics,
@@ -841,6 +841,23 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
    * routing hint for which tool groups to offer; it grants nothing.
    */
   task?: string | null;
+  /**
+   * Issue #1546 Phase 2 — server-resolved selection context. `routeApp` and
+   * `appFocus` are hints; `enabledApps`, `enabledFeatures`, `industry`,
+   * `branchScope` and `agentApp` are resolved from trusted server state by the
+   * caller. The selector can only remove catalogue entries.
+   */
+  toolSelection?: Pick<
+    AiToolSelectionContext,
+    | "routeApp"
+    | "agentApp"
+    | "workspaceFocus"
+    | "enabledApps"
+    | "enabledFeatures"
+    | "industry"
+    | "branchScope"
+    | "locationScoped"
+  >;
   /** Issue #1546 — the product mode, recorded in the latency diagnostics only. */
   runtimeMode?: string;
   /**
@@ -902,29 +919,36 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     : [];
   const catalogue =
     externalCatalogue.length > 0 ? [...staticCatalogue, ...externalCatalogue] : staticCatalogue;
-  // Issue #812 §11 / #1546 — App Focus narrows the catalogue the model can see,
-  // not just the prompt, and the turn's own words + task lens choose which
-  // sections of that app are worth paying for. `routeTools` returns null for
-  // "no focus", so an unfocused turn is byte-for-byte what it was before.
-  const appRouted = opts.appFocus
-    ? routeTools(
-        catalogue.map((tool) => tool.function.name),
-        [opts.appFocus],
-        {
-          task: opts.task ?? null,
-          message: [...messages].reverse().find((message) => message.role === "user")?.content ?? null,
-        },
-      )
-    : null;
-  const appNarrowed = appRouted
-    ? catalogue.filter((tool) => appRouted.includes(tool.function.name))
-    : catalogue;
+  // Issue #812 §11 / #1546 — one selector chooses the declarations this turn
+  // may see from the existing catalogue. It uses server-resolved app/feature/
+  // branch/project/agent context plus the member's own instruction; it never
+  // creates a schema and never calls a model. An app focus and a route hint can
+  // only narrow the catalogue, and the permission filter below still decides
+  // what this member may actually use.
+  const latestUserMessage =
+    [...messages].reverse().find((message) => message.role === "user")?.content ?? null;
+  const selection = selectAiTools({
+    ...opts.toolSelection,
+    catalogue,
+    mode,
+    appFocus: opts.appFocus ?? null,
+    task: opts.task ?? null,
+    message: latestUserMessage,
+    permissions: opts.permissions ?? null,
+    workspaceAvailable: promptContext.workspaceAiAvailable,
+    projectScoped: opts.projectScoped === true,
+    agentAllowedTools: opts.toolAllowlist ?? null,
+    retrieval: retrievalReady,
+    browserNavigation: opts.browserNavigation === true,
+    hasAttachment,
+  });
   // Filtering happens before provider serialization and again in the executor.
   // A newly-added tool without a registry entry therefore cannot accidentally
-  // become available to a tenant member.
+  // become available to a tenant member. The selector already applied this for
+  // diagnostics; this is the service's independent gate, unchanged.
   const tools = opts.permissions
-    ? filterAiToolsByPermissions(appNarrowed, opts.permissions)
-    : appNarrowed;
+    ? filterAiToolsByPermissions(selection.tools, opts.permissions)
+    : selection.tools;
   const allowedActionTypes = permissionActionTypes ? new Set<string>(permissionActionTypes) : null;
   const canPropose = tools.some((tool) => tool.function.name === "propose_action");
   const canRequestInput = tools.some((tool) => tool.function.name === "request_input");
@@ -950,7 +974,8 @@ function traceOf(name: string, args: Record<string, unknown>): AgentToolCallTrac
     model: config.model,
     mode: opts.runtimeMode,
     toolSchemaCount: tools.length,
-    toolGroups: toolGroupsOf(tools.map((tool) => tool.function.name)),
+    toolGroups: [...new Set(selection.diagnostics.included.map((row) => row.group))],
+    toolSelection: selection.diagnostics,
     startedAt: turnStartedAt,
   });
   function finishTurnDiagnostics() {

@@ -306,6 +306,7 @@ function desktopServerEnvironment(config, runtimeUrl, appVersion = "unknown", op
     updateTargetPath,
     updatePolicyPath,
     updateCommandPath,
+    identityPath,
   } = options;
   return {
     DATABASE_URL: runtimeUrl,
@@ -361,6 +362,9 @@ function desktopServerEnvironment(config, runtimeUrl, appVersion = "unknown", op
     ...(updateTargetPath ? { DESKTOP_UPDATE_TARGET_PATH: updateTargetPath } : {}),
     ...(updatePolicyPath ? { DESKTOP_UPDATE_POLICY_PATH: updatePolicyPath } : {}),
     ...(updateCommandPath ? { DESKTOP_UPDATE_COMMAND_PATH: updateCommandPath } : {}),
+    // #1572 — where this profile's backend publishes the non-secret identity
+    // the shell reads on the next launch (src/lib/desktop-identity-file.ts).
+    ...(identityPath ? { DESKTOP_IDENTITY_PATH: identityPath } : {}),
   };
 }
 
@@ -497,10 +501,18 @@ function stopProcessTree(child, logger) {
 }
 
 class BackendManager {
-  constructor({ app, logger, safeStorage }) {
+  /**
+   * `profileDataDir` is the multi-business seam (issue #1571): one saved
+   * business profile owns a whole `Configuration/Data/Backup/Logs` root, and this
+   * manager serves exactly one such root at a time. Omitted (tests, and any
+   * legacy caller), it falls back to `app.getPath("userData")` — the historical
+   * single-business layout — so nothing about the old behaviour changes.
+   */
+  constructor({ app, logger, safeStorage, profileDataDir }) {
     this.app = app;
     this.logger = logger;
     this.safeStorage = safeStorage;
+    this.profileDataDir = typeof profileDataDir === "string" && profileDataDir ? path.resolve(profileDataDir) : null;
     this.pg = null;
     this.server = null;
     this.config = null;
@@ -659,6 +671,11 @@ class BackendManager {
     if (this.stopRequested) throw new BackendStoppedError();
   }
 
+  /** The data root this manager owns: one business profile, or the install root. */
+  dataRoot() {
+    return this.profileDataDir || this.app.getPath("userData");
+  }
+
   // Last-resort, synchronous `pg_ctl stop` at process exit. Installed before
   // PostgreSQL can start, so it also covers a quit during first-run initdb,
   // migrations, or a start that is cancelled halfway: the postmaster cannot
@@ -673,7 +690,7 @@ class BackendManager {
   }
 
   serverPidPath() {
-    return path.join(computePaths(this.app.getPath("userData")).configDir, "server.pid");
+    return path.join(computePaths(this.dataRoot()).configDir, "server.pid");
   }
 
   // A crashed or force-killed shell leaves pg_ctl's detached PostgreSQL and
@@ -741,7 +758,7 @@ class BackendManager {
   }
 
   async start() {
-    const userDataDir = this.app.getPath("userData");
+    const userDataDir = this.dataRoot();
     const runtimeDir = this.resolveRuntimeDir();
     if (!fs.existsSync(path.join(runtimeDir, "bin", "server.cjs"))) {
       throw new StartupError("runtime", `Desktop runtime is missing at ${runtimeDir}.`);
@@ -873,6 +890,7 @@ class BackendManager {
       updateTargetPath: path.join(desktopPaths.configDir, "update-target.json"),
       updatePolicyPath: path.join(desktopPaths.configDir, "update-policy.json"),
       updateCommandPath: path.join(desktopPaths.configDir, "update-command.json"),
+      identityPath: path.join(desktopPaths.configDir, "business-identity.json"),
     });
     // Last cancellation point, in the same tick as the spawn: a stop() that has
     // already run must not leave an unsupervised application server behind,
@@ -910,7 +928,7 @@ class BackendManager {
       dumpPath: backupPath,
       source: path.basename(backupPath),
       apply: false,
-      emergencyDir: computePaths(this.app.getPath("userData")).emergencyBackupDir,
+      emergencyDir: computePaths(this.dataRoot()).emergencyBackupDir,
     });
   }
 
@@ -947,7 +965,7 @@ class BackendManager {
 
   async stopPostgresGracefully(instance = this.pg) {
     if (!instance) return;
-    const dataDir = computePaths(this.app.getPath("userData")).pgDataDir;
+    const dataDir = computePaths(this.dataRoot()).pgDataDir;
     try {
       const pgCtl = await this.pgControlPath();
       await new Promise((resolve, reject) => {
