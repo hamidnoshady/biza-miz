@@ -255,9 +255,10 @@ export function selectAiTools(input: AiToolSelectionInput): AiToolSelection {
   const workspaceGroups: ToolGroup[] = [];
   if (input.workspaceFocus || input.projectScoped) workspaceGroups.push("accounting:workspace");
   if ((input.workspaceFocus || input.projectScoped) && dependencyUnmet("workspace", input) === false) {
-    // The AEC section is still filtered by its own dependency below; including
-    // it here lets a project turn keep it when the business is really AEC.
-    if (!dependencyUnmet("aecIndustry", input)) workspaceGroups.push("accounting:projects");
+    // The section holds both general contract/milestone reads and AEC-only
+    // reads; the AEC tools carry their own industry dependency, so a non-AEC
+    // Workspace business keeps the general ones.
+    workspaceGroups.push("accounting:projects");
   }
 
   const preferredApp = agentApp ?? explicitApp ?? routeApp;
@@ -279,8 +280,7 @@ export function selectAiTools(input: AiToolSelectionInput): AiToolSelection {
   if ((input.projectScoped || input.workspaceFocus) && input.workspaceAvailable !== false) {
     for (const name of names) {
       const group = toolGroupOf(name);
-      if (group === "accounting:workspace") selectedNames.add(name);
-      if (group === "accounting:projects" && !dependencyUnmet("aecIndustry", input)) selectedNames.add(name);
+      if (group === "accounting:workspace" || group === "accounting:projects") selectedNames.add(name);
     }
   }
 

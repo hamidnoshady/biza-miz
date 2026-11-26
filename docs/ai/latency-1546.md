@@ -238,7 +238,7 @@ Measured with the application estimator over the dashboard catalogue
 | Growth · campaign question | 40 | 12,307 | **65.6% fewer** |
 | Website · status question | 28 | 9,543 | **73.3% fewer** |
 | Cross-app (sales + CRM + website + inventory) | 81 | 19,642 | 45.1% fewer (safety, not the token target) |
-| CRM project conversation (non-AEC) | 68 | 17,725 | **50.5% fewer** |
+| CRM project conversation (non-AEC; general Workspace reads kept, AEC reads removed) | 71 | 18,828 | 47.4% fewer |
 | Branch-scoped Accounting vague question | 119 | 29,295 | 18.1% fewer |
 | Focus on a disabled app | 18 | 7,788 | 78.2% fewer (shared safety surface only) |
 | `ai.use`-only member, sales question | 10 | 6,316 | 82.3% fewer |

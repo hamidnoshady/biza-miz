@@ -85,12 +85,13 @@ const GROUP_METADATA: Record<ToolGroup, AiToolGroupMetadata> = {
   },
   "accounting:projects": {
     group: "accounting:projects",
-    // AEC reads are construction-only (see `runAecReadTool`); the Workspace
-    // eligibility check is the other half of the dependency.
+    // Most of this section is AEC-only, but three contract/milestone reads are
+    // general Workspace reads. The group therefore requires Workspace only; the
+    // AEC-specific tools carry the industry dependency in `TOOL_OVERRIDES`.
     app: "accounting",
     tasks: ["operations"],
     features: [],
-    dependencies: ["workspace", "aecIndustry"],
+    dependencies: ["workspace"],
   },
   "accounting:workspace": {
     group: "accounting:workspace",
@@ -150,6 +151,20 @@ const TOOL_OVERRIDES: Readonly<Record<string, ToolMetadataOverride>> = {
   get_reservation_conflicts: { features: ["reservations"] },
   get_table_turnover_rate: { features: ["reservations"] },
   get_courier_performance: { features: ["delivery"] },
+  // Construction-only AEC reads. The contract/milestone reads in the same
+  // section (`list_expiring_contracts`, `list_upcoming_milestones`,
+  // `list_delayed_project_activities`) stay available to every Workspace
+  // business, so only these carry the industry dependency.
+  list_site_issues: { dependencies: ["aecIndustry"] },
+  list_project_commercial_risks: { dependencies: ["aecIndustry"] },
+  list_change_orders: { dependencies: ["aecIndustry"] },
+  list_procurement_delays: { dependencies: ["aecIndustry"] },
+  list_payment_certificates: { dependencies: ["aecIndustry"] },
+  get_latest_drawing_revision: { dependencies: ["aecIndustry"] },
+  list_pending_rfis: { dependencies: ["aecIndustry"] },
+  list_pending_submittals: { dependencies: ["aecIndustry"] },
+  get_aec_project_financial_health: { dependencies: ["aecIndustry"] },
+  get_boq_variance: { dependencies: ["aecIndustry"] },
 };
 
 export interface AiToolMetadata {

@@ -290,6 +290,8 @@ describe("issue #1546 Phase 2 — context-aware selection", () => {
     const crmNames = crmProject.tools.map((tool) => tool.function.name);
     expect(crmNames).toContain("get_workspace_dashboard");
     expect(crmNames).toContain("find_customers");
+    // General Workspace reads survive; construction-only reads do not.
+    expect(crmNames).toContain("list_expiring_contracts");
     expect(crmNames).not.toContain("get_boq_variance");
 
     const aecProject = select({
