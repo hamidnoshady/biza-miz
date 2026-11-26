@@ -76,6 +76,30 @@ function setup(overrides: Partial<Parameters<typeof useAiChat>[0]> = {}) {
   );
 }
 
+describe("issue #1546 Phase 2 — the page is a routing hint", () => {
+  it("sends the current page but leaves authorization to the server", async () => {
+    const sent: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: { body: string }) => {
+        sent.push(JSON.parse(init.body) as Record<string, unknown>);
+        return {
+          ok: true,
+          body: sseBody([{ event: "done", data: { messageId: "m1" } }]),
+          json: async () => ({}),
+        } as unknown as Response;
+      }),
+    );
+    const { result } = setup({ routePath: "/accounting/pos" });
+    await act(async () => {
+      await result.current.sendMessage("سلام");
+    });
+    expect(sent[0]?.routePath).toBe("/accounting/pos");
+    // The client sends no permission or tenant claim; the server owns those.
+    expect(sent[0]).not.toHaveProperty("permissions");
+  });
+});
+
 describe("§19 — an incomplete reply is marked, never passed off as complete", () => {
   it("marks a stream that ended without its terminal event as incomplete", async () => {
     // A stream that delivers text and then simply ends. No `done`, no `error` —

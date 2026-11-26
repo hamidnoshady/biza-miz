@@ -19,7 +19,9 @@ const Context = createContext<ContextValue | null>(null);
  */
 export function PersistentTenantAiProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const chat = useAiChat({ mode: "dashboard" });
+  // Issue #1546 Phase 2 — the docked assistant's current page is a tool-routing
+  // hint. It never grants access; the chat route validates it on the server.
+  const chat = useAiChat({ mode: "dashboard", routePath: pathname });
   const [account, setAccount] = useState<string | null>(null);
   const accountRef = useRef<string | null>(null);
   const startNewConversationRef = useRef(chat.resetAccount);

@@ -210,6 +210,12 @@ export interface UseAiChatOptions {
    */
   projectId?: string | null;
   appFocus?: AiAppFocus;
+  /**
+   * Issue #1546 Phase 2 — the tenant page this assistant is docked beside. It
+   * is a narrowing hint only; the server maps it through the route registry and
+   * still intersects the result with the member's permissions.
+   */
+  routePath?: string | null;
   runtimeMode?: AiRuntimeMode;
 }
 
@@ -220,11 +226,14 @@ export function useAiChat({
   onConversationLoaded,
   projectId = null,
   appFocus = "all",
+  routePath = null,
   runtimeMode: initialRuntimeMode = AI_RUNTIME_MODES[0],
 }: UseAiChatOptions) {
   const router = useRouter();
   const appFocusRef = useRef<AiAppFocus>(appFocus);
   const projectIdRef = useRef<string | null>(projectId);
+  const routePathRef = useRef<string | null>(routePath);
+  routePathRef.current = routePath;
   const canPropose = mode === "wizard" || mode === "dashboard";
   const [messages, setMessages] = useState<AiChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -668,6 +677,8 @@ export function useAiChat({
           task,
           customTask: customTask.trim() || undefined,
           appFocus: appFocusRef.current,
+          // Server-validated hint only; never an authorization input.
+          routePath: routePathRef.current ?? undefined,
           runtimeMode,
           allowActions: actionsAllowed,
         }),
