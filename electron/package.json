@@ -46,6 +46,7 @@
       "app-paths.js",
       "backend-manager.js",
       "profile-registry.js",
+      "business-identity-file.js",
       "profile-manager.js",
       "profile-picker.js",
       "profile-picker-preload.js",
