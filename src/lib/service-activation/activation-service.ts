@@ -72,16 +72,26 @@ import {
 } from "../billing/resolver/service";
 import { splitSegmentByCoverage } from "../billing/resolver/prepaid";
 import type { ResolvedCharge } from "../billing/resolver/precedence";
+import {
+  issueComplimentaryGrantTx,
+  readActiveComplimentaryGrant,
+  resolveSignupOfferForBusiness,
+  type EffectiveSignupOffer,
+} from "../complimentary-grant-service";
+import { isComplimentaryMode } from "../complimentary-grants";
 
 /**
  * The reason a setup amount differs from the published tariff, in the
  * vocabulary `quoteServiceActivation` reports. A discount is still an approved
  * policy, so it is reported as an inclusion; a zero tariff is its own fact.
  */
-function setupWaivedReasonFor(charge: ResolvedCharge): "plan_included" | "published_free" | null {
+function setupWaivedReasonFor(
+  charge: ResolvedCharge,
+): "plan_included" | "published_free" | "complimentary_grant" | null {
   const line = charge.lines[0];
   if (!line) return null;
   if (line.explanation.code === "published_free") return "published_free";
+  if (line.explanation.code === "complimentary_grant") return "complimentary_grant";
   if (line.inclusionRial > 0 || line.discountRial > 0) return "plan_included";
   return null;
 }
@@ -656,6 +666,20 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
     if (!available) return { status: "unavailable", reason: "app_unavailable" };
   }
 
+  // GitHub #1579 — the effective signup offer for this business. It is read
+  // before the transaction (a catalogue read) and applied inside it, after the
+  // existing-activation branch, so an already-paid tenant is never affected by
+  // a policy published later.
+  const offer: EffectiveSignupOffer | null =
+    identity.kind === "app"
+      ? await resolveSignupOfferForBusiness({
+          businessId,
+          businessType: (await readBusinessIndustry(businessId)) ?? null,
+          identity,
+          at: nowIso,
+        })
+      : null;
+
   return withTenantTransaction(businessId, async (client) => {
     await lockIdentity(client, businessId, identity);
     const existing = await lockActivationRow(client, businessId, identity);
@@ -681,10 +705,44 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
       });
     }
 
+    // A `not_selectable` policy removes the app from the signup offer and
+    // blocks a new activation under it. It can never be overridden by a
+    // client; the platform availability check above already ran.
+    if (offer && !offer.selectable) {
+      return { status: "unavailable", reason: "not_selectable" };
+    }
+    // A complimentary offer is the explicit commercial authority that may
+    // activate without a published paid tariff. Anything else still fails
+    // closed, exactly as before: a missing tariff is never implicitly free.
+    const complimentary =
+      offer != null && offer.policy != null && isComplimentaryMode(offer.mode);
+    const fullyComplimentary =
+      complimentary && offer!.waiveSetup && offer!.waiveRental;
+
     const setupContext = await readServiceChargeContext({ businessId, identity, at: nowIso });
-    const tariff = setupContext.tariff;
-    if (!tariff) return { status: "not_configured" };
+    const publishedTariff = setupContext.tariff;
+    if (!publishedTariff && !fullyComplimentary) return { status: "not_configured" };
+    // A zero reference tariff lets the canonical arithmetic run for an
+    // authorized zero-cost activation without inventing a price row.
+    const tariff = publishedTariff ?? {
+      id: "complimentary",
+      serviceKind: identity.kind,
+      serviceKey: identity.key,
+      version: 0,
+      currency: "IRR" as const,
+      setupMode: "fixed" as const,
+      setupFixedRial: 0,
+      setupEquivalentHours: 0,
+      hourlyRateRial: 0,
+      published: true,
+      effectiveFrom: nowIso,
+      effectiveUntil: null,
+      note: null,
+      createdBy: null,
+      createdAt: nowIso,
+    };
     const resolvedSetup = setupChargeFromContext(setupContext, nowIso);
+    const waiverSetupRial = complimentary && offer!.waiveSetup ? 0 : null;
 
     const balance = await lockWallet(client, businessId);
     const quote = quoteServiceActivation({
@@ -693,10 +751,13 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
       walletBalanceRial: balance,
       nowIso,
       // The canonical resolver is the only source of a changed setup amount: an
-      // approved plan inclusion or configured discount (ESH-193). A refusal
-      // keeps the published tariff rather than charging zero.
-      setupRialOverride: resolvedSetup.ok ? resolvedSetup.totals.netRial : null,
-      setupWaivedReason: setupWaivedReasonFor(resolvedSetup),
+      // approved plan inclusion or configured discount (ESH-193), or a stored
+      // complimentary policy waiver (#1579). A refusal keeps the published
+      // tariff rather than charging zero.
+      setupRialOverride: waiverSetupRial ?? (resolvedSetup.ok ? resolvedSetup.totals.netRial : null),
+      setupWaivedReason:
+        waiverSetupRial != null ? "complimentary_grant" : setupWaivedReasonFor(resolvedSetup),
+      rentalWaived: complimentary === true && offer!.waiveRental,
     });
     if (!quote.eligible) {
       return {
@@ -713,6 +774,19 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
       reserveRial: quote.reserveRial,
       priceVersion: tariff.version,
       quotedAt: nowIso,
+      // #1579 — the offer this quote was issued under, so a later policy
+      // revision cannot rewrite what the customer was shown.
+      signupOffer: offer?.policy
+        ? {
+            policyId: offer.policy.id,
+            policyVersion: offer.policy.version,
+            mode: offer.mode,
+            freeDays: offer.freeDays,
+            waiveSetup: offer.waiveSetup,
+            waiveRental: offer.waiveRental,
+            scope: offer.scope,
+          }
+        : null,
       // ESH-193: why the amount is what it is, and which policy priced it.
       policyVersion: setupContext.policyVersion,
       setupWaivedReason: quote.setupWaivedReason,
@@ -820,6 +894,39 @@ export async function activateService(input: ActivateServiceInput): Promise<Acti
       tariff,
       trigger: "activation",
     });
+    // GitHub #1579 — the trial clock starts at this successful activation
+    // commit, never at signup/selection. `activation_id` is unique, so a
+    // retried request returns the same grant instead of a new free period.
+    const grant =
+      complimentary && offer?.policy
+        ? await issueComplimentaryGrantTx(client, {
+            businessId,
+            identity,
+            policy: offer.policy,
+            activationId,
+            startsAt: nowIso,
+            actor: input.actorUserId ?? null,
+          })
+        : null;
+    if (grant) {
+      await logEvent(client, {
+        businessId,
+        activationId,
+        kind: identity.kind,
+        key: identity.key,
+        action: "complimentary_grant_issued",
+        actorUserId: input.actorUserId ?? null,
+        detail: {
+          grantId: grant.id,
+          policyId: grant.policyId,
+          policyVersion: grant.policyVersion,
+          startsAt: grant.startsAt,
+          expiresAt: grant.expiresAt,
+          waiveSetup: grant.waiveSetup,
+          waiveRental: grant.waiveRental,
+        },
+      });
+    }
     await logEvent(client, {
       businessId,
       activationId,
@@ -1055,7 +1162,23 @@ async function settleIntervalTx(
   const startedAt = iso(interval.started_at)!;
   const hardEnd = interval.ended_at ? iso(interval.ended_at)! : null;
   const cursor = iso(interval.last_settled_at) ?? startedAt;
-  const target = hardEnd && hardEnd < endIso ? hardEnd : endIso;
+  let target = hardEnd && hardEnd < endIso ? hardEnd : endIso;
+  // GitHub #1579 — a complimentary grant's exact expiry is a hard settlement
+  // boundary. Reading it (including an already-expired grant, whose coverage
+  // ended before this pass ran) means an uncovered second after expiry is never
+  // silently rented: the interval stops there and the service is suspended
+  // through the existing mechanism, which never starts a purge countdown.
+  const { rows: grantRows } = await client.query<{ expires_at: Date | string | null }>(
+    `SELECT expires_at
+       FROM business_complimentary_grants
+      WHERE activation_id = $1 AND expires_at IS NOT NULL
+      ORDER BY expires_at DESC
+      LIMIT 1`,
+    [interval.activation_id],
+  );
+  const grantExpiry = grantRows[0]?.expires_at ? iso(grantRows[0].expires_at) : null;
+  const grantBoundaryReached = grantExpiry != null && Date.parse(target) > Date.parse(grantExpiry);
+  if (grantBoundaryReached) target = grantExpiry!;
   const seconds = billableSecondsBetween(cursor, target);
   if (seconds <= 0) return { status: "not_due" };
   if (!closing && !hardEnd && seconds < Number(interval.minimum_unit_seconds)) {
@@ -1198,6 +1321,37 @@ async function settleIntervalTx(
       WHERE id = $1`,
     [interval.activation_id, target],
   );
+
+  if (grantBoundaryReached) {
+    // Stop chargeable runtime at the grant's exact expiry. A suspension is
+    // deliberately NOT a customer disable: `disabled_at`/`retention_deadline`
+    // stay untouched, so no data is purged because a free period ended.
+    await client.query(
+      `UPDATE service_activation_intervals
+          SET ended_at = $2::timestamptz
+        WHERE id = $1 AND ended_at IS NULL`,
+      [interval.id, target],
+    );
+    const suspended = await client.query<{ service_kind: ServiceKind; service_key: string }>(
+      `UPDATE business_service_activations
+          SET state = $2,
+              suspended_at = $3::timestamptz,
+              suspension_reason = 'trial_grace',
+              updated_at = now()
+        WHERE id = $1 AND state = 'active'
+        RETURNING service_kind, service_key`,
+      [interval.activation_id, SUSPENSION_STATE.trial_grace, target],
+    );
+    await logEvent(client, {
+      businessId: interval.business_id,
+      activationId: interval.activation_id,
+      kind: suspended.rows[0]?.service_kind ?? "app",
+      key: suspended.rows[0]?.service_key ?? "",
+      action: "complimentary_grant_expired",
+      actorUserId: actorUserId ?? null,
+      detail: { grantExpiry: target, settlement: "stopped_at_expiry" },
+    });
+  }
 
   return { status: "settled", billedSeconds: seconds, amountRial: amount, periodStart: cursor, periodEnd: target };
 }

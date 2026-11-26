@@ -27,9 +27,15 @@ import {
   selectionRecord,
   setupAppPricing,
   setupAppTotals,
+  STANDARD_SETUP_OFFER,
   type SetupAppCard,
   type SetupAppCatalogData,
+  type SetupAppOffer,
 } from "./setup-apps";
+import {
+  resolveSignupOffersForBusiness,
+  type EffectiveSignupOffer,
+} from "./complimentary-grant-service";
 
 export type SetupAppCatalog = SetupAppCatalogData;
 
@@ -61,6 +67,19 @@ export async function readSetupWalletBalanceRial(businessId: string): Promise<nu
 export async function getSelectedSetupApps(businessId: string): Promise<AppKey[] | null> {
   const stored = await getSetting<unknown>(businessId, SETTING_KEYS.setupSelectedApps);
   return stored == null ? null : normalizeSelectedApps(stored);
+}
+
+/** Project the resolver's offer onto the card's client-safe shape. */
+function setupOfferOf(offer: EffectiveSignupOffer | undefined): SetupAppOffer {
+  if (!offer || !offer.policy) return STANDARD_SETUP_OFFER;
+  return {
+    mode: offer.mode,
+    freeDays: offer.freeDays,
+    waiveSetup: offer.waiveSetup,
+    waiveRental: offer.waiveRental,
+    scope: offer.scope,
+    policyVersion: offer.policyVersion,
+  };
 }
 
 function activationFor(
@@ -116,6 +135,13 @@ export async function getSetupAppCatalog(businessId: string): Promise<SetupAppCa
   const selected = stored == null ? [] : normalizeSelectedApps(stored);
   const selectedSet = new Set(selected);
 
+  // The effective signup offer per app, resolved once from the policy
+  // catalogue; the card and the save endpoint both read this same decision.
+  const offers = await resolveSignupOffersForBusiness(
+    businessId,
+    APPS.map((app) => app.key),
+  );
+
   const cards = await Promise.all(
     APPS.map(async (app) => {
       const tariff = await serviceTariffAt({ kind: "app", key: app.key });
@@ -128,6 +154,7 @@ export async function getSetupAppCatalog(businessId: string): Promise<SetupAppCa
         deploymentProfile,
         available: availability[app.key]?.usable ?? true,
         pricing: setupAppPricing(tariff),
+        offer: setupOfferOf(offers.get(app.key)),
         selected: selectedSet.has(app.key),
         ...status,
         activation: activationFor(activations, app.key),
