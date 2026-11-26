@@ -24,6 +24,7 @@
  * Framework-free (no `db`, no `next`), so the service, the SDK adapter and any
  * benchmark harness share one shape.
  */
+import type { AiToolSelectionDiagnostics } from "./ai-tool-selection";
 
 /** One provider round: what it cost and how long it took. */
 export interface AiRoundDiagnostics {
@@ -54,6 +55,8 @@ export interface AiTurnDiagnostics {
   toolSchemaCount: number;
   /** The app sections the routing offered, for auditing the selection. */
   toolGroups: string[];
+  /** Issue #1546 Phase 2 — sanitized reasons, counts and schema-token estimate. */
+  toolSelection?: AiToolSelectionDiagnostics;
   rounds: AiRoundDiagnostics[];
   /** Total provider rounds, including the final plain answer. */
   roundCount: number;
@@ -130,6 +133,7 @@ export function startTurnDiagnostics(input: {
   mode?: string;
   toolSchemaCount: number;
   toolGroups?: string[];
+  toolSelection?: AiToolSelectionDiagnostics;
   startedAt: number;
 }): AiTurnDiagnostics {
   return {
@@ -138,6 +142,7 @@ export function startTurnDiagnostics(input: {
     ...(input.mode ? { mode: input.mode } : {}),
     toolSchemaCount: input.toolSchemaCount,
     toolGroups: input.toolGroups ?? [],
+    ...(input.toolSelection ? { toolSelection: input.toolSelection } : {}),
     rounds: [],
     roundCount: 0,
     totalMs: 0,

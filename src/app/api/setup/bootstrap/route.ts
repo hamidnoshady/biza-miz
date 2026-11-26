@@ -10,6 +10,7 @@ import {
 } from "@/lib/business-provisioning";
 import { isIndustry, type Industry } from "@/lib/industries";
 import { hasAnyUser } from "@/lib/setup-state";
+import { publishDesktopBusinessIdentity } from "@/lib/desktop-identity-file";
 import { autoProvisionBusinessVirtualKey } from "@/lib/ai-gateway-service";
 import {
   commitLocalActivationRecordAndAcknowledge,
@@ -181,6 +182,16 @@ export async function POST(request: NextRequest) {
     }
     throw err;
   }
+
+  // #1572 — publish the business this backend just created (Full Offline or
+  // connected) for the desktop shell, which reads it on the next launch. The
+  // Cloud origin is known only for a locally activated install; the file still
+  // carries the tenant id and subdomain.
+  publishDesktopBusinessIdentity({
+    businessId: created.businessId,
+    businessSubdomain: created.businessSubdomain,
+    cloudOrigin: localEnrollment?.cloudOrigin ?? null,
+  });
 
   const userAgent = request.headers.get("user-agent");
   const opened = await withTenant(created.businessId, () =>

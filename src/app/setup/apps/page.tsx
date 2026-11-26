@@ -25,6 +25,7 @@ const REASON_LABEL: Record<NonNullable<SetupAppCard["unavailableReason"]>, strin
   deployment: "در حالت نصب محلی/آفلاین این برنامه ارائه نمی‌شود.",
   availability: "این برنامه در حال حاضر برای کسب‌وکار شما در دسترس نیست.",
   tariff: "تعرفهٔ منتشرشده‌ای برای این برنامه وجود ندارد؛ فعلاً قابل انتخاب نیست.",
+  not_selectable: "این برنامه در فروشگاه ثبت‌نام ارائه نمی‌شود.",
 };
 
 /**
@@ -115,12 +116,19 @@ export default function AppsStep() {
     );
   }
 
+  // Waived charges contribute nothing: the owner's expected total must agree
+  // with the authoritative quote the activation will use.
+  const waived = (card: SetupAppCard, charge: "setup" | "rental") =>
+    card.offer.mode !== "standard" &&
+    (charge === "setup" ? card.offer.waiveSetup : card.offer.waiveRental);
   const totals = data.cards
     .filter((card) => selected.has(card.key) && card.pricing)
     .reduce(
       (sum, card) => ({
-        setupRial: sum.setupRial + (card.pricing?.setupRial ?? 0),
-        estimated24hRial: sum.estimated24hRial + (card.pricing?.estimated24hRial ?? 0),
+        setupRial: sum.setupRial + (waived(card, "setup") ? 0 : card.pricing?.setupRial ?? 0),
+        estimated24hRial:
+          sum.estimated24hRial +
+          (waived(card, "rental") ? 0 : card.pricing?.estimated24hRial ?? 0),
       }),
       { setupRial: 0, estimated24hRial: 0 },
     );
@@ -159,6 +167,17 @@ export default function AppsStep() {
                     {card.activation?.active ? (
                       <span className="text-xs text-emerald-700 dark:text-emerald-300">فعال</span>
                     ) : null}
+                    {card.offerLabel ? (
+                      <span
+                        className={
+                          card.offer.mode === "free_days" || card.offer.mode === "free_indefinite"
+                            ? "mt-1 inline-block rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:text-emerald-300"
+                            : "mt-1 inline-block rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground"
+                        }
+                      >
+                        {card.offerLabel}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
                 {isSelected ? (
@@ -187,13 +206,17 @@ export default function AppsStep() {
                   <div>
                     <dt className="text-xs text-muted-foreground">هزینهٔ راه‌اندازی یک‌باره</dt>
                     <dd className="mt-1 font-semibold tabular-nums text-foreground">
-                      {money.format(card.pricing.setupRial)}
+                      {waived(card, "setup")
+                        ? "معاف — رایگان"
+                        : money.format(card.pricing.setupRial)}
                     </dd>
                   </div>
                   <div>
                     <dt className="text-xs text-muted-foreground">برآورد روزانه (۲۴ ساعت)</dt>
                     <dd className="mt-1 font-semibold tabular-nums text-foreground">
-                      {money.format(card.pricing.estimated24hRial)}
+                      {waived(card, "rental")
+                        ? "معاف — رایگان"
+                        : money.format(card.pricing.estimated24hRial)}
                     </dd>
                   </div>
                 </dl>
@@ -204,10 +227,12 @@ export default function AppsStep() {
                 </p>
               )}
 
-              {card.pricing ? (
+                              {card.pricing ? (
                 <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                  نرخ ساعتی {money.format(card.pricing.hourlyRial)} است و مصرف هوش
-                  مصنوعی، پیامک، فضای رسانه و ترافیک سایت جداگانه محاسبه می‌شود.
+                  {waived(card, "rental")
+                    ? "در دورهٔ رایگان، هزینهٔ فعال بودن برنامه معاف است و پس از پایان آن به‌طور خودکار به اشتراک پرداختی تبدیل نمی‌شود."
+                    : `نرخ ساعتی ${money.format(card.pricing.hourlyRial)} است.`}{" "}
+                  مصرف هوش مصنوعی، پیامک، فضای رسانه و ترافیک سایت جداگانه محاسبه می‌شود.
                 </p>
               ) : null}
 

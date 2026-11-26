@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSession, withTenantScope } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { checkLoginLockout, auditLoginFailure } from "@/lib/employee-service";
-import { isRecentAuth, requireRecentAuth } from "@/lib/recent-auth";
+import { isRecentAuth } from "@/lib/recent-auth";
+import { requireSensitiveRecentAuth } from "@/lib/sensitive-step-up";
 import {
   canonicalMemberPhone,
   consumeSelfPhoneChallenges,
@@ -130,7 +131,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ status: "cancelled", cancelled });
   }
 
-  const recentAuthError = requireRecentAuth(session);
+  // #1386 — moving the login number is the SIM-swap takeover step, so an
+  // OTP-only session on an account with a TOTP must prove the TOTP first.
+  const recentAuthError = await requireSensitiveRecentAuth(session);
   if (recentAuthError) return recentAuthError;
 
   /**

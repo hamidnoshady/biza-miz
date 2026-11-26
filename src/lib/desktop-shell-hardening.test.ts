@@ -124,7 +124,10 @@ describe("navigation and permissions are wired into the window", () => {
 
   it("installs deny-by-default permissions for the window session and the cloud partition", () => {
     expect(mainJs).toContain("installPermissionHandlers(session.defaultSession");
-    expect(mainJs).toContain("installPermissionHandlers(session.fromPartition(CLOUD_PARTITION), { appOrigin: null })");
+    // #1571: each business gets its own persistent CloudPane partition, so the
+    // window's cloud session is the ACTIVE profile's partition, never a shared one.
+    expect(mainJs).toContain("installPermissionHandlers(session.fromPartition(cloudPartitionName), { appOrigin: null })");
+    expect(mainJs).toContain("cloudPartitionName = cloudPartition(profile.id)");
   });
 });
 

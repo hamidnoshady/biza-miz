@@ -11,9 +11,9 @@
  *  - **Phone as the default identifier.** A member types their verified mobile
  *    number; `/api/auth/login` resolves either a number or a legacy email, so
  *    existing email accounts keep working without a second form.
- *  - **Two distinct one-time-code journeys.** «ورود با کد یک‌بارمصرف» is the
- *    passwordless **login** (a correct code mints a session). «رمز عبورم را
- *    فراموش کرده‌ام» is **recovery** (a purpose-bound code lets the member set
+ *  - **Two distinct one-time-code journeys.** «ورود با رمز یک‌بارمصرف» is the
+ *    passwordless **login** (a correct code mints a session). «فراموشی رمز
+ *    عبور؟» is **recovery** (a purpose-bound code lets the member set
  *    a new password and never mints a session). They are separate server
  *    purposes and separate screens; conflating them was the pre-#1386 bug.
  *
@@ -28,6 +28,7 @@
  */
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { EyeIcon, EyeOffIcon } from "lucide-react";
 import {
   MfaStep,
   TENANT_MFA_THEME,
@@ -88,6 +89,8 @@ export function AccountLoginForm({
   const next = useNextPath(defaultNext);
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
+  /** Show the typed password. Local UI state only; hidden again whenever the password is cleared. */
+  const [showPassword, setShowPassword] = useState(false);
   const [rememberDevice, setRememberDevice] = useState(trustDeviceDefault);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -231,24 +234,31 @@ export function AccountLoginForm({
         }}
       >
         <div>
-          <h2 className="text-base font-bold">ورود با کد یک‌بارمصرف</h2>
+          <h2 className="text-base font-bold">ورود با رمز یک‌بارمصرف</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             شمارهٔ موبایل تأییدشدهٔ خود را وارد کنید تا کد ورود پیامک شود. با این روش
             نیازی به رمز عبور نیست و همین یک کد شما را وارد می‌کند.
           </p>
         </div>
         {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
-        <input
-          dir="ltr"
-          inputMode="tel"
-          autoFocus
-          required
-          value={otpPhone}
-          onChange={(e) => setOtpPhone(e.target.value)}
-          placeholder="09121234567"
-          aria-label="شمارهٔ موبایل"
-          className="w-full rounded-lg border border-input px-3 py-2 text-center focus:border-primary focus:outline-none"
-        />
+        <div>
+          <label htmlFor="otp-phone" className="mb-1 block text-sm text-muted-foreground">
+            شمارهٔ موبایل
+          </label>
+          <input
+            id="otp-phone"
+            type="tel"
+            dir="ltr"
+            inputMode="tel"
+            autoComplete="tel"
+            autoFocus
+            required
+            value={otpPhone}
+            onChange={(e) => setOtpPhone(e.target.value)}
+            placeholder="09121234567"
+            className="w-full rounded-lg border border-input px-3 py-2 text-center focus:border-primary focus:outline-none"
+          />
+        </div>
         <button
           type="submit"
           disabled={busy || !otpPhone.trim()}
@@ -282,6 +292,7 @@ export function AccountLoginForm({
         onDone={() => {
           setMode("password");
           setPassword("");
+          setShowPassword(false);
           setError(null);
           setNotice("رمز عبور شما تغییر کرد. اکنون با رمز جدید وارد شوید.");
         }}
@@ -306,6 +317,7 @@ export function AccountLoginForm({
         onCancel={() => {
           clear();
           setPassword("");
+          setShowPassword(false);
         }}
       />
     );
@@ -328,6 +340,7 @@ export function AccountLoginForm({
         onCancel={() => {
           setPending(null);
           setPassword("");
+          setShowPassword(false);
         }}
       />
     );
@@ -396,16 +409,39 @@ export function AccountLoginForm({
         <label htmlFor="password" className="mb-1 block text-sm text-muted-foreground">
           رمز عبور
         </label>
-        <input
-          id="password"
-          type="password"
-          dir="ltr"
-          autoComplete="current-password"
-          required
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded-lg border border-input px-3 py-2 text-start focus:border-primary focus:outline-none"
-        />
+        <div className="relative">
+          <input
+            id="password"
+            type={showPassword ? "text" : "password"}
+            dir="ltr"
+            autoComplete="current-password"
+            required
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full rounded-lg border border-input py-2 pe-3 ps-10 text-start focus:border-primary focus:outline-none"
+          />
+          {/* The field is LTR, so its start edge is the left: the toggle sits
+              opposite the caret and never covers what is being typed. Its
+              name is visually hidden *content*, not an `aria-label`: a label
+              lookup for «رمز عبور» (substring, as browser tests use) must
+              still find only the field, never this button. */}
+          <button
+            type="button"
+            onClick={() => setShowPassword((v) => !v)}
+            aria-pressed={showPassword}
+            aria-controls="password"
+            className="absolute inset-y-0 left-0 flex w-10 items-center justify-center rounded-lg text-muted-foreground transition hover:text-foreground outline-none focus-visible:ring focus-visible:ring-ring/50"
+          >
+            {showPassword ? (
+              <EyeOffIcon className="size-4" aria-hidden="true" />
+            ) : (
+              <EyeIcon className="size-4" aria-hidden="true" />
+            )}
+            <span className="sr-only">
+              {showPassword ? "پنهان کردن رمز عبور" : "نمایش رمز عبور"}
+            </span>
+          </button>
+        </div>
       </div>
       <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-input px-3 py-2.5 text-sm">
         <input
@@ -446,7 +482,7 @@ export function AccountLoginForm({
           }}
           className="w-full rounded-lg border border-input py-2.5 text-sm font-semibold transition hover:bg-primary/10 outline-none focus-visible:ring focus-visible:ring-ring/50"
         >
-          ورود با کد یک‌بارمصرف پیامکی
+          ورود با رمز یک‌بارمصرف
         </button>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <button
@@ -458,7 +494,7 @@ export function AccountLoginForm({
             }}
             className="rounded text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline outline-none focus-visible:ring focus-visible:ring-ring/50"
           >
-            رمز عبورم را فراموش کرده‌ام
+            فراموشی رمز عبور؟
           </button>
           {onStaffPin ? (
             <button

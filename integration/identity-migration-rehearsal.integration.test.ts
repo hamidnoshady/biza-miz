@@ -38,6 +38,7 @@ if (!rootDatabaseUrl) {
 const migrationsDirectory = join(process.cwd(), "migrations");
 const IDENTITY_PHONE_MIGRATION = "0302_global_identity_phone.sql";
 const PHONE_REPAIR_MIGRATION = "0306_identity_phone_backfill_repair.sql";
+const INTEGRITY_HARDENING_MIGRATION = "0322_global_identity_integrity_hardening.sql";
 
 let databaseName: string;
 let db: Client;
@@ -293,7 +294,7 @@ describe("forward repair and the commercial boundary", () => {
       [personDPlatformUserId],
     );
 
-    await copyFromTo(PHONE_REPAIR_MIGRATION, "9999_never.sql");
+    await copyFromTo(PHONE_REPAIR_MIGRATION, INTEGRITY_HARDENING_MIGRATION);
     await runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir, quiet: true });
   }, 120_000);
 
@@ -468,6 +469,229 @@ describe("forward repair and the commercial boundary", () => {
   });
 
   it("is a no-op when the migration runner runs again", async () => {
+    await expect(
+      runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir, quiet: true }),
+    ).resolves.toEqual({
+      applied: 0,
+      adoptedChecksums: 0,
+      repairedChecksums: [],
+      deferredMigrations: [],
+    });
+  });
+});
+
+describe("0322 normalized conflict repair, landline remediation, and operator report", () => {
+  let personHId = "";
+  let personIId = "";
+  let personJId = "";
+  let personKId = "";
+  let personMId = "";
+  const verifiedStamp = new Date("2026-01-01T00:00:00Z");
+
+  beforeAll(async () => {
+    // H & I: same mobile in Persian national digits vs +98 E.164. Pre-0322,
+    // 0302 missed H (non-E.164) and backfilled I because raw strings differed.
+    personHId = await insertPlatformUser(`h-${randomUUID()}@example.com`, "pw");
+    const bizH = await insertBusiness("کسب‌وکار ح");
+    await insertMembership({
+      businessId: bizH,
+      platformUserId: personHId,
+      email: `h-m-${randomUUID()}@example.com`,
+      phone: "۰۹۱۲۳۳۳۴۴۴۴",
+      verifiedAt: verifiedStamp,
+    });
+
+    personIId = await insertPlatformUser(`i-${randomUUID()}@example.com`, "pw");
+    const bizI = await insertBusiness("کسب‌وکار ط");
+    await insertMembership({
+      businessId: bizI,
+      platformUserId: personIId,
+      email: `i-m-${randomUUID()}@example.com`,
+      phone: "+989123334444",
+      verifiedAt: verifiedStamp,
+    });
+    await db.query(
+      `UPDATE platform_users SET phone_e164 = '+989123334444', phone_verified_at = $2 WHERE id = $1`,
+      [personIId, verifiedStamp],
+    );
+
+    // J: one person who proved the SAME mobile in two spellings across two
+    // businesses (`09125556666` and `+989125556666`); 0306 cleared it because
+    // raw text differed.
+    personJId = await insertPlatformUser(`j-${randomUUID()}@example.com`, "pw");
+    const bizJ1 = await insertBusiness("کسب‌وکار ی-۱");
+    const bizJ2 = await insertBusiness("کسب‌وکار ی-۲");
+    await insertMembership({
+      businessId: bizJ1,
+      platformUserId: personJId,
+      email: `j1-${randomUUID()}@example.com`,
+      phone: "09125556666",
+      verifiedAt: verifiedStamp,
+    });
+    await insertMembership({
+      businessId: bizJ2,
+      platformUserId: personJId,
+      email: `j2-${randomUUID()}@example.com`,
+      phone: "+989125556666",
+      verifiedAt: verifiedStamp,
+    });
+
+    // K: landline `+982188776655` backfilled by 0302 onto platform_users.
+    personKId = await insertPlatformUser(`k-${randomUUID()}@example.com`, "pw");
+    const bizK = await insertBusiness("کسب‌وکار ک");
+    await insertMembership({
+      businessId: bizK,
+      platformUserId: personKId,
+      email: `k-m-${randomUUID()}@example.com`,
+      phone: "+982188776655",
+      verifiedAt: verifiedStamp,
+    });
+    await db.query(
+      `UPDATE platform_users SET phone_e164 = '+982188776655', phone_verified_at = $2 WHERE id = $1`,
+      [personKId, verifiedStamp],
+    );
+
+    // M: orphaned phone_verified_at with NULL phone_e164.
+    personMId = await insertPlatformUser(`m-${randomUUID()}@example.com`, "pw");
+    await db.query(
+      `UPDATE platform_users SET phone_e164 = NULL, phone_verified_at = $2 WHERE id = $1`,
+      [personMId, verifiedStamp],
+    );
+
+    await copyFromTo(INTEGRITY_HARDENING_MIGRATION, "9999_never.sql");
+    await runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir, quiet: true });
+  }, 120_000);
+
+  it("clears normalized cross-identity and landline backfills, backfills single-mobile format variants, and enforces stamp pairing", async () => {
+    const { rows } = await db.query<{
+      id: string;
+      phone_e164: string | null;
+      phone_verified_at: Date | null;
+    }>(
+      `SELECT id, phone_e164, phone_verified_at
+         FROM platform_users
+        WHERE id = ANY($1::uuid[])`,
+      [[personHId, personIId, personJId, personKId, personMId]],
+    );
+    const byId = new Map(rows.map((r) => [r.id, r]));
+
+    // Cross-format shared mobile cleared on I; reported in normalized conflict view.
+    expect(byId.get(personHId)?.phone_e164).toBeNull();
+    expect(byId.get(personIId)?.phone_e164).toBeNull();
+    expect(byId.get(personIId)?.phone_verified_at).toBeNull();
+
+    // J's two spellings of one mobile are recognized as unambiguous and backfilled.
+    expect(byId.get(personJId)?.phone_e164).toBe("+989125556666");
+    expect(byId.get(personJId)?.phone_verified_at).toEqual(verifiedStamp);
+
+    // K's landline backfill was cleared so K can now claim a real mobile.
+    expect(byId.get(personKId)?.phone_e164).toBeNull();
+    expect(byId.get(personKId)?.phone_verified_at).toBeNull();
+
+    // M's orphan stamp was cleared and the new CHECK blocks re-introducing one.
+    expect(byId.get(personMId)?.phone_verified_at).toBeNull();
+    await expect(
+      db.query(
+        `UPDATE platform_users SET phone_e164 = NULL, phone_verified_at = now() WHERE id = $1`,
+        [personMId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+
+    const crossConflicts = await db.query<{
+      phone_e164: string;
+      identity_count: number;
+    }>(
+      `SELECT phone_e164, identity_count
+         FROM v_platform_verified_phone_conflicts
+        ORDER BY phone_e164`,
+    );
+    expect(crossConflicts.rows).toEqual([
+      { phone_e164: "+989121119999", identity_count: 2 },
+      { phone_e164: "+989123334444", identity_count: 2 },
+    ]);
+
+    const identityConflicts = await db.query<{ platform_user_id: string }>(
+      `SELECT platform_user_id FROM v_platform_verified_phone_identity_conflicts`,
+    );
+    expect(identityConflicts.rows.map((r) => r.platform_user_id)).toEqual([
+      personB.platformUserId,
+    ]);
+
+    const anomalies = await db.query<{
+      platform_user_id: string;
+      anomaly_kind: string;
+    }>(
+      `SELECT platform_user_id, anomaly_kind FROM v_platform_verified_phone_anomalies`,
+    );
+    expect(anomalies.rows).toContainEqual({
+      platform_user_id: personKId,
+      anomaly_kind: "landline_not_mobile",
+    });
+
+    const globalIdentity = await import("../src/lib/iam/global-identity-service");
+    await expect(
+      globalIdentity.claimVerifiedPhone({
+        platformUserId: personKId,
+        phone: "+989126667777",
+      }),
+    ).resolves.toEqual({ ok: true, phoneE164: "+989126667777" });
+  });
+
+  it("emits a PII-free operator report and supports audited conflict & national-ID remediation", async () => {
+    const masterKey = await import("../src/lib/master-key");
+    masterKey.setMasterKeyOverride(Buffer.alloc(32, 7));
+    try {
+      const repair = await import("../src/lib/iam/identity-migration-repair");
+      const report = await repair.collectIdentityMigrationReport();
+      const serialized = JSON.stringify(report);
+
+      // Raw phones, emails, and ciphertexts must never appear in the report.
+      expect(serialized).not.toContain("+989121119999");
+      expect(serialized).not.toContain("+989123334444");
+      expect(serialized).not.toContain("+982188776655");
+      expect(serialized).not.toContain("v1.dddd.eeee.ffff");
+      expect(report.summary.crossIdentityPhoneConflictCount).toBe(2);
+      expect(report.summary.singleIdentityMultiPhoneConflictCount).toBe(1);
+      // personD's synthetic `v1.dddd.eeee.ffff` ciphertext is flagged as undecryptable.
+      expect(report.nationalIdAnomalies).toContainEqual({
+        platformUserId: personDPlatformUserId,
+        reason: "decrypt_failed",
+      });
+
+      const { rows: admins } = await db.query<{ id: string }>(
+        `INSERT INTO platform_admins (email, password_hash, full_name, role)
+         VALUES ($1, 'x', 'اپراتور', 'support') RETURNING id`,
+        [`admin-${randomUUID()}@example.com`],
+      );
+      const adminId = admins[0].id;
+
+      // Audited remediation clears personD's undecryptable envelope and records the admin.
+      await expect(
+        repair.remediateNationalIdAnomaly({
+          platformUserId: personDPlatformUserId,
+          actorPlatformAdminId: adminId,
+        }),
+      ).resolves.toEqual({ ok: true, reason: "decrypt_failed" });
+
+      // Audited phone conflict repair assigns one of personB's verified membership mobiles.
+      const { rows: bPhones } = await db.query<{ phone_e164: string }>(
+        `SELECT phone_e164 FROM users WHERE platform_user_id = $1 ORDER BY phone_e164 LIMIT 1`,
+        [personB.platformUserId],
+      );
+      await expect(
+        repair.repairIdentityVerifiedPhoneConflict({
+          mode: "assign_canonical_from_membership",
+          platformUserId: personB.platformUserId,
+          phone: bPhones[0].phone_e164,
+          actorPlatformAdminId: adminId,
+        }),
+      ).resolves.toEqual({ ok: true, phoneE164: bPhones[0].phone_e164 });
+    } finally {
+      masterKey.setMasterKeyOverride(null);
+    }
+  });
+
+  it("remains idempotent when the migration runner runs after 0322", async () => {
     await expect(
       runMigrations({ databaseUrl: urlFor(databaseName), migrationsDir, quiet: true }),
     ).resolves.toEqual({

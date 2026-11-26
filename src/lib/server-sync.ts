@@ -33,6 +33,11 @@ import {
   type SyncEventType,
 } from "./sync-events";
 import { configuredLegacySyncToken, type ServerSyncConfig } from "./server-sync-config";
+import {
+  eventAllowedForSiteBranch,
+  resolveSiteBranch,
+  type SiteBranchResolution,
+} from "./site-branch";
 import { runIamSyncAttempt } from "./iam/sync";
 import {
   clearOperationalSyncBlock,
@@ -893,6 +898,28 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
     return { status: "error", error };
   };
 
+  // #1573 — a paired site is one branch, and may only push that branch's
+  // events. The query below filters on `config.locationId`, but a paired
+  // install whose id went missing would then read as "every branch", and the
+  // cloud refuses the whole batch (`site_location_mismatch`) — stalling the
+  // correctly paired branch along with it. Fail closed here instead, before
+  // anything leaves the machine. An install with a legacy business-wide token
+  // has no single-branch pairing to enforce and is untouched.
+  let branch: SiteBranchResolution = { paired: false };
+  if (config.siteDeviceId) {
+    const { rows: localLocations } = await query<{ id: string }>(
+      `SELECT id FROM locations WHERE business_id = $1`,
+      [businessId],
+    );
+    branch = resolveSiteBranch(
+      config,
+      localLocations.map((row) => row.id),
+    );
+    if (branch.paired && !branch.ok) {
+      return fail(`site_branch_${branch.reason}`);
+    }
+  }
+
   // Claim the next batch of undelivered local sync_events rows, and record the
   // attempt in the same statement (0225).
   //
@@ -939,7 +966,11 @@ export async function runServerPush(businessId: string): Promise<PushResult> {
         ORDER BY se.id`,
       [businessId, batchSize, config.locationId ?? null],
     );
-    rows = r;
+    // The query's own `$3` filter already limits a paired site to its branch;
+    // this is the same rule stated where the events are shaped, so no future
+    // edit to that clause can send a second branch's queue under this site's
+    // credential.
+    rows = branch.paired ? r.filter((row) => eventAllowedForSiteBranch(branch, row.location_id)) : r;
   } catch (err) {
     return fail(
       `query_failed: ${err instanceof Error ? err.message : String(err)}`,

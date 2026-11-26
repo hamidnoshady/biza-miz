@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
-import { requireRecentAuth } from "@/lib/recent-auth";
+import { requireSensitiveRecentAuth } from "@/lib/sensitive-step-up";
 import { beginWebauthnRegistration } from "@/lib/employee-service";
 import { resolveWebauthnPolicy, webauthnPolicyDenial } from "@/lib/webauthn-access";
 
@@ -33,7 +33,9 @@ export const POST = withTenantScope(async () => {
    * previously needed only a session cookie, so an unlocked till could be given
    * a new biometric key by whoever was standing at it.
    */
-  const recentAuthError = requireRecentAuth(session);
+  // #1386 — and not on the strength of an SMS-only proof when a distinct
+  // factor exists.
+  const recentAuthError = await requireSensitiveRecentAuth(session);
   if (recentAuthError) return recentAuthError;
 
   const { options, challengeToken } = await beginWebauthnRegistration(

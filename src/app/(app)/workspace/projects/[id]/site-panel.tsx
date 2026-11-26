@@ -75,7 +75,12 @@ import {
   type SiteLogLineKind,
   type SiteLogStatus,
 } from "@/lib/aec-site";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
+import {
+  partyPageFrom,
+  usePartyPicker,
+  type PartyPage,
+  type WorkspaceLookups,
+} from "../../use-workspace-lookups";
 import { DateCell, DateField, PickerField, SelectField, workspaceError } from "../../workspace-ui";
 
 /* ---------------------------------------------------------------------------
@@ -799,6 +804,37 @@ function DiaryFeed({ entries, issuesShown }: { entries: DiaryEntry[]; issuesShow
  * The form
  * ------------------------------------------------------------------------- */
 
+/**
+ * A log row's «طرف/پیمانکار». Its own component because the row is rendered in
+ * a map and a hook cannot be called there.
+ */
+function LinePartyPicker({
+  base,
+  page,
+  value,
+  onChange,
+}: {
+  base: WorkspaceLookups["parties"];
+  page: PartyPage;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const picker = usePartyPicker(base, value, page);
+  return (
+    <PickerField
+      label="طرف/پیمانکار"
+      value={value}
+      onChange={onChange}
+      options={picker.options}
+      searchable
+      searchPlaceholder="جست‌وجوی طرف…"
+      onSearch={picker.setTerm}
+      searching={picker.searching}
+      searchNote={picker.note}
+    />
+  );
+}
+
 function SiteLogForm({
   projectId,
   lookups,
@@ -1027,14 +1063,11 @@ function SiteLogForm({
                   </div>
                   <div className="grid gap-2 sm:grid-cols-4">
                     {shape.party ? (
-                      <PickerField
-                        label="طرف/پیمانکار"
+                      <LinePartyPicker
+                        base={lookups.parties}
+                        page={partyPageFrom(lookups)}
                         value={line.partyId}
                         onChange={(next) => patchLine(index, { partyId: next })}
-                        options={lookups.parties.map((party) => ({
-                          id: party.id,
-                          label: party.name,
-                        }))}
                       />
                     ) : null}
                     {shape.headcount ? (

@@ -30,7 +30,15 @@ const TOKEN_TTL_MINUTES = 24 * 60;
 
 export type SetIdentityEmailResult =
   | { ok: true; email: string | null; changed: boolean }
-  | { ok: false; error: "identity_missing" | "forbidden" | "invalid_email" | "email_taken" };
+  | {
+      ok: false;
+      error:
+        | "identity_missing"
+        | "forbidden"
+        | "invalid_email"
+        | "email_taken"
+        | "credential_channel_required";
+    };
 
 /**
  * The canonical form of an address typed by the person, or null when the value
@@ -69,8 +77,8 @@ export async function setIdentityEmail(input: {
 
   try {
     return await withoutTenantScopeTransaction("identity", async () => {
-      const { rows } = await query<{ email: string | null }>(
-        `SELECT email::text AS email FROM platform_users WHERE id = $1 FOR UPDATE`,
+      const { rows } = await query<{ email: string | null; phone_e164: string | null }>(
+        `SELECT email::text AS email, phone_e164 FROM platform_users WHERE id = $1 FOR UPDATE`,
         [input.platformUserId],
       );
       const identity = rows[0];
@@ -78,6 +86,9 @@ export async function setIdentityEmail(input: {
 
       const current = identity.email ? identity.email.toLowerCase() : null;
       if (current === email) return { ok: true as const, email, changed: false };
+      if (!email && !identity.phone_e164) {
+        return { ok: false as const, error: "credential_channel_required" as const };
+      }
 
       if (email) {
         await query(
