@@ -568,7 +568,10 @@ describe("staleness", () => {
   });
 
   it("documents the precedence as fixed order", () => {
-    expect(COMMERCIAL_MODEL_PRECEDENCE[0]).toBe("prepaid_term_coverage");
+    // Issue #1579: an authorized complimentary grant is explicit commercial
+    // authority and is resolved before prepaid coverage or any plan benefit.
+    expect(COMMERCIAL_MODEL_PRECEDENCE[0]).toBe("complimentary_grant_waiver");
+    expect(COMMERCIAL_MODEL_PRECEDENCE[1]).toBe("prepaid_term_coverage");
     expect(COMMERCIAL_MODEL_PRECEDENCE.at(-1)).toBe("no_implicit_activation");
   });
 });
