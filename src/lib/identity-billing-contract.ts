@@ -253,3 +253,23 @@ export function purchaseBlockerMessage(blocker: PurchaseBlocker): string {
       return "برای خرید یا فعال‌سازی سرویس، یک شمارهٔ موبایل معتبر ثبت کنید؛ شمارهٔ ثابت کد تأیید را دریافت نمی‌کند.";
   }
 }
+
+/**
+ * Canonical 403 JSON body returned by commercial purchase boundaries
+ * (`/api/billing/payments` and paid `/api/services/[kind]/[key]` actions)
+ * when `purchaseReadinessForAssurance(...)` refuses the actor.
+ */
+export function purchaseReadinessDeniedPayload(
+  readiness: Extract<PurchaseReadiness, { ok: false }>,
+): {
+  error: "phone_verification_required";
+  blockedBy: readonly PurchaseBlocker[];
+  message: string;
+} {
+  return {
+    error: "phone_verification_required",
+    blockedBy: readiness.blockedBy,
+    message: readiness.message,
+  };
+}
+

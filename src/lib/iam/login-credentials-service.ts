@@ -25,11 +25,19 @@ import {
 export async function buildLoginCredentials(businessId: string): Promise<ReplicatedLoginCredential[]> {
   return withTenant(businessId, async () => {
     const people = await query<{
-      membership_id: string; platform_user_id: string; email: string; full_name: string;
-      password_hash: string; is_active: boolean; token_version: number;
+      membership_id: string;
+      platform_user_id: string;
+      email: string | null;
+      full_name: string;
+      password_hash: string | null;
+      phone_e164: string | null;
+      phone_verified: boolean;
+      is_active: boolean;
+      token_version: number;
     }>(
-      `SELECT u.id AS membership_id, p.id AS platform_user_id, p.email, p.full_name,
-              p.password_hash, p.is_active, p.token_version
+      `SELECT u.id AS membership_id, p.id AS platform_user_id, p.email::text AS email, p.full_name,
+              p.password_hash, p.phone_e164, (p.phone_verified_at IS NOT NULL) AS phone_verified,
+              p.is_active, p.token_version
          FROM users u JOIN platform_users p ON p.id = u.platform_user_id
         WHERE u.business_id = $1 ORDER BY u.id`,
       [businessId],
@@ -63,9 +71,12 @@ export async function buildLoginCredentials(businessId: string): Promise<Replica
         // site binds by it, which is exactly what the cloud-login readiness
         // check compares.
         platformUserId: person.platform_user_id,
-        email: person.email,
+        email: person.email ? person.email.trim().toLowerCase() : null,
         fullName: person.full_name,
-        passwordHash: person.password_hash,
+        passwordHash: person.password_hash ?? null,
+        ...(person.phone_e164
+          ? { phoneE164: person.phone_e164, phoneVerified: person.phone_verified === true }
+          : {}),
         isActive: person.is_active,
         tokenVersion: person.token_version,
         mfa,
@@ -132,6 +143,11 @@ export interface LoginCredentialApplyResult {
    * different row. Reported, never resolved destructively.
    */
   identityEmailConflicts: number;
+  /**
+   * Verified phones left untouched because another identity row on the site
+   * already holds the same verified number. Reported, never auto-merged.
+   */
+  identityPhoneConflicts: number;
 }
 
 /**
@@ -161,6 +177,7 @@ export async function applyLoginCredentials(
   // A legacy cloud names no identity IDs; compare against a local build masked
   // the same way, or every sync would rewrite perfectly converged rows.
   const legacyPayload = !credentials.some((c) => c.platformUserId != null);
+  const legacyPhonePayload = !credentials.some((c) => c.phoneE164 !== undefined);
   // Token version compares as a *floor*, not byte equality: the write below
   // keeps `GREATEST(local, incoming)` for revocation monotonicity (a stale
   // cloud payload must never un-revoke sessions), so after a site-only
@@ -171,11 +188,12 @@ export async function applyLoginCredentials(
   const comparableLocal = local.map((c) => ({
     ...c,
     platformUserId: legacyPayload ? undefined : c.platformUserId,
+    ...(legacyPhonePayload ? { phoneE164: undefined, phoneVerified: undefined } : {}),
     tokenVersion: Math.min(c.tokenVersion ?? 1, incomingByMembership.get(c.membershipId)?.tokenVersion ?? 1),
   }));
   const result: LoginCredentialApplyResult = {
     changed: false, identitiesApplied: 0, bindingsRepaired: 0, bindingsStillBroken: 0,
-    identitiesRekeyed: 0, identityEmailConflicts: 0,
+    identitiesRekeyed: 0, identityEmailConflicts: 0, identityPhoneConflicts: 0,
   };
   if (loginCredentialsFingerprint(comparableLocal) === loginCredentialsFingerprint(credentials)) {
     // Converged — and for a canonical payload the fingerprint covers the
@@ -190,18 +208,45 @@ export async function applyLoginCredentials(
     [businessId, credentials.map((c) => c.membershipId)],
   );
   const linked = new Map(members.rows.map((row) => [row.id, row.platform_user_id]));
-  // `platform_users.email` is UNIQUE, so an email match names at most one row
-  // — the same global person (or a duplicate nobody else's membership may own).
-  const identityRows = await query<{ id: string; email: string }>(
-    `SELECT id, email FROM platform_users
-      WHERE id = ANY($1::uuid[]) OR email = ANY($2::citext[])`,
-    [
-      credentials.map((c) => c.platformUserId).filter((id): id is string => typeof id === "string"),
-      credentials.map((c) => c.email.trim().toLowerCase()),
-    ],
+  const candidateEmails = credentials
+    .map((c) => (typeof c.email === "string" ? c.email.trim().toLowerCase() : null))
+    .filter((e): e is string => Boolean(e));
+  const candidatePhones = credentials
+    .map((c) => (typeof c.phoneE164 === "string" && c.phoneE164.trim() ? c.phoneE164.trim() : null))
+    .filter((p): p is string => Boolean(p));
+  // `platform_users.email` is UNIQUE and verified `phone_e164` is UNIQUE, so
+  // either match names at most one row — read under the identity bypass so
+  // unlinked or cross-business local rows are visible before INSERT.
+  const identityRows = await withoutTenantScope("identity", () =>
+    query<{
+      id: string;
+      email: string | null;
+      phone_e164: string | null;
+      phone_verified: boolean;
+    }>(
+      `SELECT id, email::text AS email, phone_e164, (phone_verified_at IS NOT NULL) AS phone_verified
+         FROM platform_users
+        WHERE id = ANY($1::uuid[])
+           OR email = ANY($2::citext[])
+           OR (phone_verified_at IS NOT NULL AND phone_e164 = ANY($3::text[]))`,
+      [
+        credentials.map((c) => c.platformUserId).filter((id): id is string => typeof id === "string"),
+        candidateEmails,
+        candidatePhones,
+      ],
+    ),
   );
   const idExists = new Set(identityRows.rows.map((row) => row.id.toLowerCase()));
-  const byEmail = new Map(identityRows.rows.map((row) => [row.email.trim().toLowerCase(), row.id]));
+  const byEmail = new Map(
+    identityRows.rows
+      .filter((row): row is typeof row & { email: string } => typeof row.email === "string" && row.email.trim().length > 0)
+      .map((row) => [row.email.trim().toLowerCase(), row.id]),
+  );
+  const byVerifiedPhone = new Map(
+    identityRows.rows
+      .filter((row): row is typeof row & { phone_e164: string } => row.phone_verified && typeof row.phone_e164 === "string")
+      .map((row) => [row.phone_e164, row.id]),
+  );
   // What each membership the payload speaks for *should* end up linked to.
   // Verified after the loop — "credential data synced" and "identity correctly
   // bound" are separate claims (issue #948).
@@ -210,19 +255,29 @@ export async function applyLoginCredentials(
   for (const credential of credentials) {
     // Not replicated yet (the IAM snapshot creates memberships); next tick.
     if (!linked.has(credential.membershipId)) continue;
-    const email = credential.email.trim().toLowerCase();
+    const email =
+      typeof credential.email === "string" && credential.email.trim().length > 0
+        ? credential.email.trim().toLowerCase()
+        : null;
+    const phoneE164 =
+      typeof credential.phoneE164 === "string" && credential.phoneE164.trim().length > 0
+        ? credential.phoneE164.trim()
+        : null;
+    const phoneVerified = Boolean(phoneE164 && credential.phoneVerified === true);
     const plan = planIdentityBinding({
       platformUserId: credential.platformUserId ?? null,
       linkedPlatformUserId: linked.get(credential.membershipId) ?? null,
       canonicalRowExists: typeof credential.platformUserId === "string"
         && idExists.has(credential.platformUserId.toLowerCase()),
-      emailRowId: byEmail.get(email) ?? null,
+      emailRowId: email ? (byEmail.get(email) ?? null) : null,
+      phoneRowId: phoneVerified && phoneE164 ? (byVerifiedPhone.get(phoneE164) ?? null) : null,
     });
     if (plan.platformUserId) expectedLinks.set(credential.membershipId, plan.platformUserId.toLowerCase());
     const mfa = await Promise.all(credential.mfa.map(async (m) => ({
       ...m,
       encrypted: m.totpSecret ? await encryptTotpSecret(m.totpSecret) : null,
     })));
+    let skippedConflict = false;
     await withoutTenantScope("identity", async () => {
       const client = await getPool().connect();
       try {
@@ -235,19 +290,6 @@ export async function applyLoginCredentials(
         let platformUserId: string;
         let writeFields = true;
         if (plan.rekeyFrom) {
-          // Same person under a pre-v2 local UUID. The canonical row is
-          // created first (under a unique placeholder email — the real one is
-          // still UNIQUE-held by the old row), then every reference moves,
-          // then the hollow old row is deleted and the shared field write
-          // below fills in the cloud's authoritative values. Order matters:
-          // `users.platform_user_id` is a non-deferrable FK, so references
-          // cannot point at the canonical ID before the row exists, and the
-          // PK cannot change while references still point at the old value.
-          // Nothing is copied or lost: password/MFA/recovery codes travel
-          // with the row; the token-version chain is preserved via GREATEST
-          // in the field write. Sessions that minted the old ID fail the
-          // token-version check until the member signs in again — the
-          // fail-closed direction.
           const old = plan.rekeyFrom;
           const to = plan.platformUserId as string;
           const created = await client.query(
@@ -258,15 +300,22 @@ export async function applyLoginCredentials(
             [old, to, `__rekey__${to}@identity-rekey.invalid`],
           );
           if (created.rowCount !== 1) {
-            // The source row vanished between planning and the lock (a purge
-            // run, a concurrent repair). Refuse this record rather than
-            // relink the membership to an identity that does not exist.
             throw new Error("identity_rekey_source_missing");
           }
           await client.query(`UPDATE users SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
           await client.query(`UPDATE owner_activations SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
           await client.query(`UPDATE install_pairing_codes SET issued_by = $2 WHERE issued_by = $1`, [old, to]);
           await client.query(`UPDATE trusted_devices SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE billing_quotes SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE business_commercial_policies SET enrolled_by = $2 WHERE enrolled_by = $1`, [old, to]);
+          await client.query(`UPDATE business_service_terms SET purchased_by = $2 WHERE purchased_by = $1`, [old, to]);
+          await client.query(`UPDATE platform_demo_sessions SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE platform_email_verifications SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE platform_onboarding_drafts SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE platform_signup_events SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE platform_signup_requests SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE telegram_identity_links SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
+          await client.query(`UPDATE telegram_link_challenges SET platform_user_id = $2 WHERE platform_user_id = $1`, [old, to]);
           for (const table of ["mfa_enrolments", "mfa_challenges", "mfa_recovery_codes", "mfa_grace_periods", "auth_password_resets"]) {
             await client.query(
               `UPDATE ${table} SET subject_id = $2 WHERE subject_realm = 'platform_user' AND subject_id = $1`,
@@ -277,10 +326,55 @@ export async function applyLoginCredentials(
           platformUserId = to;
           result.identitiesRekeyed += 1;
         } else if (plan.insert) {
+          const emailClash = email
+            ? await client.query<{ id: string }>(
+                `SELECT id FROM platform_users WHERE email = $1`,
+                [email],
+              )
+            : { rows: [] as { id: string }[] };
+          const phoneClash = phoneVerified && phoneE164
+            ? await client.query<{ id: string }>(
+                `SELECT id FROM platform_users WHERE phone_e164 = $1 AND phone_verified_at IS NOT NULL`,
+                [phoneE164],
+              )
+            : { rows: [] as { id: string }[] };
+          if (emailClash.rows.length > 0) result.identityEmailConflicts += 1;
+          if (phoneClash.rows.length > 0) result.identityPhoneConflicts += 1;
+          const insertEmail = emailClash.rows.length === 0 ? email : null;
+          const insertPhone = phoneClash.rows.length === 0 ? phoneE164 : null;
+          const insertVerified = Boolean(insertPhone && phoneVerified);
+          if (!insertEmail && !insertPhone) {
+            // Every reachable channel collides with another identity on this
+            // site; leave both untouched and report the conflict for a human.
+            skippedConflict = true;
+            await client.query("COMMIT");
+            return;
+          }
           const inserted = await client.query<{ id: string }>(
-            `INSERT INTO platform_users (id, email, password_hash, full_name, is_active, token_version)
-             VALUES (COALESCE($1::uuid, gen_random_uuid()), $2, $3, $4, $5, $6) RETURNING id`,
-            [plan.platformUserId, email, credential.passwordHash, credential.fullName, credential.isActive, incomingTokenVersion],
+            `INSERT INTO platform_users (
+               id, email, password_hash, full_name, is_active, token_version, phone_e164, phone_verified_at
+             )
+             VALUES (
+               COALESCE($1::uuid, gen_random_uuid()),
+               $2,
+               $3,
+               $4,
+               $5,
+               $6,
+               $7,
+               CASE WHEN $8::boolean THEN now() ELSE NULL END
+             )
+             RETURNING id`,
+            [
+              plan.platformUserId,
+              insertEmail,
+              credential.passwordHash,
+              credential.fullName,
+              credential.isActive,
+              incomingTokenVersion,
+              insertPhone,
+              insertVerified,
+            ],
           );
           platformUserId = inserted.rows[0].id;
           writeFields = false;
@@ -288,41 +382,70 @@ export async function applyLoginCredentials(
           platformUserId = plan.platformUserId as string;
         }
         if (writeFields) {
-          // The cloud payload is authoritative for the row's fields. An email
-          // that now belongs to a *different* row (unique) is left for a
-          // human: moving it here would silently merge two identities.
-          const clash = await client.query<{ id: string }>(
-            `SELECT id FROM platform_users WHERE email = $1 AND id <> $2`,
-            [email, platformUserId],
+          const currentRow = await client.query<{
+            email: string | null;
+            phone_e164: string | null;
+            phone_verified_at: Date | null;
+          }>(
+            `SELECT email::text AS email, phone_e164, phone_verified_at
+               FROM platform_users WHERE id = $1 FOR UPDATE`,
+            [platformUserId],
           );
-          const writeEmail = clash.rows.length === 0;
-          if (!writeEmail) result.identityEmailConflicts += 1;
-          // A changed password or bumped cloud token_version ends the sessions the old one opened.
-          // The GREATEST token-version dance is identical in both variants;
-          // only the `email = ...` clause differs (a stale conflicting email
-          // is reported, never stolen from the row that holds it).
-          const [sql, params] = writeEmail
-            ? [
-                `UPDATE platform_users SET email = $2, full_name = $3, password_hash = $4, is_active = $5,
-                        token_version = GREATEST(
-                          token_version + CASE WHEN password_hash IS DISTINCT FROM $4 THEN 1 ELSE 0 END,
-                          $6
-                        ),
-                        updated_at = now()
-                  WHERE id = $1`,
-                [platformUserId, email, credential.fullName, credential.passwordHash, credential.isActive, incomingTokenVersion],
-              ]
-            : [
-                `UPDATE platform_users SET full_name = $2, password_hash = $3, is_active = $4,
-                        token_version = GREATEST(
-                          token_version + CASE WHEN password_hash IS DISTINCT FROM $3 THEN 1 ELSE 0 END,
-                          $5
-                        ),
-                        updated_at = now()
-                  WHERE id = $1`,
-                [platformUserId, credential.fullName, credential.passwordHash, credential.isActive, incomingTokenVersion],
-              ];
-          await client.query(sql, params);
+          const existing = currentRow.rows[0];
+          const emailClash = email
+            ? await client.query<{ id: string }>(
+                `SELECT id FROM platform_users WHERE email = $1 AND id <> $2`,
+                [email, platformUserId],
+              )
+            : { rows: [] as { id: string }[] };
+          const phoneClash = phoneVerified && phoneE164
+            ? await client.query<{ id: string }>(
+                `SELECT id FROM platform_users WHERE phone_e164 = $1 AND phone_verified_at IS NOT NULL AND id <> $2`,
+                [phoneE164, platformUserId],
+              )
+            : { rows: [] as { id: string }[] };
+          if (emailClash.rows.length > 0) result.identityEmailConflicts += 1;
+          if (phoneClash.rows.length > 0) result.identityPhoneConflicts += 1;
+
+          const writePhoneField = credential.phoneE164 !== undefined && phoneClash.rows.length === 0;
+          const nextPhone = writePhoneField ? phoneE164 : (existing?.phone_e164 ?? null);
+          const nextPhoneVerified = writePhoneField
+            ? phoneVerified
+            : Boolean(existing?.phone_e164 && existing?.phone_verified_at);
+          // Never clear `email` to NULL if the row would be left without any
+          // reachable channel (`platform_users_credential_channel`).
+          const writeEmail =
+            emailClash.rows.length === 0 && (email !== null || nextPhone !== null);
+
+          const effectiveEmail = writeEmail ? email : (existing?.email ?? null);
+          await client.query(
+            `UPDATE platform_users
+                SET email = $2,
+                    full_name = $3,
+                    password_hash = $4,
+                    is_active = $5,
+                    phone_e164 = $6,
+                    phone_verified_at = CASE
+                      WHEN $6::text IS NULL OR NOT $7::boolean THEN NULL
+                      ELSE COALESCE(phone_verified_at, now())
+                    END,
+                    token_version = GREATEST(
+                      token_version + CASE WHEN password_hash IS DISTINCT FROM $4 THEN 1 ELSE 0 END,
+                      $8
+                    ),
+                    updated_at = now()
+              WHERE id = $1`,
+            [
+              platformUserId,
+              effectiveEmail,
+              credential.fullName,
+              credential.passwordHash,
+              credential.isActive,
+              nextPhone,
+              nextPhoneVerified,
+              incomingTokenVersion,
+            ],
+          );
         }
         result.changed = true;
         // Bind (or re-bind) the membership to the identity the cloud named —
@@ -376,7 +499,9 @@ export async function applyLoginCredentials(
         client.release();
       }
     });
-    result.identitiesApplied += 1;
+    if (!skippedConflict) {
+      result.identitiesApplied += 1;
+    }
   }
   result.changed = result.changed || result.identitiesApplied > 0;
   // Post-pass verification: every membership the payload named must now be

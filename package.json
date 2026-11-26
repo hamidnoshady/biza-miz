@@ -35,6 +35,7 @@
     "db:dev:stop": "node scripts/dev-postgres.mjs --stop",
     "telegram:configure": "tsx scripts/configure-telegram.ts",
     "db:migrate": "tsx scripts/migrate.ts",
+    "db:identity-report": "tsx scripts/identity-migration-report.ts",
     "db:app-role": "tsx scripts/create-app-role.ts",
     "db:seed": "tsx scripts/seed.ts",
     "db:seed:visual": "tsx scripts/seed-visual-fixture.ts",

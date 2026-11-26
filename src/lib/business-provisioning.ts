@@ -609,6 +609,7 @@ async function insertBusiness(
 
   let platformUserId: string;
   let ownerIdentityCreated: boolean;
+  let ownerPhoneVerifiedAt: Date | null = null;
 
   if (input.platformUserId) {
     // ESH-202 / #1387 — the continuation already proved this person, so the
@@ -639,13 +640,23 @@ async function insertBusiness(
     ownerIdentityCreated = false;
     ownerName = identity.full_name.trim() || ownerName;
     email = identity.email ? identity.email.toLowerCase() : null;
-    if (identity.phone_e164) ownerPhone = phoneE164(identity.phone_e164);
+    if (identity.phone_e164) {
+      ownerPhone = phoneE164(identity.phone_e164);
+      if (ownerPhone && ownerPhone === identity.phone_e164) {
+        ownerPhoneVerifiedAt = identity.phone_verified_at;
+      }
+    }
   } else {
     const { rows: existingIdentity } = await client.query<{
       id: string;
-      password_hash: string;
+      password_hash: string | null;
       is_active: boolean;
-    }>("SELECT id, password_hash, is_active FROM platform_users WHERE email = $1", [email]);
+      phone_e164: string | null;
+      phone_verified_at: Date | null;
+    }>(
+      "SELECT id, password_hash, is_active, phone_e164, phone_verified_at FROM platform_users WHERE email = $1",
+      [email],
+    );
 
     ownerIdentityCreated = existingIdentity.length === 0;
     if (existingIdentity[0]) {
@@ -664,11 +675,18 @@ async function insertBusiness(
         platformUserId = identity.id;
       } else {
         // The password-choosing paths are a person adding a business to their
-        // own account, and still have to prove that is who they are.
-        if (!(await bcrypt.compare(input.password ?? "", identity.password_hash))) {
+        // own account, and still have to prove that is who they are. A
+        // passwordless identity has no password to compare, so it fails closed.
+        if (
+          !identity.password_hash ||
+          !(await bcrypt.compare(input.password ?? "", identity.password_hash))
+        ) {
           throw new EmailPasswordMismatchError();
         }
         platformUserId = identity.id;
+      }
+      if (ownerPhone && identity.phone_e164 === ownerPhone && identity.phone_verified_at) {
+        ownerPhoneVerifiedAt = identity.phone_verified_at;
       }
     } else {
       // On the activation path nobody ever knows this password — not the
@@ -724,9 +742,17 @@ async function insertBusiness(
   // proves it with an OTP at their first door login or from the security
   // center, and only then does it open the phone login.
   const { rows: userRows } = await client.query<{ id: string }>(
-    `INSERT INTO users (business_id, platform_user_id, role, full_name, email, phone_e164, location_id)
-     VALUES ($1, $2, 'owner', $3, $4, $5, $6) RETURNING id`,
-    [businessId, platformUserId, ownerName, email, ownerPhone, demo ? locationId : null],
+    `INSERT INTO users (business_id, platform_user_id, role, full_name, email, phone_e164, phone_verified_at, location_id)
+     VALUES ($1, $2, 'owner', $3, $4, $5, $6, $7) RETURNING id`,
+    [
+      businessId,
+      platformUserId,
+      ownerName,
+      email,
+      ownerPhone,
+      ownerPhoneVerifiedAt,
+      demo ? locationId : null,
+    ],
   );
   const userId = userRows[0].id;
 
