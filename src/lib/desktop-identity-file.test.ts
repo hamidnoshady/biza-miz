@@ -18,6 +18,7 @@ import {
   desktopIdentityFilePath,
   instanceFingerprint,
   publishDesktopBusinessIdentity,
+  publishStartupBusinessIdentity,
 } from "./desktop-identity-file";
 
 const IDENTITY = {
@@ -114,6 +115,129 @@ describe("desktop identity file", () => {
     expect(
       publishDesktopBusinessIdentity(IDENTITY, { env: { DESKTOP_IDENTITY_PATH: file } }),
     ).toMatchObject({ ok: false, error: "invalid_identity" });
+    expect(existsSync(file)).toBe(false);
+  });
+});
+
+/**
+ * Startup publication (#1572 follow-up): a profile enrolled before the identity
+ * file existed, or a legacy imported install, is named from the business rows
+ * its own backend already holds — without pairing again. The safety property is
+ * that only a *single-business site* database may name anything.
+ */
+describe("startup identity publication", () => {
+  const ROW = {
+    business_id: IDENTITY.businessId,
+    subdomain: "cafe-alefba",
+    cloud_origin: "https://app.example.com",
+  };
+
+  function desktopEnv(file: string) {
+    return { DESKTOP_IDENTITY_PATH: file, DESKTOP_INSTANCE_ID: "instance-1" };
+  }
+
+  it("publishes the one business this install holds from the database", async () => {
+    const file = tempFile();
+    const result = await publishStartupBusinessIdentity({
+      env: desktopEnv(file),
+      role: "site",
+      readRows: async () => [ROW],
+    });
+    expect(result).toEqual({ published: true, reason: "published" });
+    const written = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(written).toMatchObject({
+      businessId: ROW.business_id,
+      businessSubdomain: ROW.subdomain,
+      cloudOrigin: ROW.cloud_origin,
+      instanceFingerprint: instanceFingerprint("instance-1"),
+    });
+  });
+
+  it("names a legacy install that never enrolled with Cloud", async () => {
+    const file = tempFile();
+    const result = await publishStartupBusinessIdentity({
+      env: desktopEnv(file),
+      role: "site",
+      readRows: async () => [{ business_id: ROW.business_id, subdomain: null, cloud_origin: null }],
+    });
+    expect(result.published).toBe(true);
+    const written = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(written.businessId).toBe(ROW.business_id);
+    expect(written.businessSubdomain).toBeNull();
+    expect(written.cloudOrigin).toBeNull();
+  });
+
+  it("refuses a database that holds more than one business, and writes nothing", async () => {
+    const file = tempFile();
+    const result = await publishStartupBusinessIdentity({
+      env: desktopEnv(file),
+      role: "site",
+      readRows: async () => [ROW, { ...ROW, business_id: "22222222-2222-4222-8222-222222222222" }],
+    });
+    expect(result).toEqual({ published: false, reason: "several_businesses" });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("is a no-op on a central server, without reading the database", async () => {
+    const file = tempFile();
+    let read = false;
+    const result = await publishStartupBusinessIdentity({
+      env: desktopEnv(file),
+      role: "central",
+      readRows: async () => {
+        read = true;
+        return [ROW];
+      },
+    });
+    expect(result).toEqual({ published: false, reason: "not_site" });
+    expect(read).toBe(false);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("does not touch the database when the runtime is not a desktop backend", async () => {
+    let read = false;
+    const result = await publishStartupBusinessIdentity({
+      env: {},
+      role: "site",
+      readRows: async () => {
+        read = true;
+        return [ROW];
+      },
+    });
+    expect(result).toEqual({ published: false, reason: "not_desktop" });
+    expect(read).toBe(false);
+  });
+
+  it("never fails startup when the read or the identity is unusable", async () => {
+    const file = tempFile();
+    expect(
+      await publishStartupBusinessIdentity({
+        env: desktopEnv(file),
+        role: "site",
+        readRows: async () => {
+          throw new Error("database_unreachable");
+        },
+      }),
+    ).toEqual({ published: false, reason: "read_failed" });
+    expect(
+      await publishStartupBusinessIdentity({
+        env: desktopEnv(file),
+        role: "site",
+        readRows: async () => [{ ...ROW, business_id: "not-a-uuid" }],
+      }),
+    ).toEqual({ published: false, reason: "invalid_identity" });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("publishes nothing when the install has no business yet", async () => {
+    const file = tempFile();
+    expect(
+      await publishStartupBusinessIdentity({
+        env: desktopEnv(file),
+        role: "site",
+        readRows: async () => [],
+      }),
+    ).toEqual({ published: false, reason: "no_business" });
     expect(existsSync(file)).toBe(false);
   });
 });

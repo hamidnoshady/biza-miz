@@ -149,6 +149,110 @@ export interface PublishIdentityResult {
 }
 
 /**
+ * The business this backend serves, read from its own database.
+ *
+ * `local_cloud_activations` is the install's Cloud enrollment (Full Offline),
+ * which is where the non-secret Cloud origin already lives; a paired/Hybrid
+ * install leaves it null and the file still names the tenant and subdomain.
+ * `ORDER BY … LIMIT 2` is deliberate: one row is a single-business site, two
+ * means this database belongs to a server and **no** business may be named.
+ */
+const STARTUP_IDENTITY_QUERY = `SELECT b.id::text AS business_id,
+         b.subdomain::text AS subdomain,
+         (SELECT a.cloud_origin FROM local_cloud_activations a WHERE a.business_id = b.id) AS cloud_origin
+    FROM businesses b
+   WHERE b.ownership_kind <> 'demo'
+   ORDER BY b.id
+   LIMIT 2`;
+
+type StartupIdentityRow = {
+  business_id: string;
+  subdomain: string | null;
+  cloud_origin: string | null;
+};
+
+export type StartupIdentityReason =
+  | "published"
+  | "not_desktop"
+  | "not_site"
+  | "no_business"
+  | "several_businesses"
+  | "read_failed"
+  | "invalid_identity"
+  | "write_failed";
+
+export interface StartupIdentityResult {
+  published: boolean;
+  reason: StartupIdentityReason;
+}
+
+/**
+ * Every business row on a site install, bounded to two so "more than one" is
+ * cheap to detect. Loaded through the documented **platform** bypass for the
+ * same reason `applyPairingSnapshot` uses it: the tenant is exactly what this
+ * install cannot name yet, so there is nothing to scope to. The query returns
+ * only the three identity columns above — no tenant data, no secrets.
+ */
+async function readStartupBusinessRows(): Promise<StartupIdentityRow[]> {
+  const { query, withoutTenantScope } = await import("./db");
+  const result = await withoutTenantScope("platform", () =>
+    query<StartupIdentityRow>(STARTUP_IDENTITY_QUERY),
+  );
+  return result.rows;
+}
+
+/**
+ * Publish the identity of the saved business this backend already holds, from
+ * its own database, at startup (#1572 follow-up).
+ *
+ * A profile enrolled before the identity file existed — or a legacy install
+ * imported into one — never runs pair/reconnect/bootstrap/signup again, so
+ * without this it would stay unnamed until it was re-enrolled. Here the local
+ * server names it once per launch, before it answers its first health probe,
+ * and the shell picks the file up. Nothing comes from the renderer, and a
+ * database that holds more than one business (a Cloud/central server, a shared
+ * install) is refused outright rather than guessed at.
+ *
+ * Best-effort by contract: a failed read or write is reported, never thrown —
+ * the backend still has to start.
+ */
+export async function publishStartupBusinessIdentity(
+  options: {
+    env?: IdentityEnvironment;
+    role?: "central" | "site";
+    readRows?: () => Promise<StartupIdentityRow[]>;
+    now?: Date;
+  } = {},
+): Promise<StartupIdentityResult> {
+  const env = options.env ?? process.env;
+  // No identity path means this is not a desktop backend: don't touch the DB.
+  if (!desktopIdentityFilePath(env)) return { published: false, reason: "not_desktop" };
+  const role = options.role ?? (await import("./deployment-role")).deploymentRole();
+  if (role !== "site") return { published: false, reason: "not_site" };
+
+  let rows: StartupIdentityRow[];
+  try {
+    rows = await (options.readRows ?? readStartupBusinessRows)();
+  } catch {
+    return { published: false, reason: "read_failed" };
+  }
+  if (rows.length === 0) return { published: false, reason: "no_business" };
+  if (rows.length > 1) return { published: false, reason: "several_businesses" };
+
+  const [row] = rows;
+  const result = publishDesktopBusinessIdentity(
+    {
+      businessId: row.business_id,
+      businessSubdomain: row.subdomain,
+      cloudOrigin: row.cloud_origin,
+    },
+    { env, now: options.now },
+  );
+  if (result.ok) return { published: true, reason: "published" };
+  return { published: false, reason: result.error === "not_desktop" ? "not_desktop" : (result.error ?? "write_failed") };
+}
+
+/**
  * Publish the identity the backend just committed, atomically (temp file then
  * rename in the same directory, owner-readable only). Never throws and never
  * fails the caller: enrollment has already succeeded at this point.
