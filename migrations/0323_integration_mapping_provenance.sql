@@ -90,6 +90,11 @@ BEGIN
            'deletedAt', OLD.deleted_at
          )
     FROM integration_mappings m
+    -- A tenant deletion cascades businesses -> connections: by the time this
+    -- trigger runs the business row may already be gone, so there is no tenant
+    -- to keep evidence for (and the FK would reject the snapshot). Only a
+    -- connection deleted while its business still exists is archived.
+    JOIN businesses b ON b.id = m.business_id
    WHERE m.connection_id = OLD.id;
   RETURN OLD;
 END;

@@ -771,6 +771,50 @@ describe("mapping provenance on a physical connection delete", () => {
     // The item itself is untouched: provenance is evidence, not a re-link.
     expect(await isActive(item.rows[0].id)).toBe(true);
   });
+
+  it("never blocks a tenant deletion (the business is already gone when the cascade runs)", async () => {
+    const business = await db.query<{ id: string }>(
+      `INSERT INTO businesses (name, slug, industry) VALUES ('Gone', $1, 'cosmetics') RETURNING id`,
+      [`gone-${randomUUID().slice(0, 8)}`],
+    );
+    const location = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name) VALUES ($1, 'Gone') RETURNING id`,
+      [business.rows[0].id],
+    );
+    const connection = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections
+         (business_id, location_id, name, base_url, consumer_key_ciphertext, consumer_secret_ciphertext,
+          webhook_secret_ciphertext, currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices)
+       VALUES ($1, $2, 'Gone store', 'https://gone.example.com', $3, $4, $5, 'toman', true, true, true, false, false)
+       RETURNING id`,
+      [
+        business.rows[0].id,
+        location.rows[0].id,
+        encryptSecret("ck", Buffer.from(KEY, "hex")),
+        encryptSecret("cs", Buffer.from(KEY, "hex")),
+        encryptSecret("ws", Buffer.from(KEY, "hex")),
+      ],
+    );
+    const goneItem = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id, name, sku, kind) VALUES ($1, 'Gone item', 'GONE-1', 'simple') RETURNING id`,
+      [location.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'product', '9999', $3)`,
+      [business.rows[0].id, connection.rows[0].id, goneItem.rows[0].id],
+    );
+
+    await expect(db.query(`DELETE FROM businesses WHERE id = $1`, [business.rows[0].id])).resolves.toBeDefined();
+    expect(
+      (
+        await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM integration_mapping_provenance WHERE business_id = $1`,
+          [business.rows[0].id],
+        )
+      ).rows[0].n,
+    ).toBe(0);
+  });
 });
 
 describe("reporting after an archive", () => {
