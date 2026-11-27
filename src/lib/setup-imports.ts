@@ -17,6 +17,7 @@
  * notice and their tests share one answer without pulling `pg` into a bundle.
  */
 import { APPS, type AppKey } from "./apps";
+import type { ImportAccessDecision } from "./import-access";
 import {
   DATA_MODULE_LABELS,
   type DataModuleKey,
@@ -42,6 +43,14 @@ export const SETUP_IMPORT_MODULE_APP: Record<DataModuleKey, AppKey | null> = {
 
 export type SetupImportUnavailableReason =
   | "app_not_selected"
+  | "awaiting_activation"
+  | "service_disabled"
+  | "service_suspended"
+  | "service_purged"
+  | "grant_inactive"
+  | "app_unavailable"
+  | "workspace_unavailable"
+  | "deployment_unsupported"
   | "permission"
   | "not_importable"
   | "industry_module";
@@ -62,6 +71,13 @@ export interface SetupImportEntityInput {
    * Absent = eligible, which is what every established catalogued type is.
    */
   industryEligible?: boolean;
+  /**
+   * The effective service-access decision for this target (#1580), resolved by
+   * `import-access-service` from activation, grant, Workspace and deployment
+   * state. Absent only for pure/legacy callers, which then fall back to the
+   * selection-only rule this module shipped with in #1535.
+   */
+  access?: ImportAccessDecision;
 }
 
 export interface SetupImportCandidate extends SetupImportEntityInput {
@@ -69,6 +85,11 @@ export interface SetupImportCandidate extends SetupImportEntityInput {
   appKey: AppKey | null;
   appLabel: string | null;
   available: boolean;
+  /**
+   * Parsing/mapping/preview is offered even when applying is not (a selected
+   * app awaiting activation, a suspended service).
+   */
+  stagingAllowed: boolean;
   reason: SetupImportUnavailableReason | null;
   reasonLabel: string | null;
 }
@@ -94,6 +115,12 @@ export function setupImportUnavailableReason(
   // import it": a jewellery shop has no menu module, whatever it selects.
   if (entity.industryEligible === false) return "industry_module";
   if (!entity.granted) return "permission";
+  // From #1580 on, the decision is the canonical effective-service answer:
+  // activation/grant/Workspace/deployment, not the draft selection alone.
+  if (entity.access && entity.access.reason) {
+    return entity.access.reason as SetupImportUnavailableReason;
+  }
+  if (entity.access) return null;
   const app = SETUP_IMPORT_MODULE_APP[entity.module];
   // `null`/`undefined` selection is the legacy unset state: keep the type
   // available exactly as an established business has always had it.
@@ -105,9 +132,12 @@ export function setupImportUnavailableReason(
 
 export function setupImportReasonLabel(
   reason: SetupImportUnavailableReason | null,
-  entity: Pick<SetupImportEntityInput, "module">,
+  entity: Pick<SetupImportEntityInput, "module" | "access">,
 ): string | null {
   if (!reason) return null;
+  // The access decision already carries the owner-facing sentence, including
+  // the `منتظر فعال‌سازی` staging explanation.
+  if (entity.access?.reason && entity.access.label) return entity.access.label;
   if (reason === "not_importable") {
     return "ورود این نوع داده از فایل پشتیبانی نمی‌شود؛ آن را از صفحهٔ خودش ثبت کنید.";
   }
@@ -117,10 +147,13 @@ export function setupImportReasonLabel(
   if (reason === "permission") {
     return "برای ورود این نوع داده، مجوز «ورود داده» و دسترسی همان بخش لازم است.";
   }
-  const label = appLabel(SETUP_IMPORT_MODULE_APP[entity.module]);
-  return label
-    ? `برنامهٔ «${label}» انتخاب نشده است؛ برای ورود این داده ابتدا آن را در مرحلهٔ انتخاب برنامه‌ها انتخاب کنید.`
-    : "برنامهٔ صاحب این داده انتخاب نشده است.";
+  if (reason === "app_not_selected") {
+    const label = appLabel(SETUP_IMPORT_MODULE_APP[entity.module]);
+    return label
+      ? `برنامهٔ «${label}» انتخاب نشده است؛ برای ورود این داده ابتدا آن را در مرحلهٔ انتخاب برنامه‌ها انتخاب کنید.`
+      : "برنامهٔ صاحب این داده انتخاب نشده است.";
+  }
+  return "وضعیت دسترسی این داده اجازهٔ ورود نمی‌دهد؛ آن را از صفحهٔ خودش ثبت کنید.";
 }
 
 /**
@@ -142,6 +175,9 @@ export function setupImportCandidates(
       appKey,
       appLabel: appLabel(appKey),
       available: reason === null,
+      stagingAllowed:
+        reason === null ||
+        (entity.access ? entity.access.stagingAllowed : false),
       reason,
       reasonLabel: setupImportReasonLabel(reason, entity),
     };

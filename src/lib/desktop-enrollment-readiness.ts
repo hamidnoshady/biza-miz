@@ -24,7 +24,7 @@
  */
 import { LEGACY_PAIRING_SNAPSHOT_VERSION } from "./pairing-snapshot";
 import type { SetupReadiness } from "./setup-readiness";
-import type { WizardStep } from "./wizard-steps";
+import { SETUP_MENU_IMPORT_HREF, type WizardStep } from "./wizard-steps";
 
 export type EnrollmentBlockerCode =
   | "business_not_found"
@@ -208,7 +208,7 @@ export function evaluateEnrollmentReadiness(facts: EnrollmentFacts): EnrollmentR
     const ok = (facts.sellableMenuItemsByLocation[locationId] ?? 0) > 0;
     check("branch_menu", ok);
     if (!ok) {
-      add({ code: "branch_menu_empty", message: MESSAGES.branch_menu_empty, action: { kind: "open_cloud_setup", href: setupStepHref("menu") } });
+      add({ code: "branch_menu_empty", message: MESSAGES.branch_menu_empty, action: { kind: "open_cloud_setup", href: SETUP_MENU_IMPORT_HREF } });
     }
   }
   check("payment_way", facts.activePaymentWays > 0);

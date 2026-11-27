@@ -15,6 +15,10 @@ import * as memberAccess from "@/lib/member-access";
 import * as industry from "@/lib/industry-guard";
 import * as registry from "@/lib/data-transfer/registry";
 import * as imports from "@/lib/data-transfer/import-service";
+import * as setupApps from "@/lib/setup-apps-service";
+import * as activation from "@/lib/service-activation/app-gate-service";
+import * as grants from "@/lib/complimentary-grant-service";
+import * as availability from "@/lib/app-availability-service";
 import { GET } from "./route";
 
 vi.mock("@/lib/auth", async (importOriginal) => {
@@ -44,6 +48,26 @@ vi.mock("@/lib/data-transfer/registry", async (importOriginal) => {
   };
 });
 vi.mock("@/lib/data-transfer/import-service", () => ({ listImportJobs: vi.fn() }));
+// #1580 — the effective-access axes are canonical database reads. The route's
+// own contract is tested here, so each axis is pinned to a known state and the
+// real pure resolver still decides the answer.
+vi.mock("@/lib/setup-apps-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/setup-apps-service")>();
+  return { ...actual, getSelectedSetupApps: vi.fn() };
+});
+vi.mock("@/lib/service-activation/app-gate-service", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/service-activation/app-gate-service")>();
+  return { ...actual, appServiceActivationState: vi.fn(), serviceActivationState: vi.fn() };
+});
+vi.mock("@/lib/complimentary-grant-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/complimentary-grant-service")>();
+  return { ...actual, readActiveComplimentaryGrant: vi.fn() };
+});
+vi.mock("@/lib/app-availability-service", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/app-availability-service")>();
+  return { ...actual, effectiveAppAvailability: vi.fn() };
+});
 
 const SESSION = { businessId: "biz-1", sub: "user-1" };
 
@@ -121,6 +145,17 @@ beforeEach(() => {
     EXPENSES,
   ] as never);
   vi.mocked(imports.listImportJobs).mockResolvedValue([job({})] as never);
+  // The canonical axes: a selected app with an active service is effective.
+  vi.mocked(setupApps.getSelectedSetupApps).mockResolvedValue(["crm"] as never);
+  vi.mocked(activation.appServiceActivationState).mockResolvedValue("active" as never);
+  vi.mocked(activation.serviceActivationState).mockResolvedValue(null as never);
+  vi.mocked(grants.readActiveComplimentaryGrant).mockResolvedValue(null as never);
+  vi.mocked(availability.effectiveAppAvailability).mockResolvedValue({
+    accounting: { usable: true },
+    crm: { usable: true },
+    growth: { usable: true },
+    website: { usable: true },
+  } as never);
 });
 
 describe("/api/setup/imports", () => {
@@ -194,6 +229,7 @@ describe("/api/setup/imports", () => {
     });
     vi.mocked(registry.entitiesForIndustry).mockReturnValue([MENU] as never);
     vi.mocked(settings.getSetting).mockResolvedValue({ apps: ["accounting"] });
+    vi.mocked(setupApps.getSelectedSetupApps).mockResolvedValue(["accounting"] as never);
 
     vi.mocked(industry.getBusinessIndustry).mockResolvedValue("food_service");
     let body = await (await GET()).json();

@@ -165,7 +165,10 @@ describe("evaluateEnrollmentReadiness", () => {
       // The business has 5 sellable items in total, none at branch two.
       const atEmpty = evaluateEnrollmentReadiness(facts({ ...two, requestedLocationId: OTHER.id }));
       expect(atEmpty.blockerCodes).toEqual(["branch_menu_empty"]);
-      expect(atEmpty.blockers[0].action).toEqual({ kind: "open_cloud_setup", href: "/setup/menu" });
+      expect(atEmpty.blockers[0].action).toEqual({
+        kind: "open_cloud_setup",
+        href: "/setup/import?source=manual&section=menu",
+      });
     });
 
     it("refuses a business with no active branch", () => {
