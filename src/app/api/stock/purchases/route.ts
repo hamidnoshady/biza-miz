@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { consignmentBlockOf } from "@/lib/fashion-consignment";
 import { withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { getPool, query } from "@/lib/db";
@@ -389,6 +390,10 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     if (err instanceof RetailIdempotencyConflictError) {
       return NextResponse.json({ error: "idempotency_conflict", message: err.message }, { status: 409 });
     }
+    // GH #1567 C5 — owned stock into a variant holding consigned units is an
+    // explicit, named refusal, not a raw trigger message.
+    const blocked = consignmentBlockOf(err);
+    if (blocked) return NextResponse.json({ error: blocked.code, message: blocked.message }, { status: 409 });
     const message = err instanceof RetailStockError || err instanceof Error ? err.message : "ثبت خرید ناموفق بود.";
     return NextResponse.json({ error: "purchase_failed", message }, { status: 400 });
   } finally {

@@ -45,7 +45,7 @@ beforeEach(() => {
       if (saveResponse) return new Response(JSON.stringify(saveResponse.body), { status: saveResponse.status });
       return new Response(JSON.stringify({ pack: PACK }), { status: 201 });
     }
-    if (url === "/api/size-packs") return new Response(JSON.stringify({ packs: [PACK, { ...PACK, id: "x", name: "بستهٔ تمام‌شده", available: 0, clearedBarcode: "2000000000015", shortages: [{ itemId: "l", name: "پیراهن (L)", need: 2, onHand: "1", missing: "1" }] }] }));
+    if (url === "/api/size-packs") return new Response(JSON.stringify({ packs: [PACK, { ...PACK, id: "x", name: "بستهٔ تمام‌شده", available: 0, clearedBarcode: "2000000000015", consignedComponents: ["پیراهن (M)"], shortages: [{ itemId: "l", name: "پیراهن (L)", need: 2, onHand: "1", missing: "1" }] }] }));
     if (url === "/api/size-packs/matrix") return new Response(JSON.stringify({ styles: [{ id: STYLE_ID, name: "پیراهن", sku: "DR", variants: 3 }] }));
     if (url === `/api/size-packs/matrix?styleId=${STYLE_ID}`) return new Response(JSON.stringify({ axes: ["رنگ", "سایز"], cells: CELLS }));
     if (url === "/api/size-packs/sales") return new Response(JSON.stringify({ sales: [] }));
@@ -80,6 +80,9 @@ describe("size pack helpers", () => {
     expect(text).toContain("کمبود ۱");
     expect(sizePackErrorMessage("pack_barcode_taken")).toContain("بارکد");
     expect(sizePackErrorMessage("something_new")).toBe("انجام نشد. دوباره تلاش کنید.");
+    // GH #1567 C5
+    expect(sizePackErrorMessage("pack_contains_consigned", { items: ["پیراهن (M)"] })).toMatch(/امانی.*پیراهن \(M\)/);
+    expect(sizePackErrorMessage("pack_contains_consigned")).toMatch(/امانی/);
   });
 
   it("prices a till pack line like the per-variant lines the server will create", () => {
@@ -105,6 +108,9 @@ describe("SizePackManager", () => {
     // GH #1567 C3: a barcode migration 0334 cleared is explained on the row.
     expect(within(rows[2]).getByText(/بارکد ۲۰۰۰۰۰۰۰۰۰۰۱۵ برداشته شد/)).toBeTruthy();
     expect(within(rows[1]).queryByText(/برداشته شد/)).toBeNull();
+    // GH #1567 C5: a consigned component is named on the row, not left as a bare shortage.
+    expect(within(rows[2]).getByText(/کالای امانی است.*\(پیراهن \(M\)\)/)).toBeTruthy();
+    expect(within(rows[1]).queryByText(/امانی/)).toBeNull();
     expect(screen.getByRole("button", { name: /بستهٔ تازه/ })).toBeTruthy();
   });
 

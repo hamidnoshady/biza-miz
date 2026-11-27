@@ -35,6 +35,8 @@ export interface SizePack {
   components: PackComponent[];
   /** GH #1567 C3 — barcode cleared by migration because an item already scans with it. */
   clearedBarcode?: string | null;
+  /** GH #1567 C5 — variants holding consigned units; the pack cannot be sold while they do. */
+  consignedComponents?: string[];
 }
 
 /** Shown on a pack whose barcode an item at this branch already used. */
@@ -131,6 +133,9 @@ function PacksSection({ canEdit }: { canEdit: boolean }) {
                   <span className="block font-medium">{p.name}</span>
                   {p.barcode ? <span className="block text-xs text-muted-foreground" dir="ltr">{p.barcode}</span> : null}
                   {p.clearedBarcode ? <span className="block text-xs text-destructive">{clearedBarcodeText(p.clearedBarcode)}</span> : null}
+                  {p.consignedComponents && p.consignedComponents.length > 0
+                    ? <span className="block text-xs text-destructive">{sizePackErrorMessage("pack_contains_consigned", { items: p.consignedComponents })}</span>
+                    : null}
                 </Td>
                 <Td><span className="block max-w-xs truncate text-xs">{p.components.map((c) => `${c.attributes || c.name} ×${fa(c.quantity)}`).join("، ")}</span></Td>
                 <Td>{fa(p.pieces)}</Td>

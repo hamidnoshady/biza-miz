@@ -1,6 +1,9 @@
 // GH #1567 Phase 6D — the consignment accounting contract, as arithmetic.
 import { describe, expect, it } from "vitest";
 import {
+  CONSIGNMENT_BLOCK_MESSAGES,
+  ConsignmentBlockedError,
+  consignmentBlockOf,
   ConsignmentRuleError,
   allowedActions,
   assertAllowed,
@@ -95,5 +98,24 @@ describe("contract validation and state", () => {
   it("on-hand and outstanding payable follow the movement totals", () => {
     expect(onHand({ received: 10, sold: 6, customerReturned: 1, returnedToOwner: 2 })).toBe(3);
     expect(outstandingPayable({ shareSoldRial: 3_600_000n, shareReturnedRial: 600_000n, settledRial: 1_000_000n })).toBe(2_000_000n);
+  });
+});
+
+describe("unsupported combinations are named (GH #1567 C5)", () => {
+  it("recognises the item_stock trigger's refusal and the typed error, and nothing else", () => {
+    const trigger = Object.assign(new Error("consigned_variant_owned_stock"), { code: "P0001" });
+    expect(consignmentBlockOf(trigger)).toEqual({
+      code: "consigned_variant_owned_stock",
+      message: CONSIGNMENT_BLOCK_MESSAGES.consigned_variant_owned_stock,
+    });
+    const typed = new ConsignmentBlockedError("consigned_online_sale_unsupported", { itemId: "x" });
+    expect(consignmentBlockOf(typed)).toEqual({ code: "consigned_online_sale_unsupported", message: typed.message });
+    expect(consignmentBlockOf(Object.assign(new Error("other"), { code: "P0001" }))).toBeNull();
+    expect(consignmentBlockOf(Object.assign(new Error("consigned_variant_owned_stock"), { code: "23505" }))).toBeNull();
+    expect(consignmentBlockOf(null)).toBeNull();
+  });
+
+  it("every block has a Persian message that says امانی", () => {
+    for (const message of Object.values(CONSIGNMENT_BLOCK_MESSAGES)) expect(message).toMatch(/امانی/);
   });
 });

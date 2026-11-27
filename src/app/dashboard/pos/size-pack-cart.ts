@@ -13,6 +13,8 @@ export interface TillSizePack {
   pieces: number;
   available: number;
   components: { quantity: number; unitPriceRial: number }[];
+  /** GH #1567 C5 — variants in the pack that hold consigned (امانی) units; such a pack is not sellable. */
+  consignedComponents?: string[];
 }
 
 export interface SizePackCartLine {

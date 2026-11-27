@@ -185,3 +185,51 @@ export function assertAllowed(status: ContractStatus, action: ConsignmentAction)
     throw new ConsignmentRuleError(status === "expired" ? "contract_expired" : status === "closed" ? "contract_closed" : "action_not_allowed", { status, action });
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * GH #1567 C5 — combinations the consignment model does not support,
+ * refused explicitly (one code, one Persian message each) instead of
+ * surfacing as a raw database error, a misleading "shortage" or a sale
+ * the ledger cannot attribute to its owner.
+ * ------------------------------------------------------------------ */
+
+export type ConsignmentBlockCode =
+  /** Owned stock may not enter a variant that holds consigned units (DB trigger, migration 0332/0336). */
+  | "consigned_variant_owned_stock"
+  /** A size pack expands to fungible owned-stock lines; a consigned component cannot be sold that way. */
+  | "pack_contains_consigned"
+  /** Online channels relieve owned item_stock only; the consignment ledger is till-only. */
+  | "consigned_online_sale_unsupported";
+
+export const CONSIGNMENT_BLOCK_MESSAGES: Record<ConsignmentBlockCode, string> = {
+  consigned_variant_owned_stock:
+    "این تنوع کالای امانی در دست دارد؛ تا کالای امانی به صاحبش برنگشته یا فروخته نشده، موجودیِ متعلق به فروشگاه (خرید، انتقال یا اصلاح موجودی) برای آن ثبت نمی‌شود.",
+  pack_contains_consigned:
+    "این بسته تنوعی دارد که کالای امانی است؛ بستهٔ سایزی فقط از موجودی خودِ فروشگاه فروخته می‌شود. تنوع امانی را جداگانه بفروشید.",
+  consigned_online_sale_unsupported:
+    "این سفارش آنلاین تنوعی امانی دارد؛ فروش امانی فقط از صندوق فروشگاه ثبت می‌شود تا سهم صاحب کالا درست ثبت شود. سفارش را از صندوق ثبت کنید.",
+};
+
+/** Raised by the services for a combination listed in {@link CONSIGNMENT_BLOCK_MESSAGES}. */
+export class ConsignmentBlockedError extends Error {
+  constructor(public readonly code: ConsignmentBlockCode, public readonly detail?: Record<string, unknown>) {
+    super(CONSIGNMENT_BLOCK_MESSAGES[code]);
+    this.name = "ConsignmentBlockedError";
+  }
+}
+
+/**
+ * Recognises a consignment block however it surfaced: the typed error, or the
+ * item_stock trigger's SQLSTATE P0001 `consigned_variant_owned_stock`
+ * (the message is the code by design). Null for anything else.
+ */
+export function consignmentBlockOf(err: unknown): { code: ConsignmentBlockCode; message: string } | null {
+  if (err instanceof ConsignmentBlockedError) return { code: err.code, message: err.message };
+  if (err && typeof err === "object") {
+    const e = err as { code?: unknown; message?: unknown };
+    if (e.code === "P0001" && e.message === "consigned_variant_owned_stock") {
+      return { code: "consigned_variant_owned_stock", message: CONSIGNMENT_BLOCK_MESSAGES.consigned_variant_owned_stock };
+    }
+  }
+  return null;
+}

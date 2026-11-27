@@ -736,6 +736,21 @@ describe("RetailInvoiceScreen — fashion size packs (GH #1567 6C)", () => {
     expect(postedLines(fetchMock)).toEqual([{ kind: "size_pack", packId: "pack-1", quantity: 1, vatPercent: 0 }]);
   });
 
+  it("a scanned pack with a consigned component is refused by name, not as a shortage (GH #1567 C5)", async () => {
+    const fetchMock = fetchMockWith([
+      { pattern: /\/api\/barcodes\/lookup/, body: { matches: [] } },
+      { pattern: /\/api\/size-packs\/lookup\?code=PACK-1$/, body: { pack: { ...PACK, available: 0, consignedComponents: ["پیراهن (M)"] } } },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RetailInvoiceScreen industry="fashion_apparel" />);
+    await flush();
+    await scanAndFlush("PACK-1");
+    await flush();
+    expect(screen.getByText(/کالای امانی است.*پیراهن \(M\)/)).toBeTruthy();
+    expect(screen.queryByText(/کافی نیست/)).toBeNull();
+    expect(screen.queryByText(/بستهٔ عمده مشکی × ۱/)).toBeNull();
+  });
+
   it("a non-fashion till never asks the size-pack lookup", async () => {
     const fetchMock = fetchMockWith([{ pattern: /\/api\/barcodes\/lookup/, body: { matches: [] } }]);
     vi.stubGlobal("fetch", fetchMock);

@@ -27,6 +27,7 @@
 import { readSaleMerchSnapshot, type SaleMerchSnapshot } from "./sale-return-facts";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
+import { ConsignmentBlockedError } from "./fashion-consignment";
 import { rialText, roundRial, type RialText } from "./inventory-exact";
 import { relieveFungibleStock, relieveFungibleValueOnly } from "./item-stock-valuation";
 import {
@@ -108,6 +109,20 @@ export async function sellOnlineRetailLine(
   );
   if (!rows[0]) throw new Error("item_not_found");
   const tracking = rows[0].tracking;
+
+  // GH #1567 C5 — a variant holding consigned (امانی) units belongs to its
+  // owner: an online order would relieve owned item_stock (it has none),
+  // record a "short" and book the whole price as the shop's revenue with no
+  // owner share. Refuse it by name; the order is recorded from the till.
+  const { rows: consigned } = await client.query(
+    `SELECT 1 FROM fashion_consignment_lines l
+       JOIN fashion_consignment_contracts c ON c.id = l.contract_id
+      WHERE l.item_id = $1 AND l.is_open AND c.location_id = $2
+        AND l.received_qty - l.sold_qty + l.customer_returned_qty + l.voided_qty - l.returned_to_owner_qty > 0
+      FOR SHARE OF l`,
+    [input.itemId, input.locationId],
+  );
+  if (consigned.length > 0) throw new ConsignmentBlockedError("consigned_online_sale_unsupported", { itemId: input.itemId });
 
   if (tracking === "batch") {
     const allocations = await allocateBatchStock(client, {

@@ -26,6 +26,7 @@ import { normalizePosSearchText } from "@/lib/pos-selection";
 import { computeGoldSalePrice, type MakingChargeType } from "@/lib/gold-pricing";
 import { computeAccessorySalePrice } from "@/lib/accessories";
 import { sizePackCartLine, type TillSizePack } from "./size-pack-cart";
+import { sizePackErrorMessage } from "@/lib/fashion-size-pack-messages";
 import { computeCosmeticSalePrice } from "@/lib/cosmetics";
 import { computeWatchSalePrice } from "@/lib/watch-pricing";
 import {
@@ -101,7 +102,12 @@ interface Variant {
   sellableQuantity?: string;
   tracking?: string;
   unitPrice: number | null;
+  /** GH #1567 6D/C5 — a fashion variant selling consigned (امانی) units for their owner. */
+  consigned?: true;
 }
+
+/** The till's label for a consigned variant: the cashier sees whose goods they are selling. */
+const CONSIGNED_VARIANT_TAG = "امانی";
 
 /** One line in the cart, before it is sent. Prices are previews of what the server will compute. */
 interface CartLine {
@@ -1045,6 +1051,10 @@ function BarcodeScanField({
         const packRes = await api<{ pack?: TillSizePack | null }>(`/api/size-packs/lookup?code=${encodeURIComponent(needle)}`);
         const pack = packRes.ok ? packRes.data.pack : null;
         if (pack) {
+          if (pack.consignedComponents && pack.consignedComponents.length > 0) {
+            setScanError(sizePackErrorMessage("pack_contains_consigned", { items: pack.consignedComponents }));
+            return;
+          }
           if (pack.available < 1) {
             setScanError(`موجودی برای بستهٔ «${pack.name}» کافی نیست.`);
             return;
@@ -1579,7 +1589,7 @@ function AccessoryLineForm({
             { value: "", label: "انتخاب کنید" },
             ...sellable.map((v) => ({
               value: v.id,
-              label: `${v.parentName ? `${v.parentName} — ` : ""}${v.name} (موجودی ${formatQuantity(v.quantity)})`,
+              label: `${v.parentName ? `${v.parentName} — ` : ""}${v.name} (${v.consigned ? `${CONSIGNED_VARIANT_TAG} · ` : ""}موجودی ${formatQuantity(v.quantity)})`,
             })),
           ]}
         />
@@ -1622,7 +1632,7 @@ function AccessoryLineForm({
           if (!variant || !preview) return;
           onAdd({
             key: newKey(),
-            label: `${variant.name} × ${formatQuantity(quantity)}`,
+            label: `${variant.name}${variant.consigned ? ` · ${CONSIGNED_VARIANT_TAG}` : ""} × ${formatQuantity(quantity)}`,
             payload: {
               kind,
               itemId: variant.id,
@@ -1664,7 +1674,11 @@ function SizePackLineForm({ onAdd }: { onAdd: (line: CartLine) => void }) {
   if (!packs || packs.length === 0) return null;
   const pack = packs.find((p) => p.id === packId) ?? null;
   const qty = Number(toLatinDigits(quantity));
-  const valid = pack !== null && Number.isInteger(qty) && qty >= 1 && qty <= pack.available;
+  // GH #1567 C5 — a pack holding a consigned variant is refused by name, not as a shortage.
+  const consignedBlock = pack && pack.consignedComponents && pack.consignedComponents.length > 0
+    ? sizePackErrorMessage("pack_contains_consigned", { items: pack.consignedComponents })
+    : null;
+  const valid = pack !== null && consignedBlock === null && Number.isInteger(qty) && qty >= 1 && qty <= pack.available;
   const preview = valid ? sizePackCartLine(pack, qty, defaultVatPercent, "preview") : null;
   return (
     <Panel title="فروش بستهٔ سایزی" hint="هر بسته همان تنوع‌ها را از انبار کم می‌کند؛ قیمت، قیمت عمدهٔ ثبت‌شدهٔ بسته است.">
@@ -1684,7 +1698,7 @@ function SizePackLineForm({ onAdd }: { onAdd: (line: CartLine) => void }) {
       </Field>
       {pack && !valid ? (
         <p role="alert" className="mb-3 text-xs text-rose-700 dark:text-rose-300">
-          {pack.available < 1 ? `موجودی برای بستهٔ «${pack.name}» کافی نیست.` : `حداکثر ${toPersianDigits(String(pack.available))} بسته قابل فروش است.`}
+          {consignedBlock ?? (pack.available < 1 ? `موجودی برای بستهٔ «${pack.name}» کافی نیست.` : `حداکثر ${toPersianDigits(String(pack.available))} بسته قابل فروش است.`)}
         </p>
       ) : null}
       {preview ? (

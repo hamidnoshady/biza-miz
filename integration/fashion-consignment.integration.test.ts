@@ -24,6 +24,8 @@ let retailInvoice: typeof import("../src/lib/retail-invoice-service");
 let returns: typeof import("../src/lib/customer-return-service");
 let voids: typeof import("../src/lib/retail-invoice-void-service");
 let consignment: typeof import("../src/lib/fashion-consignment-service");
+let sizePacks: typeof import("../src/lib/fashion-size-pack-service");
+let onlineSale: typeof import("../src/lib/retail-online-sale-service");
 
 const UNIT_COST = 50_000;
 let barcodeCounter = Math.floor(Math.random() * 1e8);
@@ -66,6 +68,8 @@ beforeAll(async () => {
   returns = await import("../src/lib/customer-return-service");
   voids = await import("../src/lib/retail-invoice-void-service");
   consignment = await import("../src/lib/fashion-consignment-service");
+  sizePacks = await import("../src/lib/fashion-size-pack-service");
+  onlineSale = await import("../src/lib/retail-online-sale-service");
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
 }, 120_000);
@@ -430,5 +434,121 @@ describe("fashion consignment by contract (GH #1567 6D)", () => {
       await client.query("ROLLBACK");
       client.release();
     }
+  });
+});
+
+describe("unsupported consignment combinations are refused by name (GH #1567 C5)", () => {
+  async function consignedM(label: string) {
+    const ctx = await seed(label);
+    const owner = await consignment.createConsignorRecord(ctx.actor, ctx.tenant.locationId, { name: `امانت‌دار ${label}`, phone: null, notes: null });
+    const contract = await consignment.createContract(ctx.actor, ctx.tenant.locationId, {
+      reference: `C-${label}`, consignorId: owner.id, startsOn: "2026-01-01", expiresOn: null, notes: null,
+      lines: [
+        { itemId: ctx.m, terms: "commission", ownerUnitPriceRial: null, commissionBp: 2_000, retailPriceRial: 500_000 },
+        { itemId: ctx.l, terms: "commission", ownerUnitPriceRial: null, commissionBp: 2_000, retailPriceRial: 500_000 },
+      ],
+    });
+    const lineM = contract.lines.find((l) => l.itemId === ctx.m)!.id;
+    const lineL = contract.lines.find((l) => l.itemId === ctx.l)!.id;
+    const received = await consignment.receiveConsignedGoods(ctx.actor, ctx.tenant.locationId, contract.id, {
+      idempotencyKey: `receive-${label}`, expectedVersion: contract.version, note: null, lines: [{ lineId: lineM, quantity: 2 }],
+    });
+    return { ctx, contractId: contract.id, version: received.version, lineM, lineL };
+  }
+
+  it("a size pack with a consigned component says so — in its view and at sale — instead of reporting a shortage", async () => {
+    const { ctx, lineM } = await consignedM("c5pk");
+    const pack = await sizePacks.saveSizePack(ctx.actor, ctx.tenant.locationId, {
+      name: "بستهٔ مخلوط", barcode: null,
+      components: [{ itemId: ctx.s, quantity: 1, unitPriceRial: 80_000 }, { itemId: ctx.m, quantity: 1, unitPriceRial: 80_000 }],
+    });
+    expect(pack.consignedComponents).toHaveLength(1);
+    expect(pack.components.find((c) => c.itemId === ctx.m)!.consigned).toBe(true);
+    const err = await tx((client) => sizePacks.expandSizePackInvoiceLines(client, {
+      businessId: ctx.tenant.businessId, locationId: ctx.tenant.locationId, industry: "fashion_apparel",
+      clientRequestId: `pk-${randomUUID()}`, createdBy: ctx.tenant.userId,
+    }, [{ kind: "size_pack", packId: pack.id, quantity: 1, vatPercent: 9 }] as never)).catch((e) => e);
+    expect(err.code).toBe("pack_contains_consigned");
+    expect(err.detail.items).toEqual(pack.consignedComponents);
+    expect(await onHandOf(lineM)).toBe(2);
+    expect(await stockOf(ctx.s)).toBe(5);
+    // An owned-only pack is not flagged.
+    const owned = await sizePacks.saveSizePack(ctx.actor, ctx.tenant.locationId, {
+      name: "بستهٔ خودی", barcode: null, components: [{ itemId: ctx.s, quantity: 1, unitPriceRial: 80_000 }],
+    });
+    expect(owned.consignedComponents).toEqual([]);
+  });
+
+  it("an online order line for a consigned variant is refused before any stock or revenue moves", async () => {
+    const { ctx, lineM } = await consignedM("c5on");
+    const before = await net(ctx.tenant.businessId);
+    const err = await tx((client) => onlineSale.sellOnlineRetailLine(client, {
+      locationId: ctx.tenant.locationId, orderId: randomUUID(), orderItemId: randomUUID(), itemId: ctx.m,
+      quantity: "1", netRial: "500000", sourceType: "woocommerce_order", sourceId: "1001",
+      occurredAt: new Date().toISOString(), remoteOccurredAt: null,
+    })).catch((e) => e);
+    expect(err.name).toBe("ConsignmentBlockedError");
+    expect(err.code).toBe("consigned_online_sale_unsupported");
+    expect(err.message).toMatch(/امانی/);
+    expect(await onHandOf(lineM)).toBe(2);
+    expect(await stockOf(ctx.m)).toBe(0);
+    expect(await net(ctx.tenant.businessId)).toEqual(before);
+  });
+
+  it("the owned-stock guard is race-free when the variant has no item_stock row yet (consigned receipt first)", async () => {
+    const { ctx, lineL } = await consignedM("c5ra");
+    expect(await stockOf(ctx.l)).toBe(0);
+    // A consigned-only variant need not have an item_stock row; the first owned
+    // receipt then INSERTs it — the path FOR SHARE on a missing row cannot lock.
+    await db.query("DELETE FROM item_stock WHERE item_id = $1 AND quantity = 0", [ctx.l]);
+    const { rows: none } = await db.query("SELECT 1 FROM item_stock WHERE item_id = $1", [ctx.l]);
+    expect(none).toHaveLength(0);
+    // A consigned receipt of L is in flight: the line is locked and incremented, not yet committed.
+    const holder = new Client({ connectionString: urlFor(databaseName) });
+    await holder.connect();
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT 1 FROM fashion_consignment_lines WHERE id = $1 FOR UPDATE", [lineL]);
+      await holder.query("UPDATE fashion_consignment_lines SET received_qty = received_qty + 1 WHERE id = $1", [lineL]);
+      let settled = false;
+      const purchase = codeOf(tx((client) => stockService.receiveItemPurchase(client, {
+        businessId: ctx.tenant.businessId, locationId: ctx.tenant.locationId,
+        lines: [{ itemId: ctx.l, quantity: "1", unitCost: UNIT_COST }],
+      }))).finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 400));
+      expect(settled).toBe(false); // waiting on the line, not reading a stale "no consigned units"
+      await holder.query("COMMIT");
+      expect(await purchase).toContain("consigned_variant_owned_stock");
+    } finally {
+      await holder.query("ROLLBACK").catch(() => {});
+      await holder.end();
+    }
+    expect(await stockOf(ctx.l)).toBe(0);
+    expect(await onHandOf(lineL)).toBe(1);
+  });
+
+  it("the owned-stock guard is race-free the other way (owned purchase first)", async () => {
+    const { ctx, contractId, version, lineL } = await consignedM("c5rb");
+    const client = await dbLib.getPool().connect();
+    try {
+      await client.query("BEGIN");
+      await stockService.receiveItemPurchase(client, {
+        businessId: ctx.tenant.businessId, locationId: ctx.tenant.locationId,
+        lines: [{ itemId: ctx.l, quantity: "1", unitCost: UNIT_COST }],
+      });
+      let settled = false;
+      const receipt = codeOf(consignment.receiveConsignedGoods(ctx.actor, ctx.tenant.locationId, contractId, {
+        idempotencyKey: "receive-c5rb-L", expectedVersion: version, note: null, lines: [{ lineId: lineL, quantity: 1 }],
+      })).finally(() => { settled = true; });
+      await new Promise((r) => setTimeout(r, 400));
+      expect(settled).toBe(false);
+      await client.query("COMMIT");
+      expect(await receipt).toBe("item_has_owned_stock");
+    } finally {
+      await client.query("ROLLBACK").catch(() => {});
+      client.release();
+    }
+    expect(await stockOf(ctx.l)).toBe(1);
+    expect(await onHandOf(lineL)).toBe(0);
   });
 });

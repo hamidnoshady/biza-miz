@@ -1,5 +1,6 @@
 /** GH #1567 6C — Persian messages for size-pack error codes (client-safe: no I/O). */
 import { toPersianDigits } from "./digits";
+import { CONSIGNMENT_BLOCK_MESSAGES } from "./fashion-consignment";
 
 const MESSAGES: Record<string, string> = {
   bad_request: "اطلاعات واردشده کامل یا معتبر نیست.",
@@ -17,6 +18,7 @@ const MESSAGES: Record<string, string> = {
   pack_name_taken: "بسته‌ای با این نام در این شعبه وجود دارد.",
   pack_not_found: "بسته پیدا نشد.",
   pack_inactive: "این بسته غیرفعال است.",
+  pack_contains_consigned: CONSIGNMENT_BLOCK_MESSAGES.pack_contains_consigned,
   pack_industry_mismatch: "بستهٔ سایزی فقط در کسب‌وکار پوشاک قابل فروش است.",
   pack_invalid_vat: "درصد مالیات بسته معتبر نیست.",
   item_not_found: "کالا در این شعبه پیدا نشد.",
@@ -37,6 +39,10 @@ export function sizePackErrorMessage(code: unknown, detail?: unknown): string {
     const parts = (d.shortages ?? []).map((s) =>
       `${s.name}: نیاز ${toPersianDigits(String(s.need))}، موجود ${toPersianDigits(s.onHand)}، کمبود ${toPersianDigits(s.missing)}`);
     return `موجودی برای «${d.packName ?? "بسته"}» کافی نیست — ${parts.join("؛ ")}`;
+  }
+  if (code === "pack_contains_consigned") {
+    const items = ((detail ?? {}) as { items?: string[] }).items ?? [];
+    return items.length > 0 ? `${MESSAGES[code]} (${items.join("، ")})` : MESSAGES[code];
   }
   return (typeof code === "string" && MESSAGES[code]) || "انجام نشد. دوباره تلاش کنید.";
 }

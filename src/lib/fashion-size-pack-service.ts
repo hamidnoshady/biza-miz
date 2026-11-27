@@ -67,6 +67,8 @@ export interface SizePackComponentView {
   quantity: number;
   unitPriceRial: number;
   onHand: string;
+  /** GH #1567 C5 — this variant holds consigned (امانی) units; a pack cannot sell it. */
+  consigned: boolean;
 }
 
 export interface SizePackView {
@@ -85,6 +87,12 @@ export interface SizePackView {
    * this branch already scans with it. Shown until the pack is saved again.
    */
   clearedBarcode: string | null;
+  /**
+   * GH #1567 C5 — components holding consigned units (display names). A pack
+   * with any is refused at sale (`pack_contains_consigned`), so the till and
+   * the manager say why instead of showing a shortage.
+   */
+  consignedComponents: string[];
 }
 
 interface ComponentRow {
@@ -96,11 +104,15 @@ interface ComponentRow {
   quantity: number;
   unit_price_rial: string;
   on_hand: string;
+  consigned: boolean;
 }
 
 const COMPONENT_SELECT = `
   SELECT c.pack_id, c.item_id, i.name, i.sku, c.quantity, c.unit_price_rial::text,
          COALESCE(s.quantity, 0)::text AS on_hand,
+         EXISTS (SELECT 1 FROM fashion_consignment_lines l
+                  WHERE l.item_id = c.item_id AND l.is_open
+                    AND l.received_qty - l.sold_qty + l.customer_returned_qty + l.voided_qty - l.returned_to_owner_qty > 0) AS consigned,
          (SELECT string_agg(a.value, ' / ' ORDER BY a.name) FROM item_variant_attributes a WHERE a.item_id = i.id) AS attributes
     FROM item_size_pack_components c
     JOIN items i ON i.id = c.item_id
@@ -119,7 +131,7 @@ function packView(
 ): SizePackView {
   const components = rows.map((r) => ({
     itemId: r.item_id, name: r.name, sku: r.sku, attributes: r.attributes ?? "",
-    quantity: r.quantity, unitPriceRial: Number(r.unit_price_rial), onHand: r.on_hand,
+    quantity: r.quantity, unitPriceRial: Number(r.unit_price_rial), onHand: r.on_hand, consigned: r.consigned === true,
   }));
   const totals = packTotals(components);
   const availability = packAvailability(components.map((c) => ({ itemId: c.itemId, name: c.name, quantity: c.quantity, onHand: c.onHand })));
@@ -127,6 +139,7 @@ function packView(
     id: pack.id, name: pack.name, barcode: pack.barcode, isActive: pack.is_active, version: pack.version,
     priceRial: totals.priceRial, pieces: totals.pieces, available: availability.available, shortages: availability.shortages,
     components, clearedBarcode: pack.cleared_barcode,
+    consignedComponents: components.filter((c) => c.consigned).map((c) => (c.attributes ? `${c.name} (${c.attributes})` : c.name)),
   };
 }
 
@@ -423,6 +436,16 @@ export async function expandSizePackInvoiceLines(
     if (!pack.is_active) fail("pack_inactive", 409);
     const { rows: comps } = await client.query<ComponentRow>(`${COMPONENT_SELECT} WHERE c.pack_id = $1 ORDER BY c.position`, [pack.id]);
     if (comps.length === 0) fail("pack_has_no_components", 409);
+    // GH #1567 C5 — a pack expands to owned-stock lines; a component holding
+    // consigned (امانی) units would otherwise read as a misleading "shortage".
+    const consigned = comps.filter((c) => c.consigned === true);
+    if (consigned.length > 0) {
+      fail("pack_contains_consigned", 409, {
+        packId: pack.id,
+        packName: pack.name,
+        items: consigned.map((c) => (c.attributes ? `${c.name} (${c.attributes})` : c.name)),
+      });
+    }
     // The friendly per-variant answer; the sale path's row-locked relief is
     // the binding check and rolls the whole invoice back on any shortage.
     const { shortages } = packAvailability(
