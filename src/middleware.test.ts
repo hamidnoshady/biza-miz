@@ -342,6 +342,21 @@ describe("the backup-serving channel — migration 0132", () => {
   });
 });
 
+describe("the desktop release pipeline channel", () => {
+  it("lets the signed-manifest POST reach its own bearer check", () => {
+    // The pipeline has no tenant session; the bearer token is the whole
+    // credential and the route verifies it. Before this entry, middleware
+    // answered 401 first, so a correct token still failed registration.
+    expect(isPublicPath("/api/desktop-releases/promote")).toBe(true);
+  });
+
+  it("does not open anything else under the release prefix", () => {
+    expect(isPublicPath("/api/desktop-releases")).toBe(false);
+    expect(isPublicPath("/api/desktop-releases/promotex")).toBe(false);
+    expect(isPublicPath("/api/desktop-releases/other")).toBe(false);
+  });
+});
+
 describe("the staff picker's roster read — bucketed apart from the credentials", () => {
   it("does not draw on the credential-exchange budget", () => {
     // The regression this guards. Since the login split the roster read fires on
