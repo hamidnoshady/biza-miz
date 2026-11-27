@@ -34,7 +34,11 @@ export type StockAuthorityEvidence =
   | "canonical_unusable"
   | "orphan_has_no_stock";
 
-export type StockAuthorityVerdict = "safe_to_archive" | "needs_store_reconciliation" | "manual_review";
+export type StockAuthorityVerdict =
+  | "safe_to_archive"
+  | "needs_store_reconciliation"
+  | "needs_history_disposition"
+  | "manual_review";
 
 export type StockAuthorityBlocker =
   | "store_mismatch"
@@ -42,7 +46,8 @@ export type StockAuthorityBlocker =
   | "store_stock_negative"
   | "variant_family"
   | "canonical_unusable"
-  | "orphan_has_no_stock";
+  | "orphan_has_no_stock"
+  | "history_references";
 
 export interface StockAuthorityInput {
   /** `item_stock.quantity` of the unmapped, older row. */
@@ -58,6 +63,8 @@ export interface StockAuthorityInput {
   /** The surviving row must be an active, mapped product. */
   canonicalActive: boolean;
   canonicalMapped: boolean;
+  /** Rows (orders, invoices, price history…) that still point at the orphan. */
+  historyReferences?: number;
 }
 
 export interface StockAuthorityProposal {
@@ -133,17 +140,21 @@ export function planStockAuthority(input: StockAuthorityInput): StockAuthorityPr
 
   if (canonical === store) {
     const evidence: StockAuthorityEvidence = orphan === store ? "both_match_store" : "canonical_matches_store";
+    const historyReferences = input.historyReferences ?? 0;
     return {
       evidence,
-      verdict: "safe_to_archive",
+      verdict: historyReferences > 0 ? "needs_history_disposition" : "safe_to_archive",
       physicalUnitsDelta: 0,
       catalogueUnitsDelta: -orphan,
       canonicalAfter: canonical,
-      blockers: [],
+      blockers: historyReferences > 0 ? (["history_references"] as const).slice() : [],
       notes: [
         orphan === store
           ? "Both local rows hold the store's current quantity: one physical count, two snapshots."
           : "The surviving row equals the store's current quantity; the orphan is a stale snapshot of the same units.",
+        ...(historyReferences > 0
+          ? ["Historic records still reference this row; decide whether to retain the history or approve the archive explicitly."]
+          : []),
       ],
     };
   }
@@ -201,6 +212,7 @@ export function summariseStockAuthority(items: readonly StockAuthorityApprovalEn
   pairs: number;
   safe: number;
   needsReconciliation: number;
+  needsHistoryDisposition: number;
   manual: number;
   orphanUnits: number;
   canonicalUnits: number;
@@ -213,6 +225,7 @@ export function summariseStockAuthority(items: readonly StockAuthorityApprovalEn
     pairs: items.length,
     safe: items.filter((item) => item.verdict === "safe_to_archive").length,
     needsReconciliation: items.filter((item) => item.verdict === "needs_store_reconciliation").length,
+    needsHistoryDisposition: items.filter((item) => item.verdict === "needs_history_disposition").length,
     manual: items.filter((item) => item.verdict === "manual_review").length,
     orphanUnits,
     canonicalUnits,

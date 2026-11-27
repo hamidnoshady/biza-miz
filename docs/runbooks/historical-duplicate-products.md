@@ -169,6 +169,9 @@ verdict:
   catalogue count would disappear.
 - `needs_store_reconciliation` — the store is missing/negative, neither row
   matches, or the store agrees with the orphan rather than the canonical row.
+- `needs_history_disposition` — the stock is safe but orders/invoices/price
+  history still point at the orphan; keep the history or approve the archive
+  explicitly. It is excluded from the approval token.
 - `manual_review` — a variable product (stock is per variation).
 
 `approvalToken` hashes the safe rows' exact evidence (item ids, quantities,

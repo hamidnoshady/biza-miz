@@ -25,6 +25,13 @@ function argValue(flag: string): string | null {
   return value && !value.startsWith("--") ? value : "";
 }
 
+const VERDICT_LABEL: Record<string, string> = {
+  safe_to_archive: "safe to archive (stock authority proven)",
+  needs_store_reconciliation: "needs store/canonical reconciliation",
+  needs_history_disposition: "stock is safe but history still references it",
+  manual_review: "manual review (variable family)",
+};
+
 const EVIDENCE_LABEL: Record<string, string> = {
   both_match_store: "both local rows equal the store",
   canonical_matches_store: "surviving row equals the store; orphan is stale",
@@ -65,6 +72,7 @@ async function main(): Promise<number> {
   console.log(
     `${preview.totals.pairs} stocked duplicate pair(s): ` +
       `${preview.totals.safe} safe to archive with no physical stock movement, ` +
+      `${preview.totals.needsHistoryDisposition} safe on stock but referenced by history, ` +
       `${preview.totals.needsReconciliation} need store/canonical reconciliation, ` +
       `${preview.totals.manual} need a person (variable family).\n`,
   );
@@ -77,7 +85,7 @@ async function main(): Promise<number> {
   console.log("");
   for (const item of preview.items) {
     console.log(
-      `[${item.verdict}] SKU ${item.sku}  orphan ${item.itemId} qty ${item.orphanQuantity}  ` +
+      `[${VERDICT_LABEL[item.verdict] ?? item.verdict}] SKU ${item.sku}  orphan ${item.itemId} qty ${item.orphanQuantity}  ` +
         `kept ${item.canonicalItemId} qty ${item.canonicalQuantity}  store ${item.storeQuantity ?? "—"}` +
         (item.storeSnapshotAt ? ` (${item.storeSnapshotAt})` : ""),
     );

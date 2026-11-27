@@ -84,6 +84,16 @@ describe("planStockAuthority", () => {
     expect(planStockAuthority(input({ canonicalMapped: false })).evidence).toBe("canonical_unusable");
   });
 
+  it("never proposes an archive while historic records still reference the row", () => {
+    expect(planStockAuthority(input({ historyReferences: 2 }))).toMatchObject({
+      evidence: "both_match_store",
+      verdict: "needs_history_disposition",
+      blockers: ["history_references"],
+      physicalUnitsDelta: 0,
+      catalogueUnitsDelta: -2,
+    });
+  });
+
   it("is not a stock-authority case when the orphan holds nothing", () => {
     expect(planStockAuthority(input({ orphanQuantity: 0, storeQuantity: 0 })).evidence).toBe("orphan_has_no_stock");
   });
@@ -129,6 +139,7 @@ describe("summariseStockAuthority", () => {
       pairs: 2,
       safe: 1,
       needsReconciliation: 1,
+      needsHistoryDisposition: 0,
       manual: 0,
       orphanUnits: 6,
       canonicalUnits: 2,

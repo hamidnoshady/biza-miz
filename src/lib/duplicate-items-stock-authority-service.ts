@@ -104,6 +104,7 @@ export function buildStockAuthorityItem(
     variantFamily,
     canonicalActive: canonical.isActive,
     canonicalMapped: canonical.mappings.length > 0,
+    historyReferences: plan.references.length,
   });
 
   return {
