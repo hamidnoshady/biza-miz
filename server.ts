@@ -502,6 +502,20 @@ app.prepare().then(async () => {
     );
   scheduleCentralTick(recurringVoucherTick, RECURRING_VOUCHER_TICK_INTERVAL_MS, 95_000);
 
+  // Issue #901 — campaign cashback. A live campaign's settled POS sales earn a
+  // reward; the same pass takes back what a refund cancelled, releases holds
+  // that ended and expires what lapsed. Central, like the books it posts to,
+  // and safe to run twice: one entitlement per campaign+order, a
+  // transaction-scoped campaign lock around the budget decision, and the
+  // append-only event keys make a second pass a no-op rather than a second
+  // reward.
+  const { runGrowthRewardTick, GROWTH_REWARD_TICK_INTERVAL_MS } = await import(
+    "./src/lib/campaign-reward-service"
+  );
+  const growthRewardTick = () =>
+    runGrowthRewardTick().catch((err) => console.error("growth reward tick failed:", err));
+  scheduleCentralTick(growthRewardTick, GROWTH_REWARD_TICK_INTERVAL_MS, 60_000);
+
   // Phase 38 (issue #381): push product/stock/price changes to the business's
   // website through website_outbox — the WooCommerce tick's shape exactly
   // (bypass to enumerate, withTenant per business, one business's failure
