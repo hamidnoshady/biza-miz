@@ -140,6 +140,12 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'floor_sections.assigned_waiter_id': 'floor assignment config',
   'growth_campaign_versions.created_by': 'campaign builder draft authorship; every change is also written to audit_log',
   'growth_campaigns.created_by': 'campaign builder draft authorship; every change is also written to audit_log',
+  // Issue #901 — the cashback ledger's actors. Approving a campaign and paying
+  // a reward out are audited acts (audit_log / the immutable reward events),
+  // not authored business records that must keep a member's name after delete.
+  'growth_campaigns.approved_by': 'campaign approval decision; the act is written to audit_log and the locked version',
+  'growth_reward_events.actor_id': 'reward ledger event actor; the event itself is immutable and carries the act',
+  'growth_reward_redemptions.created_by': 'reward payout actor; the redemption row and its journal entry are the record',
   'growth_settings.updated_by': 'feature settings',
   'holoo_connection_settings.direct_sql_armed_by': 'integration setup',
   'holoo_import_runs.created_by': 'integration tooling',
