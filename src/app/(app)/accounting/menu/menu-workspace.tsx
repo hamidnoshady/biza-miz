@@ -32,7 +32,8 @@ import {
   TabPanel,
   type Tab,
 } from "@/app/dashboard/page-chrome";
-import { ErrorBox, api, errorMessage } from "@/app/dashboard/ui";
+import { ErrorBox, api } from "@/app/dashboard/ui";
+import { menuErrorMessage } from "./menu-errors";
 import {
   toRestaurantMenu,
   type MenuTreePayload,
@@ -151,7 +152,7 @@ export function MenuWorkspace({ canEdit }: { canEdit: boolean }) {
       if (!result.ok) {
         const code =
           typeof result.data.error === "string" ? (result.data.error as string) : undefined;
-        const message = errorMessage(code);
+        const message = menuErrorMessage(code);
         setError(message);
         inFlight.current = false;
         return { ok: false as const, error: message, data: result.data };

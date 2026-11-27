@@ -197,6 +197,15 @@ export function findEmbeddedMediaDeep(value: unknown, depth = 0): { path: string
 export const EMBEDDED_MEDIA_MESSAGE =
   "تصویر یا فایل جاسازی‌شده (data: یا base64) پذیرفته نمی‌شود. تصویر را در کتابخانهٔ رسانه بارگذاری کنید و از همان‌جا انتخاب کنید.";
 
+/**
+ * GH #1567 A2 — the owner-approved Persian sentence the menu item sheet and the
+ * Woo catalogue screens show for an `embedded_media` refusal of a product
+ * description. The raw code is never shown to a person; the server-side
+ * refusal itself is unchanged.
+ */
+export const EMBEDDED_MEDIA_DESCRIPTION_MESSAGE =
+  "توضیحات کالا شامل تصویر جاسازی‌شده است. لطفاً تصویر را حذف کنید یا از کتابخانه رسانه استفاده کنید.";
+
 export class EmbeddedMediaError extends Error {
   readonly code = "embedded_media";
   constructor(

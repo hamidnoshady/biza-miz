@@ -33,7 +33,7 @@ import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 import { formatPersianNumber } from "@/lib/digits";
 import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "@/lib/product-content";
-import { EMBEDDED_MEDIA_MESSAGE, findEmbeddedMedia } from "@/lib/embedded-media-guard";
+import { EMBEDDED_MEDIA_DESCRIPTION_MESSAGE, findEmbeddedMedia } from "@/lib/embedded-media-guard";
 import { diffHasChanges, diffLines, type DiffLine } from "./description-diff";
 import { formatDateTime } from "./format";
 import { looksLikeHtml, storefrontText } from "./product-content-text";
@@ -190,7 +190,7 @@ export function ProductContentSheet({
     }
     if (findEmbeddedMedia(shortDraft) || findEmbeddedMedia(longDraft)) {
       setApplying(false);
-      setError(EMBEDDED_MEDIA_MESSAGE);
+      setError(EMBEDDED_MEDIA_DESCRIPTION_MESSAGE);
       return;
     }
     const fields: Record<string, string> = {};

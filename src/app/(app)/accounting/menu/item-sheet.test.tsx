@@ -18,6 +18,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RestaurantMenuData, RestaurantMenuItem } from "@/lib/restaurant-menu";
 import type { Runner } from "./menu-workspace";
 import { ItemSheet } from "./item-sheet";
+import { menuErrorMessage, menuFormError } from "./menu-errors";
+import { EMBEDDED_MEDIA_DESCRIPTION_MESSAGE } from "@/lib/embedded-media-guard";
 
 class ResizeObserverStub {
   observe() {}
@@ -397,5 +399,57 @@ describe("ItemSheet — the attach picker", () => {
     const option = await screen.findByRole("option", { name: /اندازه/ });
     expect(option.textContent).toContain("۲ از ۲");
     expect(option.textContent).toContain("حداقل انتخاب از تعداد گزینه‌های فعال بیشتر است");
+  });
+});
+
+describe("ItemSheet — an inline image in the description (GH #1567 A2)", () => {
+  const DATA_URI = `data:image/png;base64,${"iVBORw0KGgo".repeat(40)}`;
+
+  it("refuses it in Persian before sending, and recovers with a clean description", async () => {
+    const user = userEvent.setup();
+    renderSheet();
+    await screen.findByRole("dialog");
+
+    await fillNameAndCategory(user);
+    await user.type(priceField(), "45000");
+    const description = screen.getByLabelText("توضیحات");
+    // `user.type` treats `{`/`[` specially; paste puts the payload in verbatim.
+    await user.click(description);
+    await user.paste(`شیر تازه ${DATA_URI}`);
+    await user.click(saveButton());
+
+    expect(await screen.findByText(EMBEDDED_MEDIA_DESCRIPTION_MESSAGE)).toBeTruthy();
+    expect(screen.queryByText(/embedded_media/)).toBeNull();
+    expect(sent).toHaveLength(0);
+
+    await user.clear(description);
+    await user.type(description, "شیر تازه و قهوهٔ دم‌شده");
+    await user.click(saveButton());
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].body).toMatchObject({ description: "شیر تازه و قهوهٔ دم‌شده" });
+  });
+
+  it("shows the Persian sentence, not the code, when the API refuses the text", async () => {
+    respondWith = { status: 400, body: { error: "embedded_media" } };
+    const user = userEvent.setup();
+    renderSheet({ mode: "edit", item: ITEM });
+    await screen.findByRole("dialog");
+
+    await user.type(screen.getByLabelText("توضیحات"), "متن");
+    await user.click(screen.getByRole("button", { name: "ذخیرهٔ تغییرات" }));
+
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(await screen.findByText(EMBEDDED_MEDIA_DESCRIPTION_MESSAGE)).toBeTruthy();
+    expect(screen.queryByText("embedded_media")).toBeNull();
+  });
+});
+
+describe("menu error helpers (GH #1567 A2)", () => {
+  it("reads embedded_media as the approved sentence and leaves other codes to the shared map", () => {
+    expect(menuErrorMessage("embedded_media")).toBe(EMBEDDED_MEDIA_DESCRIPTION_MESSAGE);
+    expect(menuFormError("embedded_media")).toBe(EMBEDDED_MEDIA_DESCRIPTION_MESSAGE);
+    expect(menuFormError("نام آیتم الزامی است.")).toBe("نام آیتم الزامی است.");
+    expect(menuFormError(undefined)).toBe("");
+    expect(menuErrorMessage("some_unknown_code")).toBe("خطای غیرمنتظره. دوباره تلاش کنید.");
   });
 });

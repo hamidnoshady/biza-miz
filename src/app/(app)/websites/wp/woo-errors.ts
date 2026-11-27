@@ -10,6 +10,8 @@
  * (errorMessageOrRaw's rule), which keeps a new backend code visible rather
  * than silently blank.
  */
+import { EMBEDDED_MEDIA_DESCRIPTION_MESSAGE } from "@/lib/embedded-media-guard";
+
 export const WOO_ERROR_LABELS: Record<string, string> = {
   not_found: "اتصال یا محصول پیدا نشد.",
   invalid_json: "بدنهٔ درخواست قابل خواندن نیست.",
@@ -30,6 +32,8 @@ export const WOO_ERROR_LABELS: Record<string, string> = {
   sync_failed: "همگام‌سازی محصولات با خطا مواجه شد؛ جزئیات در «صف و رویدادها» و گزارش سرور است.",
   no_location: "هیچ شعبهٔ فعالی برای این کسب‌وکار پیدا نشد.",
   internal_error: "خطای داخلی در ثبت درخواست؛ دوباره تلاش کنید.",
+  // GH #1567 A2 — the products route refuses inline image bytes in product text.
+  embedded_media: EMBEDDED_MEDIA_DESCRIPTION_MESSAGE,
 };
 
 /** The Persian sentence for a Woo API error code, or "" when unmapped. */
