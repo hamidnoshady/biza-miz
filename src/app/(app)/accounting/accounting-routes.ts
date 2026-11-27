@@ -82,6 +82,10 @@ export const ACCOUNTING_SECTION_KEYS = [
   "vat",
   "tax-invoices",
   "fixed-assets",
+  // Intangible assets (issue #1326 / ESH-163): a separate register from
+  // tangible fixed assets, with its own amortization, impairment, disposal and
+  // prospective estimate history.
+  "intangible-assets",
   // Issue #864 — ownership history, capital movements and closed-year profit distributions.
   "shareholders",
   // The accounting-only report index. The business reporting workspace owns

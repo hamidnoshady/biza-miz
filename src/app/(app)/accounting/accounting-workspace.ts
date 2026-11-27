@@ -178,7 +178,7 @@ export const LEDGER_WORKSPACE_SUBGROUPS: readonly {
   {
     key: "ledger-funds",
     label: "وجوه و هزینه",
-    keys: ["receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets"],
+    keys: ["receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets", "intangible-assets"],
   },
   { key: "ledger-ownership", label: "سرمایه و مالکیت", keys: ["shareholders"] },
   { key: "ledger-periods", label: "دوره، مالیات و حقوق", keys: ["fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll"] },

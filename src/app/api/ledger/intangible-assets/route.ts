@@ -10,6 +10,7 @@ import {
   type IntangibleListFilters,
 } from "@/lib/intangible-assets-service";
 import { fiscalPeriodLockErrorCode } from "@/lib/fiscal-periods";
+import { isValidIsoDate } from "@/lib/jalali";
 import { MissingLedgerAccountError } from "@/lib/ledger-service";
 import type { UsefulLifeType } from "@/lib/intangible-assets";
 
@@ -27,12 +28,25 @@ export const GET = withTenantScope(async (request: NextRequest) => {
   const params = request.nextUrl.searchParams;
   const status = params.get("status");
   const lifeType = params.get("usefulLifeType");
+  const dateFrom = params.get("dateFrom");
+  const dateTo = params.get("dateTo");
+  if (dateFrom && !isValidIsoDate(dateFrom)) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
+  if (dateTo && !isValidIsoDate(dateTo)) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    return NextResponse.json({ error: "invalid_date" }, { status: 400 });
+  }
   const filters: IntangibleListFilters = {
     search: params.get("search"),
     status: status === "active" || status === "disposed" ? status : null,
     assetClass: params.get("assetClass"),
     usefulLifeType: lifeType === "finite" || lifeType === "indefinite" ? (lifeType as UsefulLifeType) : null,
     locationId: params.get("locationId"),
+    dateFrom,
+    dateTo,
   };
 
   try {
