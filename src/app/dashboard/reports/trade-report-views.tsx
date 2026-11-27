@@ -122,6 +122,9 @@ export interface VariantSalesReport {
     netRevenue: number;
     cogs: number;
     margin: number;
+    /** GH #1567 C6 — returned units with an unknown revenue share (pre-0328 history). */
+    unknownReturnQuantity?: string;
+    revenueComplete?: boolean;
   }[];
 }
 
@@ -133,6 +136,9 @@ export interface BrandSalesReport {
     netRevenue: number;
     cogs: number;
     margin: number;
+    /** GH #1567 C6 — returned units with an unknown revenue share (pre-0328 history). */
+    unknownReturnQuantity?: string;
+    revenueComplete?: boolean;
   }[];
 }
 
@@ -547,6 +553,32 @@ export function RepairsView({ report }: { report: RepairsReport }) {
  * کالاهای تجاری — variants, brands, batches, stock levels
  * ------------------------------------------------------------------ */
 
+/**
+ * GH #1567 C6 — a row that nets a pre-0328 return whose revenue share was never
+ * recorded per line: its quantity is exact, its revenue and margin are not.
+ */
+export const INCOMPLETE_REVENUE_NOTE =
+  "ردیف‌های «ناقص» مرجوعی‌ای دارند که پیش از ثبت سهم درآمد هر قلم ثبت شده است؛ تعداد آن کم شده ولی مبلغش معلوم نیست، پس درآمد و حاشیهٔ این ردیف‌ها کامل نیست و بیش از واقع نشان داده می‌شود.";
+
+function RevenueCell({ amount, unknownReturnQuantity }: { amount: string; unknownReturnQuantity?: string }) {
+  if (!unknownReturnQuantity || unknownReturnQuantity === "0") return <>{amount}</>;
+  return (
+    <span title={`${formatQuantity(unknownReturnQuantity)} عدد مرجوعی با مبلغ نامعلوم`}>
+      {amount}
+      <span className="ms-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-950 dark:bg-amber-500/20 dark:text-amber-200">ناقص</span>
+    </span>
+  );
+}
+
+function IncompleteRevenueNote({ rows }: { rows: { unknownReturnQuantity?: string }[] }) {
+  if (!rows.some((row) => row.unknownReturnQuantity && row.unknownReturnQuantity !== "0")) return null;
+  return (
+    <p role="note" className="border-b border-border/80 px-4 py-3 text-xs leading-5 text-amber-900 dark:text-amber-200 sm:px-5">
+      {INCOMPLETE_REVENUE_NOTE}
+    </p>
+  );
+}
+
 export function VariantSalesView({ report }: { report: VariantSalesReport }) {
   const money = useMoney();
   const rows = report.rows ?? [];
@@ -557,6 +589,7 @@ export function VariantSalesView({ report }: { report: VariantSalesReport }) {
         شامل فروش صندوق و فروش وب‌سایت (ووکامرس و فروشگاه سایت) است. فروشی که بهای تمام‌شده‌اش ثبت
         نشده، با بهای صفر در حاشیه آمده و سود آن موقت است.
       </p>
+      <IncompleteRevenueNote rows={rows} />
       <ReportTable
         caption="تحلیل فروش تنوع‌ها"
         rows={rows}
@@ -599,7 +632,7 @@ export function VariantSalesView({ report }: { report: VariantSalesReport }) {
             align: "end",
             cell: (row) => formatQuantity(row.quantitySold),
           },
-          { key: "revenue", header: "درآمد", numeric: true, align: "end", cell: (row) => money.format(row.netRevenue) },
+          { key: "revenue", header: "درآمد", numeric: true, align: "end", cell: (row) => <RevenueCell amount={money.format(row.netRevenue)} unknownReturnQuantity={row.unknownReturnQuantity} /> },
           { key: "cogs", header: "بهای تمام‌شده", numeric: true, align: "end", cell: (row) => money.format(row.cogs) },
           {
             key: "margin",
@@ -619,32 +652,35 @@ export function BrandSalesView({ report }: { report: BrandSalesReport }) {
   const rows = report.rows ?? [];
 
   return (
-    <ReportTable
-      caption="فروش به تفکیک برند"
-      rows={rows}
-      rowKey={(row, index) => row.brandId ?? `unbranded-${index}`}
-      empty={<EmptyState>هنوز فروشی ثبت نشده است.</EmptyState>}
-      cardTitle={(row) => row.brandName ?? "بدون برند"}
-      columns={[
-        { key: "brand", header: "برند", cell: (row) => row.brandName ?? "بدون برند" },
-        {
-          key: "quantity",
-          header: "تعداد فروش",
-          numeric: true,
-          align: "end",
-          cell: (row) => formatQuantity(row.quantitySold),
-        },
-        { key: "revenue", header: "درآمد", numeric: true, align: "end", cell: (row) => money.format(row.netRevenue) },
-        { key: "cogs", header: "بهای تمام‌شده", numeric: true, align: "end", cell: (row) => money.format(row.cogs) },
-        {
-          key: "margin",
-          header: "حاشیه",
-          numeric: true,
-          align: "end",
-          cell: (row) => <span className="font-semibold">{money.format(row.margin)}</span>,
-        },
-      ]}
-    />
+    <div className="min-w-0">
+      <IncompleteRevenueNote rows={rows} />
+      <ReportTable
+        caption="فروش به تفکیک برند"
+        rows={rows}
+        rowKey={(row, index) => row.brandId ?? `unbranded-${index}`}
+        empty={<EmptyState>هنوز فروشی ثبت نشده است.</EmptyState>}
+        cardTitle={(row) => row.brandName ?? "بدون برند"}
+        columns={[
+          { key: "brand", header: "برند", cell: (row) => row.brandName ?? "بدون برند" },
+          {
+            key: "quantity",
+            header: "تعداد فروش",
+            numeric: true,
+            align: "end",
+            cell: (row) => formatQuantity(row.quantitySold),
+          },
+          { key: "revenue", header: "درآمد", numeric: true, align: "end", cell: (row) => <RevenueCell amount={money.format(row.netRevenue)} unknownReturnQuantity={row.unknownReturnQuantity} /> },
+          { key: "cogs", header: "بهای تمام‌شده", numeric: true, align: "end", cell: (row) => money.format(row.cogs) },
+          {
+            key: "margin",
+            header: "حاشیه",
+            numeric: true,
+            align: "end",
+            cell: (row) => <span className="font-semibold">{money.format(row.margin)}</span>,
+          },
+        ]}
+      />
+    </div>
   );
 }
 

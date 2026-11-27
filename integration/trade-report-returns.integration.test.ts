@@ -374,7 +374,7 @@ describe("F4 — sell-through by the tags each sale carried when it happened", (
     );
     const rows = await merch.sellThroughByCollection(b.id, b.main, { eventPrefix: "fashion_apparel" });
     expect(rows).toEqual([
-      { collection: null, season: null, category: null, snapshotKnown: false, quantitySold: "1", netRevenue: 100_000 },
+      { collection: null, season: null, category: null, snapshotKnown: false, quantitySold: "1", netRevenue: 100_000, unknownReturnQuantity: "0", revenueComplete: true },
     ]);
   });
 });
@@ -405,5 +405,38 @@ describe("F4 — migration 0328 backfills legacy returns honestly", () => {
     // never recorded, so revenue is not guessed.
     expect(row).toMatchObject({ quantitySold: "2", cogs: 100_000, netRevenue: 300_000 });
     expect(BigInt(row.cogs)).toBe(await glNet(b, "5184"));
+    // GH #1567 C6 — and the row says so: its revenue is an upper bound.
+    expect(row).toMatchObject({ unknownReturnQuantity: "1", revenueComplete: false });
+  });
+
+  it("mixed history: only rows (and totals) that include an unknown-amount return are marked incomplete (GH #1567 C6)", async () => {
+    const b = await seed("fashion_apparel", "1374");
+    const legacy = await stockedSku(b, "پیراهن قدیمی");
+    const modern = await stockedSku(b, "پیراهن تازه");
+    const legacySale = await sellAt(b, legacy, "3");
+    await giveBack(b, legacySale, "1", 100_000);
+    // That return predates 0328: drop its fact and backfill it the way 0328 does.
+    await db.query("DELETE FROM sale_return_facts WHERE business_id = $1", [b.id]);
+    const sql = readFileSync(new URL("../migrations/0328_sale_return_facts.sql", import.meta.url), "utf8");
+    await db.query(sql.slice(sql.indexOf("-- Legacy online refunds")));
+    // After 0328: a second return on the same legacy item (known), and a sale + return on another item (known).
+    await giveBack(b, legacySale, "1", 100_000);
+    const modernSale = await sellAt(b, modern, "2");
+    await giveBack(b, modernSale, "1", 100_000);
+
+    const rows = await report(b);
+    const legacyRow = rows.find((r) => r.itemId === legacy)!;
+    const modernRow = rows.find((r) => r.itemId === modern)!;
+    // Legacy: 3 − 1 (unknown amount) − 1 (known) = 1 unit; revenue only nets the known return.
+    expect(legacyRow).toMatchObject({ quantitySold: "1", netRevenue: 200_000, unknownReturnQuantity: "1", revenueComplete: false });
+    expect(modernRow).toMatchObject({ quantitySold: "1", netRevenue: 100_000, unknownReturnQuantity: "0", revenueComplete: true });
+    // The brand total covers both items, so it is incomplete too.
+    const brands = await reports.brandSalesAnalysis(b.id, b.main, { eventPrefix: "fashion_apparel" });
+    expect(brands).toHaveLength(1);
+    expect(brands[0]).toMatchObject({ quantitySold: "2", netRevenue: 300_000, unknownReturnQuantity: "1", revenueComplete: false });
+    // Sell-through carries the same flag on the group the legacy return falls in.
+    const groups = await merch.sellThroughByCollection(b.id, b.main, { eventPrefix: "fashion_apparel" });
+    expect(groups.some((g) => !g.revenueComplete && g.unknownReturnQuantity === "1")).toBe(true);
+    expect(groups.reduce((n, g) => n + Number(g.unknownReturnQuantity), 0)).toBe(1);
   });
 });

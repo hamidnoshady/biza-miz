@@ -325,6 +325,9 @@ export interface CollectionSellThroughRow {
   snapshotKnown: boolean;
   quantitySold: string;
   netRevenue: number;
+  /** GH #1567 C6 — returned units with an unknown revenue share (pre-0328); not "0" ⇒ revenue incomplete. */
+  unknownReturnQuantity: string;
+  revenueComplete: boolean;
 }
 
 /**
@@ -349,25 +352,28 @@ export async function sellThroughByCollection(
     category: string | null;
     quantity_sold: string;
     net_revenue: string;
+    unknown_return_qty: string;
   }>(
     `WITH facts AS (
         SELECT e.payload -> 'merch' AS merch,
                (e.payload->>'quantity')::numeric AS quantity,
-               (e.payload->>'net')::numeric AS net
+               (e.payload->>'net')::numeric AS net,
+               0::numeric AS unknown_return_qty
           FROM domain_events e
          WHERE e.business_id = $1 AND e.location_id = $2
            AND e.event_type = $5 || '.sale_revenue'
            AND ($3::date IS NULL OR e.created_at >= $3::date)
            AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
         UNION ALL
-        SELECT f.merch, f.quantity, f.net_rial::numeric
+        SELECT f.merch, f.quantity, f.net_rial::numeric, 0::numeric
           FROM online_sale_lines f
           JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
          WHERE f.location_id = $2 AND f.item_id IS NOT NULL
            AND ($3::date IS NULL OR f.occurred_at >= $3::date)
            AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
         UNION ALL
-        SELECT rf.merch, -trim_scale(rf.quantity), -rf.net_rial::numeric
+        SELECT rf.merch, -trim_scale(rf.quantity), -rf.net_rial::numeric,
+               CASE WHEN rf.amounts_known THEN 0 ELSE trim_scale(rf.quantity) END
           FROM sale_return_facts rf
           JOIN order_items oi ON oi.id = rf.order_item_id AND oi.status <> 'voided'
          WHERE rf.business_id = $1 AND rf.location_id = $2
@@ -379,7 +385,8 @@ export async function sellThroughByCollection(
              NULLIF(merch->>'season', '') AS season,
              NULLIF(merch->>'category', '') AS category,
              SUM(quantity)::text AS quantity_sold,
-             SUM(net)::text AS net_revenue
+             SUM(net)::text AS net_revenue,
+             SUM(unknown_return_qty)::text AS unknown_return_qty
         FROM facts
        GROUP BY 1, 2, 3, 4
        ORDER BY SUM(net) DESC, 2 NULLS LAST, 3 NULLS LAST, 4 NULLS LAST`,
@@ -392,6 +399,8 @@ export async function sellThroughByCollection(
     snapshotKnown: r.snapshot_known === true,
     quantitySold: r.quantity_sold,
     netRevenue: Number(r.net_revenue),
+    unknownReturnQuantity: r.unknown_return_qty && Number(r.unknown_return_qty) !== 0 ? r.unknown_return_qty : "0",
+    revenueComplete: !r.unknown_return_qty || Number(r.unknown_return_qty) === 0,
   }));
 }
 
