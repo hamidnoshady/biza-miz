@@ -215,6 +215,18 @@ async function seed(): Promise<Fixture> {
       expectedVersion: order.order.version, idempotencyKey: `e2e-sub-${tag}`,
     } as Parameters<typeof production.applyProductionOrderAction>[3]);
 
+    // Skip the first-run wizard, as scripts/seed.ts does: the workspace shell
+    // sends an owner with no completion marker from /accounting/* to /setup.
+    await db.query(
+      `INSERT INTO settings (business_id, location_id, key, value)
+       VALUES ($1, NULL, 'setup.progress', jsonb_build_object(
+         'steps', jsonb_build_object('seeded', to_jsonb(now()::text)),
+         'completedAt', to_jsonb(now()::text)))
+       ON CONFLICT (business_id, location_id, key)
+       DO UPDATE SET value = settings.value || jsonb_build_object('completedAt', to_jsonb(now()::text))`,
+      [businessId],
+    );
+
     const { rows: [variant] } = await db.query<{ name: string }>("SELECT name FROM items WHERE id = $1", [m]);
     const recoveryCode = tenant.recoveryCodes?.[0];
     if (!recoveryCode) throw new Error("provisioning issued no recovery code");
@@ -304,6 +316,14 @@ async function login(context: BrowserContext, fixture: Fixture) {
   await page.close();
 }
 
+/** Navigate, and fail at once (not after a heading timeout) when bounced to setup or sign-in. */
+async function open(page: Page, route: string) {
+  await page.goto(`${BASE_URL}${route}`, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("load").catch(() => undefined);
+  const landed = new URL(page.url()).pathname;
+  if (/^\/(setup|login|admin)(\/|$)/.test(landed)) throw new Error(`${route} redirected to ${landed}`);
+}
+
 async function settle(page: Page) {
   await page.evaluate(() => document.fonts.ready);
   await page.waitForFunction(() => !document.querySelector('main [data-slot="skeleton"], main [aria-busy="true"]'), undefined, { timeout: 60_000 })
@@ -312,7 +332,7 @@ async function settle(page: Page) {
 }
 
 async function pageBasics(page: Page, label: string, heading: string) {
-  await page.getByRole("heading", { name: heading, exact: true }).first().waitFor({ timeout: 120_000 });
+  await page.getByRole("heading", { name: heading, exact: true }).first().waitFor({ timeout: 45_000 });
   await settle(page);
   check(`${label}: html is RTL`, (await page.locator("html").getAttribute("dir")) === "rtl");
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
@@ -442,15 +462,15 @@ async function main() {
         storageState,
       });
       const page = await context.newPage();
-      page.setDefaultTimeout(60_000);
-      page.setDefaultNavigationTimeout(180_000);
+      page.setDefaultTimeout(30_000);
+      page.setDefaultNavigationTimeout(90_000);
       const pageErrors: string[] = [];
       page.on("pageerror", (error) => pageErrors.push(error.message));
       const v = viewport.name;
 
       // 6A — tailoring desk.
       await section(page, v, "tailoring", async () => {
-        await page.goto(`${BASE_URL}/accounting/tailoring`, { waitUntil: "domcontentloaded" });
+        await open(page, "/accounting/tailoring");
         await pageBasics(page, `${v} 6A tailoring`, "خیاطی و دوخت");
         await axe(page, `${v} 6A tailoring`);
         await shot(page, `${v}-tailoring`);
@@ -458,7 +478,7 @@ async function main() {
 
       // 6B + 6.3 — production order with its subcontract.
       await section(page, v, "production", async () => {
-        await page.goto(`${BASE_URL}/accounting/production-orders`, { waitUntil: "domcontentloaded" });
+        await open(page, "/accounting/production-orders");
         await pageBasics(page, `${v} 6B production`, "تولید پوشاک");
         const orderButton = page.getByRole("button", { name: fixture.orderRef, exact: true }).first();
         await orderButton.waitFor();
@@ -474,7 +494,7 @@ async function main() {
 
       // 6C — size packs; the mixed pack names its consigned variant (C5).
       await section(page, v, "size-packs", async () => {
-        await page.goto(`${BASE_URL}/accounting/size-packs`, { waitUntil: "domcontentloaded" });
+        await open(page, "/accounting/size-packs");
         await pageBasics(page, `${v} 6C size packs`, "بسته‌های سایزی");
         await page.getByText(fixture.mixedPack).first().waitFor();
         const mixedRow = page.getByRole("row").filter({ hasText: fixture.mixedPack }).first();
@@ -495,7 +515,7 @@ async function main() {
 
       // 6D — consignment contract and its consigned on-hand.
       await section(page, v, "consignment", async () => {
-        await page.goto(`${BASE_URL}/accounting/consignment`, { waitUntil: "domcontentloaded" });
+        await open(page, "/accounting/consignment");
         await pageBasics(page, `${v} 6D consignment`, "کالای امانی");
         // The table shows the reference in Persian digits; the row action names it verbatim.
         const contractRow = page.getByRole("button", { name: `جزئیات قرارداد ${fixture.contractRef}`, exact: true }).first();
@@ -506,9 +526,9 @@ async function main() {
 
       // 6D/C5 — the till labels the consigned variant and refuses the mixed pack by name.
       await section(page, v, "pos", async () => {
-        await page.goto(`${BASE_URL}/accounting/pos`, { waitUntil: "domcontentloaded" });
+        await open(page, "/accounting/pos");
         const picker = page.getByRole("button", { name: "انتخاب کالا" }).first();
-        await picker.waitFor({ timeout: 120_000 });
+        await picker.waitFor({ timeout: 45_000 });
         await settle(page);
         check(`${v} till: html is RTL`, (await page.locator("html").getAttribute("dir")) === "rtl");
         const tillOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
@@ -537,7 +557,7 @@ async function main() {
       // 6E — the advisory report from the reports workspace.
       await section(page, v, "reports", async () => {
         // `?tab=` opens the section directly; on a phone the bare page lists sections first.
-        await page.goto(`${BASE_URL}/accounting/reports?tab=standard`, { waitUntil: "domcontentloaded" });
+        await open(page, "/accounting/reports?tab=standard");
         await pageBasics(page, `${v} reports`, "گزارش‌ها");
         const reportEntry = page.getByRole("button", { name: /پیشنهادهای خرید و چیدمان/ })
           .or(page.getByRole("link", { name: /پیشنهادهای خرید و چیدمان/ }))
