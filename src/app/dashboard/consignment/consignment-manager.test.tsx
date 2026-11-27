@@ -104,6 +104,14 @@ describe("ConsignmentManager", () => {
     expect(screen.getByRole("button", { name: /قرارداد تازه/ })).toBeTruthy();
   });
 
+  it("names each row action with its visible label first (WCAG 2.5.3, label in name)", async () => {
+    render(<ConsignmentManager canEdit canSettle />);
+    const table = await screen.findByRole("table", { name: "قراردادهای امانی" });
+    const action = within(table).getByRole("button", { name: "مشاهده جزئیات قرارداد C-1401" });
+    expect(action.textContent).toBe("مشاهده");
+    expect(action.getAttribute("aria-label")?.startsWith(action.textContent ?? "\u0000")).toBe(true);
+  });
+
   it("a read-only member sees no mutating controls", async () => {
     render(<ConsignmentManager canEdit={false} canSettle={false} />);
     await screen.findByRole("table", { name: "قراردادهای امانی" });

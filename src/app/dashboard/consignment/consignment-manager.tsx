@@ -136,7 +136,7 @@ function ContractsSection({ canEdit, canSettle }: { canEdit: boolean; canSettle:
                 <Td>{fa(c.onHand)}</Td>
                 <Td>{money.format(c.outstandingRial)}</Td>
                 <Td><StatusBadge tone={STATUS[c.status].tone}>{STATUS[c.status].label}</StatusBadge></Td>
-                <Td><Button size="sm" variant="outline" onClick={() => setOpenId(c.id)} aria-label={`جزئیات قرارداد ${c.reference}`}>مشاهده</Button></Td>
+                <Td><Button size="sm" variant="outline" onClick={() => setOpenId(c.id)} aria-label={`مشاهده جزئیات قرارداد ${c.reference}`}>مشاهده</Button></Td>
               </DataTableRow>
             ))}
           </DataTableBody>

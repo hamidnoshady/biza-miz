@@ -324,6 +324,19 @@ async function open(page: Page, route: string) {
   if (/^\/(setup|login|admin)(\/|$)/.test(landed)) throw new Error(`${route} redirected to ${landed}`);
 }
 
+/**
+ * Below `md` a page's SectionNav shows its list of sections first, one level
+ * at a time; tap into the section as a phone user does. A no-op when the list
+ * is hidden (tablet and desktop show the section directly).
+ */
+async function enterSection(page: Page, label: string) {
+  const entry = page.locator('[data-tour-id="page.section-nav"] nav').getByRole("button", { name: label, exact: true }).first();
+  if (await entry.isVisible().catch(() => false)) {
+    await entry.click();
+    await settle(page);
+  }
+}
+
 async function settle(page: Page) {
   await page.evaluate(() => document.fonts.ready);
   await page.waitForFunction(() => !document.querySelector('main [data-slot="skeleton"], main [aria-busy="true"]'), undefined, { timeout: 60_000 })
@@ -413,7 +426,13 @@ async function section(page: Page, viewport: string, key: string, run: () => Pro
   try {
     await run();
   } catch (error) {
-    check(`${viewport} ${key}: completed without an unexpected error`, false, (error as Error).message.split("\n")[0]);
+    // CI screenshots live in an artifact; put what the page showed in the log line itself.
+    const shown = await page.locator("main").first().innerText({ timeout: 2_000 }).catch(() => "");
+    check(
+      `${viewport} ${key}: completed without an unexpected error`,
+      false,
+      `${(error as Error).message.split("\n")[0]} @ ${new URL(page.url()).pathname} | ${shown.replace(/\s+/g, " ").slice(0, 220)}`,
+    );
     await shot(page, `${viewport}-${key}-error`).catch(() => undefined);
   }
 }
@@ -480,6 +499,7 @@ async function main() {
       await section(page, v, "production", async () => {
         await open(page, "/accounting/production-orders");
         await pageBasics(page, `${v} 6B production`, "تولید پوشاک");
+        await enterSection(page, "سفارش‌های تولید");
         const orderButton = page.getByRole("button", { name: fixture.orderRef, exact: true }).first();
         await orderButton.waitFor();
         await orderButton.click();
@@ -496,6 +516,7 @@ async function main() {
       await section(page, v, "size-packs", async () => {
         await open(page, "/accounting/size-packs");
         await pageBasics(page, `${v} 6C size packs`, "بسته‌های سایزی");
+        await enterSection(page, "بسته‌ها");
         await page.getByText(fixture.mixedPack).first().waitFor();
         const mixedRow = page.getByRole("row").filter({ hasText: fixture.mixedPack }).first();
         const ownedRow = page.getByRole("row").filter({ hasText: fixture.ownedPack }).first();
@@ -517,8 +538,9 @@ async function main() {
       await section(page, v, "consignment", async () => {
         await open(page, "/accounting/consignment");
         await pageBasics(page, `${v} 6D consignment`, "کالای امانی");
+        await enterSection(page, "قراردادها");
         // The table shows the reference in Persian digits; the row action names it verbatim.
-        const contractRow = page.getByRole("button", { name: `جزئیات قرارداد ${fixture.contractRef}`, exact: true }).first();
+        const contractRow = page.getByRole("button", { name: `مشاهده جزئیات قرارداد ${fixture.contractRef}`, exact: true }).first();
         check(`${v} 6D contract is listed`, await contractRow.waitFor().then(() => true, () => false));
         await axe(page, `${v} 6D consignment`);
         await shot(page, `${v}-consignment`);
@@ -559,6 +581,8 @@ async function main() {
         // `?tab=` opens the section directly; on a phone the bare page lists sections first.
         await open(page, "/accounting/reports?tab=standard");
         await pageBasics(page, `${v} reports`, "گزارش‌ها");
+        // A `?tab=` link still opens the phone's section list first (noted in the PR).
+        await enterSection(page, "گزارش‌های آماده");
         const reportEntry = page.getByRole("button", { name: /پیشنهادهای خرید و چیدمان/ })
           .or(page.getByRole("link", { name: /پیشنهادهای خرید و چیدمان/ }))
           .or(page.getByRole("option", { name: /پیشنهادهای خرید و چیدمان/ }))

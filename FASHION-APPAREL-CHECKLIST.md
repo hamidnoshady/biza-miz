@@ -93,6 +93,7 @@ Phase-2 evidence: scoped `tsc` (14 files, `tsconfig.fashion-check.json`) exit 0 
 - **Connector payload:** `sanitizeProductPatch` bounds description length but does not refuse an inline `data:` (base64) URI inside it — the epic's lightweight-payload rule says media must travel as URLs.
 - **Catalogue import is single-axis.** A size × colour grid cannot be imported as two typed attributes (see 4.3).
 - Earlier: `trade-reports-service.ts` `SALE_EVENT_PREFIX.tools_fittings="tools"` vs emitted `tools_fittings.sale_revenue`.
+- **Reports `?tab=` deep link on a phone (all trades, pre-existing).** `reports-manager.tsx` says a `?tab=` link opens that section on a phone, but it passes no `open` to `SectionNav` (initial `false`), so below `md` the link lands on the section list. Found by the D browser E2E, which taps the section as a user would.
 
 ## Phase 4 — Omnichannel (P1) — verified except 4.3 (single-axis import)
 
