@@ -295,8 +295,12 @@ async function login(context: BrowserContext, fixture: Fixture) {
     await later.click();
     await page.waitForTimeout(2_000);
   }
-  const cookies = await context.cookies(BASE_URL);
-  check("owner login mints a session", cookies.some((c) => c.name === "pos_session" && Boolean(c.value)), page.url());
+  // Unfiltered: in production the session cookie is `Secure`, and filtering by
+  // an http://127.0.0.1 URL hides it even though the browser sends it.
+  const cookies = await context.cookies();
+  const signedIn = cookies.some((c) => c.name === "pos_session" && Boolean(c.value))
+    && !new URL(page.url()).pathname.startsWith("/admin");
+  check("owner login mints a session", signedIn, `${page.url()} cookies: ${cookies.map((c) => c.name).join(",") || "none"}`);
   await page.close();
 }
 
