@@ -405,6 +405,43 @@ describe("the approval boundary", () => {
     expect(await onHand()).toBe("12");
   });
 
+  it("an expired run can still be rejected, and the refusal does not claim it (GH #1567 C4)", async () => {
+    const run = await heldRun();
+    await db.query("UPDATE ai_coworker_runs SET created_at = now() - interval '73 hours' WHERE id = $1", [run.id]);
+    expect(await decide(run.id, hubApprovals(run))).toEqual({ ok: false, error: "approval_expired" });
+    const { rows } = await db.query<{ decided_at: Date | null }>("SELECT decided_at FROM ai_coworker_runs WHERE id = $1", [run.id]);
+    expect(rows[0].decided_at).toBeNull();
+    const rejected = await dbLib.withTenant(shop.businessId, () =>
+      coworker.decideCoworkerRun({ businessId: shop.businessId, runId: run.id, decision: "reject", actorUserId: shop.userId }));
+    expect(rejected.ok).toBe(true);
+    expect(await onHand()).toBe("12");
+  });
+
+  it("stamps each proposed action and refuses when the stored payload changed after proposal, even with a matching shown hash (GH #1567 C4)", async () => {
+    const run = await heldRun();
+    const gated = run.actions.find((a) => a.status === "pending" && a.approvalHash)!;
+    expect(gated.proposalHash).toBe(gated.approvalHash);
+    // Someone edits the held payload in the database; the hub would now show
+    // (and hash) the edited payload — the stamp is what catches it.
+    await db.query(
+      "UPDATE ai_coworker_run_actions SET payload = jsonb_set(payload, '{note}', '\"edited\"'::jsonb, true) WHERE id = $1", [gated.id]);
+    const [edited] = await runs();
+    const shown = edited.actions.find((a) => a.id === gated.id)!;
+    expect(shown.approvalHash).not.toBe(gated.approvalHash);
+    expect(await decide(edited.id, hubApprovals(edited))).toEqual({ ok: false, error: "approval_payload_mismatch" });
+    expect(await onHand()).toBe("12");
+    expect((await runs())[0].status).toBe("pending_approval");
+  });
+
+  it("a legacy action with no stamp is bound to its stored payload at decision (GH #1567 C4)", async () => {
+    const run = await heldRun();
+    await db.query("UPDATE ai_coworker_run_actions SET proposal_payload_hash = NULL WHERE run_id = $1", [run.id]);
+    const [legacy] = await runs();
+    expect(legacy.actions.every((a) => a.proposalHash === null)).toBe(true);
+    expect((await decide(legacy.id, hubApprovals(legacy))).ok).toBe(true);
+    expect(await wasteExpenseRial()).toBe(600_000);
+  });
+
   it("two simultaneous approvals run the write-off exactly once", async () => {
     const run = await heldRun();
     const results = await Promise.all([decide(run.id, hubApprovals(run)), decide(run.id, hubApprovals(run))]);

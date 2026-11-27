@@ -335,6 +335,13 @@ export interface CoworkerRunAction {
    * with the approval; null for ungated or decided actions.
    */
   approvalHash: string | null;
+  /**
+   * GH #1567 C4 — the hash stamped when the job proposed this action (migration
+   * 0335). Null on rows proposed before the stamp existed (legacy: bound to the
+   * stored payload at decision time). A stamp that no longer matches
+   * `approvalHash` means the stored payload changed after proposal.
+   */
+  proposalHash: string | null;
 }
 
 export interface CoworkerRun {
@@ -386,6 +393,7 @@ interface ActionRow extends Record<string, unknown> {
   status: string;
   error: string | null;
   result: Record<string, unknown> | null;
+  proposal_payload_hash: string | null;
 }
 
 /**
@@ -407,6 +415,7 @@ function toAction(row: ActionRow): CoworkerRunAction {
     error: pending ? null : row.error,
     result: row.result,
     approvalHash: pending ? boundProposal({ type: row.action_type as ActionType, payload: row.payload ?? {} }).payloadHash : null,
+    proposalHash: row.proposal_payload_hash ?? null,
   };
 }
 
@@ -444,7 +453,7 @@ export async function listCoworkerRuns(
   );
   if (rows.length === 0) return [];
   const { rows: actions } = await query<ActionRow>(
-    `SELECT id, run_id, seq, action_type, title, summary, payload, status, error, result
+    `SELECT id, run_id, seq, action_type, title, summary, payload, status, error, result, proposal_payload_hash
        FROM ai_coworker_run_actions
       WHERE business_id = $1 AND run_id = ANY($2::uuid[])
       ORDER BY seq`,
@@ -462,7 +471,7 @@ export async function getCoworkerRun(businessId: string, runId: string): Promise
   );
   if (!rows[0]) return null;
   const { rows: actions } = await query<ActionRow>(
-    `SELECT id, run_id, seq, action_type, title, summary, payload, status, error, result
+    `SELECT id, run_id, seq, action_type, title, summary, payload, status, error, result, proposal_payload_hash
        FROM ai_coworker_run_actions WHERE business_id = $1 AND run_id = $2 ORDER BY seq`,
     [businessId, runId],
   );
@@ -978,9 +987,10 @@ export async function fireCoworkerJob(input: {
 
       await query(
         `INSERT INTO ai_coworker_run_actions
-           (business_id, run_id, seq, action_type, title, summary, payload, status, audit_id, result, error, applied_at)
+           (business_id, run_id, seq, action_type, title, summary, payload, status, audit_id, result, error, applied_at,
+            proposal_payload_hash)
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb, $11,
-                 CASE WHEN $8 = 'applied' THEN now() ELSE NULL END)`,
+                 CASE WHEN $8 = 'applied' THEN now() ELSE NULL END, $12)`,
         [
           businessId,
           runId,
@@ -993,6 +1003,8 @@ export async function fireCoworkerJob(input: {
           auditId,
           result === null ? null : JSON.stringify(compactProactiveFacts(result)),
           error,
+          // GH #1567 C4: stamped at proposal, checked at decision.
+          boundProposal(plan.action).payloadHash,
         ],
       );
       statuses.push(status);
@@ -1292,26 +1304,39 @@ export async function decideCoworkerRun(input: {
 
   const pending = run.actions.filter((action) => action.status === "pending");
   if (input.decision === "approve") {
-    // Fail closed BEFORE anything runs: a held run older than the approval
-    // window is expired, and every gated action needs the hash it was shown.
-    if (Date.now() - new Date(run.createdAt).getTime() > AI_APPROVAL_TTL_HOURS * 3_600_000) {
-      return { ok: false, error: "approval_expired" };
-    }
+    // Fail closed BEFORE anything runs: every gated action needs the hash it
+    // was shown, and (C4) the stored payload must still be the one proposed.
     for (const action of pending) {
       if (!action.approvalHash) continue;
+      if (action.proposalHash !== null && action.proposalHash !== action.approvalHash) {
+        return { ok: false, error: "approval_payload_mismatch" };
+      }
       const presented = input.approvals?.[action.id];
       if (!presented) return { ok: false, error: "approval_binding_required" };
       if (presented !== action.approvalHash) return { ok: false, error: "approval_stale" };
     }
   }
   // One decision per run: claim it atomically so a double click or two tabs
-  // cannot both execute the same actions.
+  // cannot both execute the same actions. GH #1567 C4: the approval window is
+  // part of the same statement and measured on the database clock from the
+  // run's creation — the moment the job proposed these actions (they are
+  // written in that run) — so an approve cannot slip past expiry between a
+  // check and the claim, and an app-server clock skew cannot stretch it. A
+  // rejection is never expired: saying no is always allowed.
   const { rowCount: claimed } = await query(
     `UPDATE ai_coworker_runs SET decided_at = now()
-      WHERE business_id = $1 AND id = $2 AND status = 'pending_approval' AND decided_at IS NULL`,
-    [input.businessId, input.runId],
+      WHERE business_id = $1 AND id = $2 AND status = 'pending_approval' AND decided_at IS NULL
+        AND ($3::boolean OR created_at > now() - make_interval(hours => $4::int))`,
+    [input.businessId, input.runId, input.decision === "reject", AI_APPROVAL_TTL_HOURS],
   );
-  if ((claimed ?? 0) === 0) return { ok: false, error: "coworker_run_already_decided" };
+  if ((claimed ?? 0) === 0) {
+    const { rows: state } = await query<{ decided: boolean; expired: boolean }>(
+      `SELECT decided_at IS NOT NULL AS decided, created_at <= now() - make_interval(hours => $3::int) AS expired
+         FROM ai_coworker_runs WHERE business_id = $1 AND id = $2`,
+      [input.businessId, input.runId, AI_APPROVAL_TTL_HOURS],
+    );
+    return { ok: false, error: state[0] && !state[0].decided && state[0].expired ? "approval_expired" : "coworker_run_already_decided" };
+  }
   const actorName = await userName(input.businessId, input.actorUserId);
 
   if (input.decision === "reject") {
