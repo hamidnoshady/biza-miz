@@ -29,4 +29,11 @@ The numbers were agreed with the owner on 2026-10-25 and are constants in
 - **Plugin side.** The plugin's own on-site table clears the body of every delivered row
   (including the pre-upgrade backlog), deletes `sent` rows after 30 days, and deletes
   non-financial `failed` rows after 180 days; order and refund failures are never deleted.
+- **Sweep reconciliation.** The periodic order sweep compares the state it re-read with the
+  newest queued row. An identical delivered snapshot is not written again — a 5-minute
+  re-read of an unchanged order is not a new sale or refund — while a changed state always is.
+  An identical `failed` row is retried in place after a 6-hour cooldown, keeping its
+  `delivery_id`, so one permanently rejected order cannot mint a new row every cycle.
+  Hook-driven events and an explicit `wp pos-connector export orders` keep their own delivery
+  identity.
 - **UI.** The queue page states the retention under the connection picker.
