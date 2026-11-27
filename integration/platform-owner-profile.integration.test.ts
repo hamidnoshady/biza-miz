@@ -230,6 +230,11 @@ beforeEach(async () => {
   await db.query(`DELETE FROM platform_audit_log WHERE business_id = $1`, [businessA.id]);
   // Reset the mutable fields each test touches.
   await db.query(
+    `UPDATE users SET email = $2, phone_e164 = '+989121234567', phone_verified_at = now()
+      WHERE id = ANY($1::uuid[])`,
+    [[membershipA.id, membershipB.id], identity.email],
+  );
+  await db.query(
     `UPDATE users SET full_name = 'مالک اصلی', is_active = true WHERE id = $1`,
     [membershipA.id],
   );
@@ -237,7 +242,7 @@ beforeEach(async () => {
   await db.query(`UPDATE platform_users SET email = $2 WHERE id = $1`, [identity.id, identity.email]);
   await db.query(`UPDATE platform_users SET token_version = 1 WHERE id = $1`, [identity.id]);
   await db.query(
-    `UPDATE mfa_enrolments SET phone_e164 = '+989121234567', confirmed_at = now()
+    `UPDATE mfa_enrolments SET phone_e164 = '+989121234567', confirmed_at = now(), is_primary = true
       WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
     [identity.id],
   );
@@ -511,5 +516,126 @@ describe("PATCH owner profile — the email is a global login", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: "invalid_email" });
+  });
+});
+
+describe("identity membership mirrors", () => {
+  it("mirrors an email globally, including the audit and the tenant roster", async () => {
+    const email = "mirrored-owner@example.com";
+    expect((await patch({ membershipId: membershipA.id, email, confirmCrossBusiness: true })).status).toBe(200);
+    const { rows } = await db.query(
+      "SELECT email::text FROM users WHERE platform_user_id = $1 ORDER BY id",
+      [identity.id],
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.email === email)).toBe(true);
+    const { listMembers } = await import("../src/lib/team-service");
+    const members = await dbLib.withTenant(businessA.id, () => listMembers(businessA.id));
+    expect(members.find((member) => member.id === membershipA.id)?.email).toBe(email);
+    expect((await auditRows())[0].payload).toMatchObject({
+      before: { email: identity.email, membershipEmail: identity.email },
+      after: { email, membershipEmail: email },
+    });
+  });
+
+  it("rolls back the identity and every mirror on a per-business citext email collision", async () => {
+    // Only the second business conflicts; the global identity address is free.
+    const email = "membership-only@example.com";
+    const { rows: [collision] } = await db.query(
+      `INSERT INTO users (business_id, role, full_name, email)
+       VALUES ($1, 'waiter', 'Email collision', $2) RETURNING id`,
+      [businessB.id, email.toUpperCase()],
+    );
+    try {
+      const res = await patch({ membershipId: membershipA.id, email, confirmCrossBusiness: true });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "email_taken" });
+      const { rows: [person] } = await db.query("SELECT email::text, token_version FROM platform_users WHERE id = $1", [identity.id]);
+      expect(person).toMatchObject({ email: identity.email, token_version: 1 });
+      const { rows } = await db.query("SELECT email::text FROM users WHERE platform_user_id = $1", [identity.id]);
+      expect(rows.every((row) => row.email === identity.email)).toBe(true);
+      expect(await auditRows()).toHaveLength(0);
+    } finally {
+      await db.query("DELETE FROM users WHERE id = $1", [collision.id]);
+    }
+  });
+
+  it("mirrors phone changes and clears verification without leaving an active MFA factor", async () => {
+    const phone = "+989129999999";
+    expect((await patch({ membershipId: membershipA.id, phone, confirmCrossBusiness: true })).status).toBe(200);
+    const { rows: [factor] } = await db.query(
+      "SELECT method, phone_e164, confirmed_at, is_primary FROM mfa_enrolments WHERE subject_id = $1 AND method = 'sms_otp'",
+      [identity.id],
+    );
+    expect(factor).toMatchObject({ phone_e164: phone, confirmed_at: null, is_primary: false });
+    const { isActiveMfaEnrolment } = await import("../src/lib/mfa");
+    expect(isActiveMfaEnrolment(factor)).toBe(false);
+    const { rows } = await db.query("SELECT phone_e164, phone_verified_at FROM users WHERE platform_user_id = $1", [identity.id]);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row).toEqual({ phone_e164: phone, phone_verified_at: null });
+    expect((await auditRows())[0].payload).toMatchObject({
+      before: { membershipPhone: "+989121234567" },
+      after: { membershipPhone: phone },
+    });
+
+    expect((await patch({ membershipId: membershipA.id, phone: "", confirmCrossBusiness: true })).status).toBe(200);
+    const { rows: cleared } = await db.query("SELECT phone_e164, phone_verified_at FROM users WHERE platform_user_id = $1", [identity.id]);
+    for (const row of cleared) expect(row).toEqual({ phone_e164: null, phone_verified_at: null });
+    const { rows: [clearedFactor] } = await db.query("SELECT phone_e164, confirmed_at, is_primary FROM mfa_enrolments WHERE subject_id = $1 AND method = 'sms_otp'", [identity.id]);
+    expect(clearedFactor).toEqual({ phone_e164: null, confirmed_at: null, is_primary: false });
+  });
+
+  it("returns phone_taken and rolls back the whole edit when a mirror collides", async () => {
+    const phone = "+989129999999";
+    const { rows: [collision] } = await db.query(
+      `INSERT INTO users (business_id, role, full_name, phone_e164)
+       VALUES ($1, 'waiter', 'Phone collision', $2) RETURNING id`,
+      [businessB.id, phone],
+    );
+    try {
+      const res = await patch({ membershipId: membershipA.id, phone, email: "rollback@example.com", confirmCrossBusiness: true });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ error: "phone_taken" });
+      const { rows: [factor] } = await db.query("SELECT phone_e164, confirmed_at, is_primary FROM mfa_enrolments WHERE subject_id = $1 AND method = 'sms_otp'", [identity.id]);
+      expect(factor.phone_e164).toBe("+989121234567");
+      expect(factor.is_primary).toBe(true);
+      expect(factor.confirmed_at).not.toBeNull();
+      const { rows: [person] } = await db.query("SELECT email::text FROM platform_users WHERE id = $1", [identity.id]);
+      expect(person.email).toBe(identity.email);
+      const { rows } = await db.query("SELECT email::text, phone_e164, phone_verified_at FROM users WHERE platform_user_id = $1", [identity.id]);
+      for (const row of rows) {
+        expect(row.email).toBe(identity.email);
+        expect(row.phone_e164).toBe("+989121234567");
+        expect(row.phone_verified_at).not.toBeNull();
+      }
+      expect(await auditRows()).toHaveLength(0);
+    } finally {
+      await db.query("DELETE FROM users WHERE id = $1", [collision.id]);
+    }
+  });
+
+  it("rehires an owner after a console email change followed by offboarding", async () => {
+    const { removeMembership, rehireMembership } = await import("../src/lib/team-service");
+    const { rows: [actor] } = await db.query(
+      `INSERT INTO users (business_id, role, full_name, platform_user_id)
+       VALUES ($1, 'owner', 'Second owner', $2) RETURNING id`,
+      [businessA.id, otherIdentity.id],
+    );
+    try {
+      expect((await patch({ membershipId: membershipA.id, email: "rehire-owner@example.com", confirmCrossBusiness: true })).status).toBe(200);
+      await dbLib.withTenant(businessA.id, () => removeMembership(businessA.id, membershipA.id, actor.id));
+      const { rows: [offboarded] } = await db.query("SELECT platform_user_id, email::text, membership_status FROM users WHERE id = $1", [membershipA.id]);
+      expect(offboarded).toMatchObject({ platform_user_id: null, email: "rehire-owner@example.com", membership_status: "offboarded" });
+      await dbLib.withTenant(businessA.id, () => rehireMembership({
+        businessId: businessA.id, userId: membershipA.id, actorId: actor.id,
+        locationScope: "all", reason: "Owner returning after leave",
+      }));
+      const { rows: [rehired] } = await db.query("SELECT platform_user_id, is_active, membership_status FROM users WHERE id = $1", [membershipA.id]);
+      expect(rehired).toMatchObject({ platform_user_id: identity.id, is_active: true, membership_status: "active" });
+    } finally {
+      // Keep the fixture isolated even if the ceremony fails.
+      await db.query("UPDATE users SET platform_user_id = $2, is_active = true, membership_status = 'active' WHERE id = $1", [membershipA.id, identity.id]);
+      // The actor is referenced by the membership audit and IAM event history.
+    }
   });
 });

@@ -88,7 +88,7 @@ describe("global login replication", () => {
     });
     await withTenant(site.businessId, () => query(
       `INSERT INTO users (id, business_id, role, full_name, email, location_id) VALUES ($1, $2, 'owner', 'حمید', $3, $4)`,
-      [cloud.userId, site.businessId, email, site.locationId],
+      [cloud.userId, site.businessId, `stale-${email}`, site.locationId],
     ));
 
     await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials))).resolves.toMatchObject({ changed: true });
@@ -103,6 +103,11 @@ describe("global login replication", () => {
     // Issue #948 P0-1 — contract v2: the site binds the membership to the
     // cloud's canonical global identity ID, not to a locally minted UUID.
     expect(localId).toBe(cloud.platformUserId);
+    const mirrored = await withTenant(site.businessId, () => query<{ email: string }>(
+      "SELECT email::text FROM users WHERE id = $1", [cloud.userId],
+    ));
+    expect(mirrored.rows[0].email).toBe(email);
+
     expect(await bcrypt.compare("cloud-password", identity.rows[0].password_hash)).toBe(true);
 
     const code = await new TOTP({ crypto: new NobleCryptoPlugin(), base32: new ScureBase32Plugin() }).generate({ secret });
@@ -272,7 +277,7 @@ describe("global login replication", () => {
     await withTenant(site.businessId, () =>
       query(
         `INSERT INTO users (id, business_id, role, full_name, email, phone_e164, location_id)
-         VALUES ($1, $2, 'owner', 'مالک موبایل‌محور', NULL, $3, $4)`,
+         VALUES ($1, $2, 'owner', 'مالک موبایل‌محور', 'stale-phone-owner@example.com', $3, $4)`,
         [cloud.userId, site.businessId, phone, site.locationId],
       ),
     );
@@ -287,9 +292,71 @@ describe("global login replication", () => {
       identityPhoneConflicts: 0,
     });
 
+    const membershipEmail = await withTenant(site.businessId, () => query<{ email: string | null }>(
+      "SELECT email::text FROM users WHERE id = $1", [cloud.userId],
+    ));
+    expect(membershipEmail.rows[0].email).toBeNull();
+
     // Second pass converges with zero rewrites.
     await expect(
       withTenant(site.businessId, () => applyLoginCredentials(site.businessId, credentials)),
     ).resolves.toMatchObject({ changed: false, bindingsStillBroken: 0 });
+  }, 180_000);
+});
+
+
+describe("replicated email membership mirror", () => {
+  it("mirrors all memberships, propagates membership collisions, and never mirrors a refused identity email", async () => {
+    await useDatabase(siteDb);
+    const site = await provisionBusiness({
+      businessName: "Email mirror", ownerName: "Owner", email: `before-${randomUUID()}@example.com`,
+      password: "cloud-password", seedChartOfAccounts: false,
+    });
+    const credentials = await buildLoginCredentials(site.businessId);
+    const nextEmail = `after-${randomUUID()}@example.com`;
+    const secondBusinessId = randomUUID();
+    await withoutTenantScope("platform", async () => {
+      await query("INSERT INTO businesses (id, name, slug) VALUES ($1, 'Other business', $2)", [secondBusinessId, `mirror-${randomUUID()}`]);
+      await query(`INSERT INTO users (business_id, role, full_name, email, platform_user_id)
+                   VALUES ($1, 'owner', 'Owner', $2, $3)`, [secondBusinessId, credentials[0].email, site.platformUserId]);
+    });
+    const changed = credentials.map((c) => ({ ...c, email: nextEmail }));
+    await withTenant(site.businessId, () => applyLoginCredentials(site.businessId, changed));
+    const copies = await withoutTenantScope("identity", () => query<{ email: string }>(
+      "SELECT email::text FROM users WHERE platform_user_id = $1", [site.platformUserId],
+    ));
+    expect(copies.rows).toHaveLength(2);
+    expect(copies.rows.every((row) => row.email === nextEmail)).toBe(true);
+
+    // A free global address can still collide on a tenant's membership index.
+    const takenEmail = `taken-${randomUUID()}@example.com`;
+    await withoutTenantScope("platform", () => query(
+      `INSERT INTO users (business_id, role, full_name, email) VALUES ($1, 'waiter', 'Conflict', $2)`,
+      [secondBusinessId, takenEmail],
+    ));
+    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId,
+      changed.map((c) => ({ ...c, email: takenEmail })),
+    ))).rejects.toMatchObject({ code: "23505" });
+    const person = await withoutTenantScope("identity", () => query<{ email: string }>(
+      "SELECT email::text FROM platform_users WHERE id = $1", [site.platformUserId],
+    ));
+    expect(person.rows[0].email).toBe(nextEmail);
+    const afterRollback = await withoutTenantScope("identity", () => query<{ email: string }>(
+      "SELECT email::text FROM users WHERE platform_user_id = $1", [site.platformUserId],
+    ));
+    expect(afterRollback.rows.every((row) => row.email === nextEmail)).toBe(true);
+
+    // Existing identity email conflict follows the old refusal/reporting path:
+    // the payload email is not written to the identity OR its memberships.
+    await withoutTenantScope("identity", () => query(
+      "INSERT INTO platform_users (email, full_name, password_hash) VALUES ($1, 'Other person', 'x')", [takenEmail],
+    ));
+    await expect(withTenant(site.businessId, () => applyLoginCredentials(site.businessId,
+      changed.map((c) => ({ ...c, email: takenEmail })),
+    ))).resolves.toMatchObject({ identityEmailConflicts: 1 });
+    const afterRefusal = await withoutTenantScope("identity", () => query<{ email: string }>(
+      "SELECT email::text FROM users WHERE platform_user_id = $1", [site.platformUserId],
+    ));
+    expect(afterRefusal.rows.every((row) => row.email === nextEmail)).toBe(true);
   }, 180_000);
 });

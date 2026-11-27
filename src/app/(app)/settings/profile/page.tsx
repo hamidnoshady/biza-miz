@@ -61,7 +61,13 @@ export default async function ProfilePage() {
         is_active: boolean;
         location_id: string | null;
       }>(
-        "SELECT full_name, email, phone_e164, role, is_active, location_id FROM users WHERE id = $1 AND business_id = $2",
+        // Prefer the login identity's email, retaining users.email as fallback.
+        // RLS permits reading identities linked to this tenant's memberships.
+        `SELECT u.full_name, COALESCE(p.email::text, u.email::text) AS email,
+                u.phone_e164, u.role, u.is_active, u.location_id
+           FROM users u
+           LEFT JOIN platform_users p ON p.id = u.platform_user_id
+          WHERE u.id = $1 AND u.business_id = $2`,
         [session.sub, session.businessId],
       ),
     tenantScope,
