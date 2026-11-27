@@ -13,8 +13,14 @@
  * A console profile has to show both without conflating them, and an edit has
  * to say which one it touched. Changing the *email* is a global act: it follows
  * the person into their other businesses, so it needs explicit confirmation
- * and it invalidates their sessions everywhere. Changing the *name*, the
- * membership's active flag or the MFA phone is business-scoped.
+ * and it invalidates their sessions everywhere. The MFA phone is global too;
+ * changing it also needs confirmation when it reaches other businesses.
+ * The membership's active flag remains business-scoped.
+ *
+ * An identity-level edit (email, MFA phone) mirrors onto every `users`
+ * membership row of the same identity inside the same transaction — the
+ * tenant's screens read those copies, and `rehire()` relinks by
+ * `users.email` — via `syncMembershipIdentity()` in `membership-identity-sync.ts`.
  *
  * Nothing here ever reads or returns a credential: no `password_hash`, no
  * `totp_secret`, no recovery-code hash or plaintext, no token. What the console
@@ -27,6 +33,7 @@
  */
 import { getPool, withoutTenantScope } from "./db";
 import { lockMembership } from "./membership-lock";
+import { syncMembershipIdentity } from "./membership-identity-sync";
 import { formatPersianNumber } from "./digits";
 import { normalizePhone } from "./phone";
 
@@ -54,6 +61,14 @@ export interface OwnerProfile {
   membershipCreatedAt: string;
   /** The membership's own name — what the tenant's screens show. */
   fullName: string;
+  /**
+   * The membership's own copies of the contact fields — exactly what the
+   * tenant's screens read (Team roster, `/settings/profile`). A console edit
+   * mirrors them from the identity in the same transaction, so the audit's
+   * before/after can say they moved too, not just the identity's values.
+   */
+  membershipEmail: string | null;
+  membershipPhone: string | null;
   /** null for a membership with no email login (never the case for owner/manager). */
   platformUserId: string | null;
   /** The login identity, shared across every business this person belongs to. */
@@ -75,6 +90,7 @@ export type OwnerProfileError =
   | "invalid_email"
   | "email_taken"
   | "invalid_phone"
+  | "phone_taken"
   | "cross_business_confirmation_required"
   | "identity_missing"
   | "no_changes";
@@ -107,6 +123,8 @@ interface MemberRow extends Record<string, unknown> {
   membership_id: string;
   role: string;
   full_name: string;
+  membership_email: string | null;
+  membership_phone: string | null;
   is_active: boolean;
   created_at: Date;
   location_id: string | null;
@@ -142,7 +160,9 @@ function iso(value: Date | null | undefined): string | null {
 export async function listBusinessOwnerProfiles(businessId: string): Promise<OwnerProfile[]> {
   return withoutTenantScope("platform", async () => {
     const { rows: members } = await getPool().query<MemberRow>(
-      `SELECT u.id AS membership_id, u.role::text AS role, u.full_name, u.is_active,
+      `SELECT u.id AS membership_id, u.role::text AS role, u.full_name,
+              u.email::text AS membership_email, u.phone_e164 AS membership_phone,
+              u.is_active,
               u.created_at, u.location_id, l.name AS location_name,
               u.platform_user_id,
               p.email::text AS email, p.is_active AS identity_active,
@@ -220,6 +240,8 @@ function toProfile(
     membershipActive: row.is_active,
     membershipCreatedAt: new Date(row.created_at).toISOString(),
     fullName: row.full_name,
+    membershipEmail: row.membership_email,
+    membershipPhone: row.membership_phone,
     platformUserId: row.platform_user_id,
     email: row.email,
     identityActive: row.identity_active ?? true,
@@ -384,6 +406,9 @@ export async function updateBusinessOwnerProfile(
             WHERE id = $1`,
           [before.platformUserId, email],
         );
+        // Mirror every membership in this transaction, including the retained
+        // email rehire uses. Per-business collisions also map to email_taken.
+        await syncMembershipIdentity(client, before.platformUserId, { email });
         await client.query(
           `UPDATE employee_sessions es
               SET revoked_at = now()
@@ -419,26 +444,43 @@ export async function updateBusinessOwnerProfile(
     }
 
     if (phone !== undefined && (phoneE164 ?? null) !== (before.mfa.phoneE164 ?? null)) {
-      if (phoneE164 === null) {
-        await client.query(
-          `UPDATE mfa_enrolments SET phone_e164 = NULL, confirmed_at = NULL
-            WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
-          [before.platformUserId],
-        );
-      } else {
-        // A changed second factor must be re-confirmed: keeping `confirmed_at`
-        // would leave the account protected by a channel the owner never
-        // proved control of.
-        await client.query(
-          `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, phone_e164, is_primary, confirmed_at)
-           VALUES ('platform_user', $1, 'sms_otp', $2,
-                   NOT EXISTS (SELECT 1 FROM mfa_enrolments
-                                WHERE subject_realm = 'platform_user' AND subject_id = $1),
-                   NULL)
-           ON CONFLICT (subject_realm, subject_id, method)
-           DO UPDATE SET phone_e164 = EXCLUDED.phone_e164, confirmed_at = NULL`,
-          [before.platformUserId, phoneE164],
-        );
+      try {
+        if (phoneE164 === null) {
+          // An unconfirmed primary SMS enrolment still counts as active.
+          // Demote it as well so clearing the number closes that factor.
+          await client.query(
+            `UPDATE mfa_enrolments
+                SET phone_e164 = NULL, confirmed_at = NULL, is_primary = false
+              WHERE subject_realm = 'platform_user' AND subject_id = $1 AND method = 'sms_otp'`,
+            [before.platformUserId],
+          );
+        } else {
+          // A replaced number must be proven again. Clear primary as well:
+          // isActiveMfaEnrolment treats unconfirmed primary SMS rows as live.
+          await client.query(
+            `INSERT INTO mfa_enrolments (subject_realm, subject_id, method, phone_e164, is_primary, confirmed_at)
+             VALUES ('platform_user', $1, 'sms_otp', $2,
+                     NOT EXISTS (SELECT 1 FROM mfa_enrolments
+                                  WHERE subject_realm = 'platform_user' AND subject_id = $1),
+                     NULL)
+             ON CONFLICT (subject_realm, subject_id, method)
+             DO UPDATE SET phone_e164 = EXCLUDED.phone_e164,
+                           confirmed_at = NULL,
+                           is_primary = false`,
+            [before.platformUserId, phoneE164],
+          );
+        }
+        // Drop membership phone verification too. A per-business phone clash
+        // rolls back the whole edit, including the enrolment and email writes.
+        if (before.platformUserId) {
+          await syncMembershipIdentity(client, before.platformUserId, { phoneE164 });
+        }
+      } catch (err) {
+        await client.query("ROLLBACK");
+        if (err && typeof err === "object" && (err as { code?: string }).code === "23505") {
+          return { ok: false, error: "phone_taken" };
+        }
+        throw err;
       }
       notices.push("شمارهٔ پیامکی تغییر کرد و باید دوباره تأیید شود؛ تا آن زمان ورود دومرحله‌ای کامل نیست.");
       if (before.membershipCount > 1) {

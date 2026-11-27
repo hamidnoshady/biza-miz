@@ -76,11 +76,7 @@ interface ContractSummary {
   pending: number;
   valueRial: number;
 }
-import {
-  partyPickerOptions,
-  useWorkspacePartySearch,
-  type WorkspaceLookups,
-} from "./use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "./use-workspace-lookups";
 
 export interface ContractRow {
   id: string;
@@ -404,13 +400,7 @@ function ContractDialog({
   // Issue #907 F10 — «طرف قرارداد» searches the directory on the server, so a
   // party beyond the page the lookups carry is still findable. The selected id
   // rides along, which keeps the field named even when it does not match.
-  const [partyTerm, setPartyTerm] = useState("");
-  const partyMatches = useWorkspacePartySearch(partyTerm, partyId);
-  const partyNote = partyMatches.error
-    ? partyMatches.error
-    : partyMatches.hasMore
-      ? `${toPersianDigits(String(partyMatches.parties.length))} مورد از ${toPersianDigits(String(partyMatches.total))} مورد نمایش داده شد؛ نام را دقیق‌تر کنید.`
-      : undefined;
+  const partyPicker = usePartyPicker(lookups.parties, partyId, partyPageFrom(lookups));
   const [value, setValue] = useState(
     contract?.valueRial != null ? String(money.toInput(contract.valueRial)) : "",
   );
@@ -511,12 +501,12 @@ function ContractDialog({
           label="طرف قرارداد"
           value={partyId}
           onChange={setPartyId}
-          options={partyPickerOptions(lookups.parties, partyMatches, partyId)}
+          options={partyPicker.options}
           searchable
           searchPlaceholder="جست‌وجوی طرف قرارداد…"
-          onSearch={setPartyTerm}
-          searching={partyMatches.loading}
-          searchNote={partyNote}
+          onSearch={partyPicker.setTerm}
+          searching={partyPicker.searching}
+          searchNote={partyPicker.note}
         />
         <Field label={`مبلغ (${money.unitLabel})`}>
           <input

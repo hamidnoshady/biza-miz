@@ -332,4 +332,38 @@ describe("global verified phone", () => {
     );
     expect(rows).toEqual([]);
   });
+
+  it("propagates verified phone status when creating a new business for a verified global identity (ESH-199)", async () => {
+    const phoneIdentityId = randomUUID();
+    const verifiedPhone = "+989129998877";
+    await db.query(
+      `INSERT INTO platform_users (id, email, password_hash, phone_e164, phone_verified_at, full_name, is_active)
+       VALUES ($1, NULL, NULL, $2, now(), 'کارآفرین', true)`,
+      [phoneIdentityId, verifiedPhone],
+    );
+
+    const provisioning = await import("../src/lib/business-provisioning");
+    const selfCreds = await import("../src/lib/self-credentials");
+    const dbLib = await import("../src/lib/db");
+
+    const created = await provisioning.provisionBusiness({
+      businessName: "فروشگاه دوم",
+      ownerName: "کارآفرین",
+      platformUserId: phoneIdentityId,
+      seedChartOfAccounts: false,
+    });
+
+    const { rows: memberRows } = await db.query<{
+      phone_e164: string | null;
+      phone_verified_at: Date | null;
+    }>(`SELECT phone_e164, phone_verified_at FROM users WHERE id = $1`, [created.userId]);
+    expect(memberRows[0].phone_e164).toBe(verifiedPhone);
+    expect(memberRows[0].phone_verified_at).not.toBeNull();
+
+    const state = await dbLib.withTenant(created.businessId, () =>
+      selfCreds.readSelfCredentialState(created.businessId, created.userId),
+    );
+    expect(state?.hasVerifiedPhone).toBe(true);
+    expect(state?.hasPassword).toBe(false);
+  });
 });

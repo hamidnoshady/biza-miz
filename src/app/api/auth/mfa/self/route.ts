@@ -21,7 +21,8 @@ import { verifyAndConfirmPendingMfaEnrolment } from "@/lib/mfa-verify";
 import { canonicalMemberPhone } from "@/lib/phone-otp";
 import { countRemainingRecoveryCodes, issueRecoveryCodes } from "@/lib/mfa-recovery";
 import { getMfaPolicy } from "@/lib/mfa-policy";
-import { isRecentAuth, requireRecentAuth } from "@/lib/recent-auth";
+import { isRecentAuth } from "@/lib/recent-auth";
+import { requireSensitiveRecentAuth } from "@/lib/sensitive-step-up";
 import { readDeploymentProfile } from "@/lib/deployment-mode";
 import { describeCredentialSurface } from "@/lib/credential-authority";
 import { AUTH_ERROR_CODES, authErrorMessage } from "@/lib/auth-contracts";
@@ -200,7 +201,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
 
-  const recentAuthError = requireRecentAuth(session);
+  // #1386 — fresh, and (after an OTP-only sign-in) proved with the distinct
+  // factor: SMS alone must never add, replace or remove a stronger one.
+  const recentAuthError = await requireSensitiveRecentAuth(session);
   if (recentAuthError) return recentAuthError;
 
   if ((await readDeploymentProfile(session.businessId)).profile === "hybrid") {

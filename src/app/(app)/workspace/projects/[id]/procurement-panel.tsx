@@ -65,6 +65,7 @@ import {
   StatusBadge,
 } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
+import { SearchField } from "@/app/dashboard/filters";
 import { useMoney } from "@/components/money/money-context";
 import { toPersianDigits } from "@/lib/digits";
 import {
@@ -108,7 +109,13 @@ import {
   type RfqAction,
   type RfqStatus,
 } from "@/lib/aec-procurement";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
+import {
+  partyPageFrom,
+  usePartyPicker,
+  usePartyPickerList,
+  type PartyPage,
+  type WorkspaceLookups,
+} from "../../use-workspace-lookups";
 import {
   DateCell,
   DateField,
@@ -927,6 +934,7 @@ export function AecProcurementTab({
           projectId={projectId}
           requests={data.requests.filter((row) => row.isOpen)}
           suppliers={lookups.parties}
+          partyPage={partyPageFrom(lookups)}
           onClose={() => setCreatingRfq(false)}
           onSaved={async (id) => {
             setCreatingRfq(false);
@@ -942,6 +950,7 @@ export function AecProcurementTab({
         <QuotationForm
           rfq={quotationFor}
           suppliers={lookups.parties}
+          partyPage={partyPageFrom(lookups)}
           onClose={() => setQuotationFor(null)}
           onSaved={async () => {
             setQuotationFor(null);
@@ -958,6 +967,7 @@ export function AecProcurementTab({
           projectId={projectId}
           commitment={undefined}
           suppliers={lookups.parties}
+          partyPage={partyPageFrom(lookups)}
           requests={data.requests}
           rfqs={data.rfqs}
           prefill={
@@ -1554,6 +1564,7 @@ function RfqForm({
   projectId,
   requests,
   suppliers,
+  partyPage,
   onClose,
   onSaved,
   onError,
@@ -1561,6 +1572,7 @@ function RfqForm({
   projectId: string;
   requests: MaterialRequest[];
   suppliers: Array<{ id: string; name: string }>;
+  partyPage: PartyPage;
   onClose: () => void;
   onSaved: (rfqId: string) => void | Promise<void>;
   onError: (code: string | undefined) => void;
@@ -1571,6 +1583,7 @@ function RfqForm({
   const [responseDue, setResponseDue] = useState("");
   const [invited, setInvited] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const partyList = usePartyPickerList(suppliers, invited, partyPage);
 
   async function submit() {
     if (!title.trim() || saving) return;
@@ -1628,13 +1641,22 @@ function RfqForm({
         <DateField label="مهلت پاسخ تأمین‌کنندگان" value={responseDue} onChange={setResponseDue} />
         <div className="sm:col-span-2">
           <p className="mb-1 text-xs font-medium">تأمین‌کنندگان دعوت‌شده</p>
-          {suppliers.length === 0 ? (
+          <SearchField
+            value={partyList.term}
+            onChange={partyList.setTerm}
+            label="جست‌وجوی تأمین‌کننده"
+            placeholder="جست‌وجوی تأمین‌کننده…"
+            className="mb-2"
+          />
+          {partyList.options.length === 0 ? (
             <p className="text-xs text-muted-foreground">
-              طرفی در فهرست نیست؛ ابتدا تأمین‌کننده را از «طرف‌ها» ثبت کنید.
+              {partyList.term.trim()
+                ? "طرفی با این نام پیدا نشد."
+                : "طرفی در فهرست نیست؛ ابتدا تأمین‌کننده را از «طرف‌ها» ثبت کنید."}
             </p>
           ) : (
             <ul className="flex flex-wrap gap-2">
-              {suppliers.map((supplier) => {
+              {partyList.options.map((supplier) => {
                 const on = invited.includes(supplier.id);
                 return (
                   <li key={supplier.id}>
@@ -1651,13 +1673,16 @@ function RfqForm({
                         )
                       }
                     >
-                      {supplier.name}
+                      {supplier.label}
                     </button>
                   </li>
                 );
               })}
             </ul>
           )}
+          {partyList.note ? (
+            <span className="text-xs text-muted-foreground">{partyList.note}</span>
+          ) : null}
         </div>
       </div>
       <div className="flex items-center justify-end gap-2 border-t border-border/80 p-4">
@@ -1674,17 +1699,20 @@ function RfqForm({
 function QuotationForm({
   rfq,
   suppliers,
+  partyPage,
   onClose,
   onSaved,
   onError,
 }: {
   rfq: Rfq;
   suppliers: Array<{ id: string; name: string }>;
+  partyPage: PartyPage;
   onClose: () => void;
   onSaved: () => void | Promise<void>;
   onError: (code: string | undefined) => void;
 }) {
   const [partyId, setPartyId] = useState("");
+  const partyPicker = usePartyPicker(suppliers, partyId, partyPage);
   const [amountRial, setAmountRial] = useState("");
   const [leadDays, setLeadDays] = useState("");
   const [validityDate, setValidityDate] = useState("");
@@ -1721,7 +1749,12 @@ function QuotationForm({
           label="تأمین‌کننده"
           value={partyId}
           onChange={setPartyId}
-          options={suppliers.map((supplier) => ({ id: supplier.id, label: supplier.name }))}
+          options={partyPicker.options}
+          searchable
+          searchPlaceholder="جست‌وجوی تأمین‌کننده…"
+          onSearch={partyPicker.setTerm}
+          searching={partyPicker.searching}
+          searchNote={partyPicker.note}
           hint="هر تأمین‌کننده یک پیشنهاد؛ برای قیمت جدید، استعلام تازه ثبت کنید"
         />
         <Field label="مبلغ پیشنهادی (ریال)">
@@ -1770,6 +1803,7 @@ function QuotationForm({
 function CommitmentForm({
   projectId,
   suppliers,
+  partyPage,
   requests,
   rfqs,
   prefill,
@@ -1780,6 +1814,7 @@ function CommitmentForm({
   projectId: string;
   commitment?: Commitment;
   suppliers: Array<{ id: string; name: string }>;
+  partyPage: PartyPage;
   requests: MaterialRequest[];
   rfqs: Rfq[];
   prefill?: {
@@ -1797,6 +1832,7 @@ function CommitmentForm({
   const [kind, setKind] = useState<CommitmentKind>("purchase");
   const [title, setTitle] = useState(prefill?.title ?? "");
   const [supplierPartyId, setSupplierPartyId] = useState(prefill?.supplierPartyId ?? "");
+  const supplierPicker = usePartyPicker(suppliers, supplierPartyId, partyPage);
   const [valueRial, setValueRial] = useState(prefill?.valueRial ?? "");
   const [expectedDeliveryDate, setExpectedDeliveryDate] = useState("");
   const [workPackage, setWorkPackage] = useState("");
@@ -1846,7 +1882,12 @@ function CommitmentForm({
           label="تأمین‌کننده"
           value={supplierPartyId}
           onChange={setSupplierPartyId}
-          options={suppliers.map((supplier) => ({ id: supplier.id, label: supplier.name }))}
+          options={supplierPicker.options}
+          searchable
+          searchPlaceholder="جست‌وجوی تأمین‌کننده…"
+          onSearch={supplierPicker.setTerm}
+          searching={supplierPicker.searching}
+          searchNote={supplierPicker.note}
           hint="تأمین‌کننده یک «طرف» است، نه یک کاربر"
         />
         <div className="sm:col-span-2">

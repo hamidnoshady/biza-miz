@@ -114,6 +114,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     telegramIdentityGeneration: session.telegramIdentityGeneration,
     mfaVerified: session.mfaVerified,
     recentAuthAt: session.recentAuthAt,
+    // #1386 — what that recent auth proved travels with it; dropping it here
+    // would let a switch upgrade an OTP-only session for free.
+    otpOnlyAssurance: session.otpOnlyAssurance,
     imp: session.imp,
   });
 

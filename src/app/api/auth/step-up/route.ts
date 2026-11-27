@@ -30,6 +30,46 @@ import {
 } from "@/lib/auth-contracts";
 import { readSelfCredentialState, verifySelfPin } from "@/lib/self-credentials";
 import { toLatinDigits } from "@/lib/digits";
+import {
+  otpOnlyAssuranceAfterStepUp,
+  stepUpProvesDistinctFactor,
+} from "@/lib/login-assurance";
+import { sensitiveStepUpDecision } from "@/lib/sensitive-step-up";
+
+/**
+ * #1386 — the key step-up counts lockout and SMS rate limits under.
+ *
+ * It is the *global identity's* key, the same one the password door and the
+ * MFA step use (email, else the verified E.164 number). Keying on the
+ * membership's `users.email` left a phone-first identity — which has no email
+ * — with no step-up lockout at all, refused its password method, and put
+ * every such member's step-up SMS into one shared `""` rate-limit bucket. The
+ * membership email remains the key only for a member with no global identity.
+ */
+async function stepUpIdentityKey(session: {
+  sub: string;
+  businessId: string;
+  platformUserId?: string | null;
+}): Promise<string | null> {
+  const { rows } = await query<{
+    member_email: string | null;
+    identity_email: string | null;
+    identity_phone: string | null;
+  }>(
+    `SELECT u.email::text AS member_email,
+            p.email::text AS identity_email,
+            CASE WHEN p.phone_verified_at IS NOT NULL THEN p.phone_e164 END AS identity_phone
+       FROM users u
+       LEFT JOIN platform_users p ON p.id = u.platform_user_id
+      WHERE u.id = $1 AND u.business_id = $2`,
+    [session.sub, session.businessId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return session.platformUserId
+    ? (row.identity_email ?? row.identity_phone ?? row.member_email ?? null)
+    : (row.member_email ?? null);
+}
 
 /**
  * Issue #854 (P1.6 / P1.9 / P1.10 / P1.11) — recent-authentication step-up,
@@ -73,9 +113,22 @@ export const GET = withTenantScope(async () => {
   if (!state) return NextResponse.json({ error: AUTH_ERROR_CODES.unauthorized }, { status: 401 });
 
   // Only methods a server ceremony can verify (#854 F03) — never `webauthn`.
-  const availableMethods = availableStepUpMethods(state);
+  const verifiable = availableStepUpMethods(state);
+  /*
+   * #1386 — after an OTP-only sign-in on an account holding a TOTP, the
+   * sensitive routes accept only a distinct factor. Offering password, PIN or
+   * another SMS code here would let the member "succeed" at a step-up that the
+   * retried change then refuses again, so the picker is narrowed to the
+   * methods that can actually satisfy it.
+   */
+  const stepUp = await sensitiveStepUpDecision(session);
+  const availableMethods = stepUp.distinctFactorRequired
+    ? verifiable.filter((method) => stepUpProvesDistinctFactor(method))
+    : verifiable;
   return NextResponse.json({
-    recentAuth: isRecentAuth(session),
+    // Not "recent" for a sensitive change until the distinct factor is proved.
+    recentAuth: isRecentAuth(session) && !stepUp.distinctFactorRequired,
+    distinctFactorRequired: stepUp.distinctFactorRequired,
     recentAuthAt: session.recentAuthAt ?? session.iat ?? null,
     maxAgeSeconds: RECENT_AUTH_WINDOW_SECONDS,
     availableMethods,
@@ -114,11 +167,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     if (!session.platformUserId) {
       return NextResponse.json({ error: AUTH_ERROR_CODES.mfaRequired }, { status: 400 });
     }
-    const { rows } = await query<{ email: string | null }>(
-      `SELECT email::text AS email FROM users WHERE id = $1 AND business_id = $2`,
-      [session.sub, session.businessId],
-    );
-    const email = rows[0]?.email ?? "";
+    // The identity's own key (never a shared empty string) — see
+    // `stepUpIdentityKey`. The id is a unique last resort.
+    const email = (await stepUpIdentityKey(session)) ?? session.platformUserId;
     const challenge = await issueSmsMfaChallenge({
       subjectRealm: "platform_user",
       subjectId: session.platformUserId,
@@ -157,11 +208,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   }
   const { method, credential } = parsed.request;
 
-  const { rows: emailRows } = await query<{ email: string | null }>(
-    `SELECT email::text AS email FROM users WHERE id = $1 AND business_id = $2`,
-    [session.sub, session.businessId],
-  );
-  const email = emailRows[0]?.email ?? null;
+  const email = await stepUpIdentityKey(session);
 
   // Lockout is checked before the secret is touched, so a valid lockout cannot
   // be walked around by switching methods.
@@ -179,7 +226,11 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   switch (method) {
     case "password": {
-      if (!email) return NextResponse.json({ error: AUTH_ERROR_CODES.mfaRequired }, { status: 400 });
+      // The password belongs to the global identity; a member without one has
+      // nothing to verify (and no lockout key to count the guess under).
+      if (!session.platformUserId || !email) {
+        return NextResponse.json({ error: AUTH_ERROR_CODES.mfaRequired }, { status: 400 });
+      }
       verified = await verifyPassword(session.sub, credential);
       break;
     }
@@ -303,6 +354,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const nextToken = await signSession({
     ...session,
     recentAuthAt: nowSec,
+    /*
+     * #1386 — record what this step-up proved. TOTP / a recovery code clears
+     * an OTP-only session; an SMS step-up is itself SMS-only; a password or
+     * PIN refreshes the clock without upgrading what an OTP sign-in proved.
+     */
+    otpOnlyAssurance: otpOnlyAssuranceAfterStepUp(method, session.otpOnlyAssurance),
   });
 
   const res = NextResponse.json({

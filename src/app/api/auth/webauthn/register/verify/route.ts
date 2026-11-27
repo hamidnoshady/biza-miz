@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { RegistrationResponseJSON } from "@simplewebauthn/server";
 import { requireMember, withTenantScope } from "@/lib/auth";
-import { requireRecentAuth } from "@/lib/recent-auth";
+import { requireSensitiveRecentAuth } from "@/lib/sensitive-step-up";
 import { resolveWebauthnPolicy, webauthnPolicyDenial } from "@/lib/webauthn-access";
 import { resolveDeviceId } from "@/lib/device-service";
 import { requestHost } from "@/lib/host";
@@ -28,7 +28,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (denial) return denial;
 
   /** Issue #854 (P1.8): the ceremony's *storing* half needs the same bar. */
-  const recentAuthError = requireRecentAuth(session);
+  const recentAuthError = await requireSensitiveRecentAuth(session);
   if (recentAuthError) return recentAuthError;
 
   let body: {

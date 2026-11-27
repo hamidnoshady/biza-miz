@@ -80,7 +80,7 @@ import {
   type VariationSource,
   type VariationStatus,
 } from "@/lib/aec-commercial";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
+import { partyPageFrom, usePartyPicker, type WorkspaceLookups } from "../../use-workspace-lookups";
 import { DateCell, DateField, PickerField, SelectField, workspaceError } from "../../workspace-ui";
 
 /* ---------------------------------------------------------------------------
@@ -718,6 +718,11 @@ function VariationForm({
   const [reason, setReason] = useState(variation?.reason ?? "");
   const [contractId, setContractId] = useState(variation?.contractId ?? "");
   const [responsiblePartyId, setResponsiblePartyId] = useState(variation?.responsiblePartyId ?? "");
+  const partyPicker = usePartyPicker(
+    lookups.parties,
+    responsiblePartyId,
+    partyPageFrom(lookups),
+  );
   const [rfiId, setRfiId] = useState(variation?.rfiId ?? "");
   const [estimatedAmountRial, setEstimatedAmountRial] = useState(
     variation?.estimatedAmountRial ? String(variation.estimatedAmountRial) : "",
@@ -831,7 +836,12 @@ function VariationForm({
             label="طرف مسئول"
             value={responsiblePartyId}
             onChange={setResponsiblePartyId}
-            options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+            options={partyPicker.options}
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={partyPicker.setTerm}
+            searching={partyPicker.searching}
+            searchNote={partyPicker.note}
           />
           <PickerField
             label="استعلام مرتبط (RFI)"

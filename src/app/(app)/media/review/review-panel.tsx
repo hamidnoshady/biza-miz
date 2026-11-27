@@ -43,6 +43,8 @@ import {
   type MediaReviewRoundStatus,
 } from "@/lib/media-review";
 import { toPersianDigits } from "@/lib/digits";
+import { partyPageFrom, usePartyPicker } from "../../workspace/use-workspace-lookups";
+import { PickerField } from "../../workspace/workspace-ui";
 
 /* ---------------------------------------------------------------------------
  * Wire types, redeclared here on purpose.
@@ -267,6 +269,11 @@ export function ReviewPanel({ canManage }: { canManage: boolean }) {
   const [draftNote, setDraftNote] = useState("");
   const [draftProject, setDraftProject] = useState("");
   const [draftClient, setDraftClient] = useState("");
+  const clientPicker = usePartyPicker(
+    lookups?.parties ?? [],
+    draftClient,
+    partyPageFrom(lookups),
+  );
   const [draftAssets, setDraftAssets] = useState<PickedMedia[]>([]);
   const [draftFormats, setDraftFormats] = useState<Record<string, AgencyMediaFormat>>({});
 
@@ -542,20 +549,18 @@ export function ReviewPanel({ canManage }: { canManage: boolean }) {
             </select>
           </Field>
 
-          <Field label="کارفرما (اختیاری)">
-            <select
-              className={inputClass}
-              value={draftClient}
-              onChange={(event) => setDraftClient(event.target.value)}
-            >
-              <option value="">بدون کارفرما</option>
-              {(lookups?.parties ?? []).map((party) => (
-                <option key={party.id} value={party.id}>
-                  {party.name}
-                </option>
-              ))}
-            </select>
-          </Field>
+          <PickerField
+            label="کارفرما (اختیاری)"
+            value={draftClient}
+            onChange={setDraftClient}
+            options={clientPicker.options}
+            placeholder="بدون کارفرما"
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={clientPicker.setTerm}
+            searching={clientPicker.searching}
+            searchNote={clientPicker.note}
+          />
 
           {/* The picker takes one kind at a time, so the member chooses which
               kind they are adding rather than the dialog pretending to span

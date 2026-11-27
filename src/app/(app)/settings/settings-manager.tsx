@@ -62,6 +62,7 @@ import { ShiftHistorySettings } from "./shift-history-settings";
 import { TaxSettings } from "./tax-settings";
 import { CloudSyncSettings } from "./cloud-sync-settings";
 import { DesktopUpdateSettings } from "./desktop-update-settings";
+import { DesktopBusinessSwitch } from "./desktop-business-switch";
 import { cardClass } from "@/app/dashboard/page-chrome";
 
 interface SettingsManagerProps {
@@ -238,6 +239,12 @@ export function SettingsManager({
 
       {activeTab === "business" ? (
         <div className="space-y-4">
+          {/*
+            Issue #1572 — the in-app «تغییر کسب‌وکار» action. The panel renders
+            nothing outside the desktop app or for a single-business install,
+            so the browser's business section is unchanged.
+          */}
+          <DesktopBusinessSwitch />
           <BusinessSettings />
           {/*
             Issue #799 Wave 2 — an AEC business's operating profile lives in

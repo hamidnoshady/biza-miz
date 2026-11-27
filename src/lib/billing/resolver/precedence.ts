@@ -47,6 +47,7 @@ export type CommercialModel = "subscription" | "payg" | "hybrid";
  * cannot silently reorder.
  */
 export const COMMERCIAL_MODEL_PRECEDENCE = [
+  "complimentary_grant_waiver",
   "prepaid_term_coverage",
   "approved_plan_inclusion_or_discount",
   "usage_allowance_then_overage",
@@ -119,8 +120,16 @@ export interface ChargeRequest {
   allowance?: MeterAllowance | null;
   providerCostRial?: number | null;
   providerCostPolicy?: ProviderCostPolicy | null;
-  /** A purchased prepaid service term covering `at`, if any. */
+  /** A purchased prepaid service term or active grant covering `at`, if any. */
   coverage?: PrepaidCoverage | null;
+  /**
+   * An active, authorized complimentary grant waives this charge for its
+   * covered interval (GitHub #1579). It is supplied only by the canonical
+   * resolver from a stored grant — never from a client — and it can zero a
+   * setup charge even when no tariff is published, because the grant is the
+   * explicit commercial authority to do so.
+   */
+  waivedByGrant?: boolean;
   /**
    * `tariff` (the default) prices one period of use. `prepaid_term` prices the
    * purchase of a whole published prepaid term — it is not "coverage", it is
@@ -134,6 +143,7 @@ export interface ChargeRequest {
 export type ChargeExplanationCode =
   | "published_tariff"
   | "published_free"
+  | "complimentary_grant"
   | "plan_included"
   | "plan_included_tariff_permitted"
   | "plan_discounted"
@@ -346,6 +356,13 @@ function resolveOne(
   if (request.identity.kind === "access") {
     netRial = 0;
     explanation.code = "plan_included";
+  } else if (request.waivedByGrant === true) {
+    // A stored, active complimentary grant covers this charge. It is explicit
+    // commercial authority, so it may zero the line even with no published
+    // tariff — unlike a missing tariff, which still fails closed below.
+    inclusionRial = grossRial;
+    netRial = 0;
+    explanation.code = "complimentary_grant";
   } else if (covered) {
     coveredByPrepaidTerm = true;
     netRial = 0;

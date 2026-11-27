@@ -37,7 +37,52 @@ export type SetupAppUnavailableReason =
   | "industry"
   | "deployment"
   | "availability"
-  | "tariff";
+  | "tariff"
+  /** Removed from the public signup offer by an active Superadmin policy. */
+  | "not_selectable";
+
+/**
+ * The effective commercial offer shown on a signup card (GitHub #1579).
+ *
+ * `standard` means ordinary published pricing; the two free modes carry the
+ * waived charges so the card and the confirmation can be truthful. Metered
+ * consumption (AI, SMS, provider costs) is never included in any of them.
+ */
+export interface SetupAppOffer {
+  mode: "standard" | "free_days" | "free_indefinite" | "not_selectable";
+  freeDays: number | null;
+  waiveSetup: boolean;
+  waiveRental: boolean;
+  /** The scope that produced the offer — global, business type, or business. */
+  scope: "global" | "business_type" | "business" | null;
+  policyVersion: number | null;
+}
+
+export const STANDARD_SETUP_OFFER: SetupAppOffer = {
+  mode: "standard",
+  freeDays: null,
+  waiveSetup: false,
+  waiveRental: false,
+  scope: null,
+  policyVersion: null,
+};
+
+/** The truthful Persian badge for an offer, or null for ordinary paid access. */
+export function setupAppOfferLabel(offer: SetupAppOffer): string | null {
+  if (offer.mode === "free_days") return `${offer.freeDays ?? 0} روز رایگان`;
+  if (offer.mode === "free_indefinite") return "رایگان دائمی";
+  if (offer.mode === "not_selectable") return "فعلاً در دسترس نیست";
+  return "نیاز به پرداخت";
+}
+
+/** Whether the offer removes both the setup fee and the rental charge. */
+export function isFullyComplimentaryOffer(offer: SetupAppOffer): boolean {
+  return (
+    (offer.mode === "free_days" || offer.mode === "free_indefinite") &&
+    offer.waiveSetup &&
+    offer.waiveRental
+  );
+}
 
 export interface SetupAppCard {
   key: AppKey;
@@ -50,6 +95,10 @@ export interface SetupAppCard {
   selectable: boolean;
   unavailableReason: SetupAppUnavailableReason | null;
   pricing: SetupAppPricing | null;
+  /** The effective signup offer; never inferred from a missing tariff. */
+  offer: SetupAppOffer;
+  /** The card's badge text, already localized for display. */
+  offerLabel: string | null;
   selected: boolean;
   /** True when this app has resumable per-app setup answers saved. */
   hasSetupProgress: boolean;
@@ -139,11 +188,15 @@ function firstReason(
   profile: DeploymentProfile,
   available: boolean,
   pricing: SetupAppPricing | null,
+  /** An explicit, fully complimentary policy authorizes a zero-cost offer. */
+  freeActivatable: boolean,
 ): SetupAppUnavailableReason | null {
   if (!industrySupportsApp(industry, app)) return "industry";
   if (!deploymentSupportsApp(profile, app)) return "deployment";
   if (!available) return "availability";
-  if (!pricing) return "tariff";
+  // A missing tariff is only survivable under an explicit fully-complimentary
+  // policy; every other case still fails closed.
+  if (!pricing && !freeActivatable) return "tariff";
   return null;
 }
 
@@ -174,19 +227,28 @@ export function buildSetupAppCard(input: {
   deploymentProfile: DeploymentProfile;
   available: boolean;
   pricing: SetupAppPricing | null;
+  offer?: SetupAppOffer | null;
   selected: boolean;
   hasSetupProgress?: boolean;
   setupComplete?: boolean;
   nextStep?: string | null;
   activation?: SetupAppCard["activation"];
 }): SetupAppCard {
-  const reason = firstReason(
+  const offer = input.offer ?? STANDARD_SETUP_OFFER;
+  // A policy can make an app unselectable even when it is technically ready;
+  // the technical reasons always come first because they are stronger.
+  const technicalReason = firstReason(
     input.industry,
     input.app,
     input.deploymentProfile,
     input.available,
     input.pricing,
+    // A fully complimentary offer may activate without a published paid
+    // tariff, so the tariff is not a blocker in that case.
+    isFullyComplimentaryOffer(offer),
   );
+  const reason =
+    technicalReason ?? (offer.mode === "not_selectable" ? "not_selectable" : null);
   return {
     key: input.app.key,
     label: input.app.label,
@@ -198,6 +260,8 @@ export function buildSetupAppCard(input: {
     selectable: reason === null,
     unavailableReason: reason,
     pricing: input.pricing,
+    offer,
+    offerLabel: setupAppOfferLabel(offer),
     selected: input.selected,
     hasSetupProgress: input.hasSetupProgress === true,
     setupComplete: input.setupComplete === true,
@@ -210,9 +274,14 @@ export function buildSetupAppCard(input: {
 export function setupAppTotals(cards: readonly SetupAppCard[]): SetupAppTotals {
   return cards.reduce<SetupAppTotals>(
     (totals, card) => {
-      if (!card.selected || !card.pricing) return totals;
-      totals.setupRial += card.pricing.setupRial;
-      totals.estimated24hRial += card.pricing.estimated24hRial;
+      if (!card.selected) return totals;
+      // A waived charge contributes nothing to the owner's expected total.
+      if (card.pricing && !(card.offer.mode !== "standard" && card.offer.waiveSetup)) {
+        totals.setupRial += card.pricing.setupRial;
+      }
+      if (card.pricing && !(card.offer.mode !== "standard" && card.offer.waiveRental)) {
+        totals.estimated24hRial += card.pricing.estimated24hRial;
+      }
       return totals;
     },
     { setupRial: 0, estimated24hRial: 0 },

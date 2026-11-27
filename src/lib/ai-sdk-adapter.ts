@@ -15,6 +15,11 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createUIMessageStream, createUIMessageStreamResponse, generateText, isStepCount, jsonSchema, streamText, tool, type UIMessage, type LanguageModel, type ModelMessage, type ToolSet } from "ai";
 import type { OpenAiTool } from "./ai";
+import {
+  selectAiTools,
+  type AiToolSelectionDiagnostics,
+  type AiToolSelectionInput,
+} from "./ai-tool-selection";
 import { toolProgressEvent, type AiToolProgressEvent } from "./ai-tool-progress";
 
 export interface GatewayModelSettings {
@@ -79,6 +84,27 @@ export function sdkToolsFrom(
     });
   }
   return tools;
+}
+
+/**
+ * Issue #1546 Phase 2 — the SDK half of context-aware selection.
+ *
+ * The declarations still come from `ai.ts`; this helper applies the same
+ * `selectAiTools` decision the tenant loop uses, then hands the surviving
+ * declarations to `sdkToolsFrom`. There is no second schema, no extra model
+ * call and no separate tool loop: a caller that switches transport keeps the
+ * same active set.
+ */
+export function sdkToolsFromSelection(
+  input: AiToolSelectionInput,
+  execute: (name: string, args: Record<string, unknown>) => Promise<string>,
+  hooks?: { onToolProgress?: (event: AiToolProgressEvent) => void; round?: number },
+): { tools: ToolSet; diagnostics: AiToolSelectionDiagnostics } {
+  const selection = selectAiTools(input);
+  return {
+    tools: sdkToolsFrom(selection.tools, execute, hooks),
+    diagnostics: selection.diagnostics,
+  };
 }
 
 export interface SdkTurnInput {

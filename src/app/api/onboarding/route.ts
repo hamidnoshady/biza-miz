@@ -231,6 +231,8 @@ async function submit(request: Request, platformUserId: string): Promise<NextRes
         employeeSessionId: opened.session.id,
         mfaVerified: false,
         recentAuthAt: Math.floor(Date.now() / 1000),
+        // #1386 — the continuation was proved by the signup SMS OTP alone.
+        otpOnlyAssurance: true,
       })
     : null;
 

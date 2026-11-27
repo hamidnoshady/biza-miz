@@ -8,6 +8,8 @@ import {
   type PromptContext,
 } from "@/lib/ai";
 import { getBusinessIndustry } from "@/lib/industry-guard";
+import { appForPagePath } from "@/lib/app-availability";
+import { effectiveAppAvailability } from "@/lib/app-availability-service";
 import { workspaceAccessFor } from "@/lib/workspace-access";
 import { APP_KEYS, type AppKey } from "@/lib/apps";
 import { eligibleAgentCards, type EligibleAgentCard } from "@/lib/ai-system-agents";
@@ -54,6 +56,7 @@ import {
 import {
   resolveTenantTaskFeatures,
   taskDirectiveFor,
+  type AiTaskFeatureKey,
 } from "@/lib/ai-tasks";
 import { effectiveFeatures } from "@/lib/features";
 import {
@@ -125,6 +128,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     runtimeMode?: unknown;
     /** Optional app focus, which only narrows prompt/tool context. */
     appFocus?: unknown;
+    /**
+     * Issue #1546 Phase 2 — the tenant page the compact assistant is docked
+     * beside. A client hint only: the server maps it through the central route
+     * registry, validates the app, and it can only narrow the tool offer.
+     */
+    routePath?: unknown;
   };
   try {
     body = await request.json();
@@ -156,6 +165,49 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (guard.error) return guard.error;
   const session = guard.session;
   const effectivePermissions = guard.membership?.permissions ?? new Set();
+
+  /**
+   * Issue #1546 Phase 2 — one trusted read of the tenant's app/feature state per
+   * request. The selector and the agent-card eligibility check consume the same
+   * answer, so they cannot disagree. A failed read is treated as "not resolved"
+   * rather than silently disabling every app or feature: permissions and the
+   * executors remain the authorization boundary.
+   */
+  type TenantAccess = {
+    industry: string | null;
+    usableApps: AppKey[] | undefined;
+    taskFeatures: Partial<Record<AiTaskFeatureKey, boolean>> | null;
+  };
+  let tenantAccessPromise: Promise<TenantAccess> | null = null;
+  function loadTenantAccess(): Promise<TenantAccess> {
+    if (!tenantAccessPromise) {
+      tenantAccessPromise = (async () => {
+        const [industry, rawFeatures, availability] = await Promise.all([
+          getBusinessIndustry(session.businessId).catch(() => null),
+          effectiveFeatures(session.businessId).catch(() => null),
+          mode === "dashboard"
+            ? effectiveAppAvailability(session.businessId).catch(() => null)
+            : Promise.resolve(null),
+        ]);
+        const usableApps = availability
+          ? APP_KEYS.filter((app) => availability[app]?.usable !== false)
+          : undefined;
+        const usableAppMap = availability
+          ? (Object.fromEntries(
+              APP_KEYS.map((app) => [app, availability[app]?.usable !== false]),
+            ) as Partial<Record<AppKey, boolean>>)
+          : null;
+        const taskFeatures = rawFeatures
+          ? resolveTenantTaskFeatures(rawFeatures, {
+              industry,
+              usableApps: usableAppMap,
+            })
+          : null;
+        return { industry, usableApps, taskFeatures };
+      })();
+    }
+    return tenantAccessPromise;
+  }
   // Issue #1367 — an explicit `deep_research` request is refused rather than
   // remapped. Turning it into Auto or Thinking would answer a different
   // question than the caller asked, and would hide a client that still believes
@@ -225,12 +277,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   let agentCard: EligibleAgentCard | null = null;
   const suggestionId = typeof body.suggestionId === "string" ? body.suggestionId.trim() : "";
   if (mode === "dashboard" && suggestionId) {
+    // Issue #1546 Phase 2 — eligibility used to be checked with empty app and
+    // feature lists, so a card that required either could never be offered.
+    // Resolve the same trusted state the tool selector uses.
+    const access = await loadTenantAccess();
     const cards = await eligibleAgentCards({
       businessId: session.businessId,
-      businessType: await getBusinessIndustry(session.businessId),
+      businessType: access.industry,
       permissions: [...effectivePermissions],
-      enabledApps: [],
-      enabledFeatures: [],
+      enabledApps: access.usableApps ?? [],
+      enabledFeatures: access.taskFeatures
+        ? Object.entries(access.taskFeatures)
+            .filter(([, enabled]) => enabled === true)
+            .map(([key]) => key)
+        : [],
     });
     agentCard = cards.find((card) => card.assignmentId === suggestionId) ?? null;
     if (!agentCard) {
@@ -284,26 +344,43 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const appFocus = typeof body.appFocus === "string" && appFocusValues.has(body.appFocus)
     ? body.appFocus
     : "all";
-  /** The AppKey this turn is focused on, or null when it is not app-focused. */
-  const focusedApp: AppKey | null = APP_KEYS.includes(appFocus as AppKey) ? (appFocus as AppKey) : null;
-  const appFocusDirective =
-    appFocus === "all"
-      ? ""
-      : `تمرکز این نوبت روی بخش «${appFocus}» است؛ فقط ابزارهای مجاز همین عضو را استفاده کن و این انتخاب هرگز مجوز تازه‌ای ایجاد نمی‌کند.`;
+  /**
+   * Issue #1546 Phase 2 — the compact assistant's current page is a hint, not
+   * a grant. It is mapped through the same route→module→app registry the shell
+   * uses, and the selector still intersects it with usable apps and permissions.
+   */
+  const routePath = typeof body.routePath === "string" &&
+    body.routePath.startsWith("/") &&
+    body.routePath.length <= 512
+    ? body.routePath
+    : null;
+  const routeApp: AppKey | null = mode === "dashboard" && routePath
+    ? appForPagePath(routePath)
+    : null;
   const hasPresetTask =
     typeof body.task === "string" &&
     body.task.trim() !== "" &&
     body.task !== "general" &&
     body.task !== "custom";
-  const [taskIndustry, rawTaskFeatures] = hasPresetTask
-    ? await Promise.all([
-        getBusinessIndustry(session.businessId).catch(() => null),
-        effectiveFeatures(session.businessId).catch(() => null),
-      ])
-    : [null, null];
-  const taskFeatures = rawTaskFeatures
-    ? resolveTenantTaskFeatures(rawTaskFeatures, { industry: taskIndustry })
+  // The selector needs the tenant's app/feature state on every dashboard turn,
+  // not only when a task lens is chosen. One cached read serves the agent-card
+  // check, the task directive, and the tool selector.
+  const access = hasPresetTask || mode === "dashboard" ? await loadTenantAccess() : null;
+  const taskIndustry = access?.industry ?? null;
+  const taskFeatures = access?.taskFeatures ?? null;
+  /**
+   * A client focus is clamped to an app this business can actually use. If it
+   * names a disabled/unknown app it is dropped (never converted into a grant),
+   * and the selector falls through to the route hint or the message/task lens.
+   */
+  const focusedApp: AppKey | null = APP_KEYS.includes(appFocus as AppKey) &&
+    (access?.usableApps ? access.usableApps.includes(appFocus as AppKey) : true)
+    ? (appFocus as AppKey)
     : null;
+  const appFocusDirective =
+    appFocus === "all" || (appFocus !== "workspace" && appFocus !== "floor" && !focusedApp)
+      ? ""
+      : `تمرکز این نوبت روی بخش «${appFocus}» است؛ فقط ابزارهای مجاز همین عضو را استفاده کن و این انتخاب هرگز مجوز تازه‌ای ایجاد نمی‌کند.`;
   // Issue #812 §7/§8 — the runtime mode's own directive is layer 2 of the
   // resolver, not part of the task directive. What is left here is the task
   // lens and the app focus, both of which narrow rather than widen.
@@ -424,6 +501,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       : undefined,
   };
   const latestPrompt = [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
+  // Issue #1546 Phase 2 — an assigned agent's own app focus is trusted server
+  // context (the card was re-validated above). It narrows the tool offer like a
+  // focus hint; the agent's tool allowlist and the member's permissions still
+  // decide what may run.
+  const agentFocus = agentCard?.appFocus ?? "all";
+  const agentApp: AppKey | null = APP_KEYS.includes(agentFocus as AppKey)
+    ? (agentFocus as AppKey)
+    : null;
+  const agentWorkspaceFocus = agentFocus === "workspace";
 
   // Best-effort transcript persistence (Wave 1, issue #141) — sits beside the
   // metered turn below, not inside it: it never touches billing and a
@@ -559,7 +645,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             businessId: session.businessId,
             agentKey: agentCard?.agentKey ?? null,
             businessType: promptContext.industry,
-            appKey: appFocus === "all" ? null : (appFocus as AppKey | null),
+            appKey: focusedApp,
             hasAttachment: attachments.length > 0,
             // Issue #812 §2 — the knowledge tool is offered only when the
             // managed, tenant-isolated knowledge integration is configured.
@@ -600,7 +686,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             // tools to its allowlist and the proposable actions to its action
             // list. Both are re-checked in runAgentTurn, so a hand-crafted
             // response naming an out-of-scope action is refused, not applied.
-            toolAllowlist: agentCard?.allowedTools ?? undefined,
+            // An empty read allowlist means "the persona names no tool", which
+            // `agentToolsForTurn` already treats as no read restriction; passing
+            // `[]` here used to strip every read tool instead.
+            toolAllowlist:
+              agentCard && agentCard.allowedTools.length > 0
+                ? agentCard.allowedTools
+                : undefined,
             actionTypes: (agentCard?.allowedActions ?? undefined) as ActionType[] | undefined,
             // Issue #812 §11 — App Focus narrows the live tool catalogue, not
             // just the prompt. A prompt line asking the model to focus is
@@ -610,6 +702,20 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             // `toolDefinitions` and an agent's narrowing is the narrower of the
             // two by construction.
             appFocus: focusedApp,
+            // Issue #1546 Phase 2 — the server-resolved selection context. The
+            // client focus and route path are hints; apps, features, branch
+            // scope and the agent focus come from trusted state and can only
+            // remove catalogue entries.
+            toolSelection: {
+              routeApp,
+              agentApp,
+              workspaceFocus: appFocus === "workspace" || agentWorkspaceFocus,
+              enabledApps: access?.usableApps,
+              enabledFeatures: taskFeatures ?? undefined,
+              industry: access?.industry ?? null,
+              branchScope: guard.membership?.locationScope ?? null,
+              locationScoped: Boolean(locationId),
+            },
             // Phase F pt.2 — a non-agent project turn also offers the
             // project-scoped action(s); runAgentTurn re-checks the enum.
             projectScoped: Boolean(activeProjectId) && !agentCard,
@@ -631,7 +737,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
                   scope: {
                     businessId: session.businessId,
                     locationId,
-                    appKey: appFocus === "all" ? null : appFocus,
+                    appKey: focusedApp ?? (appFocus === "workspace" ? "workspace" : null),
                     projectId: activeProjectId,
                   },
                 }

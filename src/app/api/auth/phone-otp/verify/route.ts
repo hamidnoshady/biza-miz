@@ -573,6 +573,15 @@ async function completePhoneLogin(
       employeeSessionId: employeeSession.id,
       mfaVerified: false,
       recentAuthAt: Math.floor(Date.now() / 1000),
+      /*
+       * #1386 — this session exists without any distinct factor having been
+       * proved on this request (none was due, or device trust waived it). A
+       * routine sign-in is complete on the SMS proof, but sensitive security
+       * changes on an account holding a TOTP must ask for it first
+       * (`requireSensitiveRecentAuth`). The OTP + TOTP path mints its session
+       * in `/api/auth/mfa/verify` without this claim.
+       */
+      otpOnlyAssurance: true,
     });
 
     const res = NextResponse.json({

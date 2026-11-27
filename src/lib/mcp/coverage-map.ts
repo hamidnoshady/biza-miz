@@ -262,6 +262,15 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "integration/fixed-assets.integration.test.ts",
   },
   {
+    id: "accounting.intangible-assets",
+    module: "Accounting",
+    entity: "Intangible assets (register, amortize, impair, dispose)",
+    routes: ["ledger/intangible-assets"],
+    note: "no MCP verbs yet: the register is API-only until its reporting surface lands, so an AI client cannot amortize or impair an asset behind the tenant's back (#1326 tracks the verbs)",
+    status: "route-only (by design)",
+    test: "integration/intangible-assets.integration.test.ts",
+  },
+  {
     id: "accounting.payroll",
     module: "Accounting",
     entity: "Payroll (settings, staff, runs, advances)",
@@ -1691,6 +1700,16 @@ export const PLATFORM_COVERAGE: CoverageEntity[] = [
     note:
       "issue #902 §9 item 3: turning a month's ratings into an invoice line (and citing the price version that produced each line) is a money action with a platform audit, and the read half is a preview of what a month would bill. Both stay on the console: a chat-channel verb that issues invoices would post a receivable on someone else's word.",
     test: "integration/billing-usage-invoice.integration.test.ts",
+  },
+  {
+    id: "platform.billing-grants",
+    module: "Platform — Billing",
+    entity: "Per-business complimentary grants (free coverage windows)",
+    routes: ["platform/billing/grants"],
+    status: "route-only (by design)",
+    note:
+      "issue #1579: extending or revoking a complimentary grant changes what a business is charged, so it stays a named operator act with a reason and a platform audit row — never a chat-channel verb. The read half names one tenant's commercial exception, which the console's billing page already shows.",
+    test: "src/lib/complimentary-grants.test.ts",
   },
   {
     id: "platform.services",

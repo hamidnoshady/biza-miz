@@ -66,7 +66,16 @@ export async function readSelfCredentialState(
     `SELECT u.platform_user_id,
             p.password_hash,
             coalesce(ec.secret_hash, u.pin_hash) AS pin_hash,
-            u.phone_verified_at,
+            coalesce(
+              u.phone_verified_at,
+              CASE
+                WHEN p.phone_verified_at IS NOT NULL
+                 AND p.phone_e164 IS NOT NULL
+                 AND (u.phone_e164 IS NULL OR u.phone_e164 = p.phone_e164)
+                THEN p.phone_verified_at
+                ELSE NULL
+              END
+            ) AS phone_verified_at,
             (SELECT array_agg(e.method::text)
                FROM mfa_enrolments e
               WHERE e.subject_realm = 'platform_user'

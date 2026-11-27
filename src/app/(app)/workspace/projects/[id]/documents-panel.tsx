@@ -62,6 +62,7 @@ import {
   overlayPanelClass,
 } from "@/app/dashboard/page-chrome";
 import { api, ErrorBox, Field, inputClass, PrimaryButton, SecondaryButton } from "@/app/dashboard/ui";
+import { SearchField } from "@/app/dashboard/filters";
 import { mediaFileUrl } from "@/app/dashboard/media/media-picker";
 import { toPersianDigits } from "@/lib/digits";
 import { formatJalali } from "@/lib/jalali";
@@ -76,7 +77,12 @@ import {
   type TransmittalStatus,
 } from "@/lib/aec-docs";
 import { AEC_SPECIALTIES, AEC_SPECIALTY_LABELS, type AecSpecialty } from "@/lib/aec";
-import type { WorkspaceLookups } from "../../use-workspace-lookups";
+import {
+  partyPageFrom,
+  usePartyPicker,
+  usePartyPickerList,
+  type WorkspaceLookups,
+} from "../../use-workspace-lookups";
 import { DateField, DateCell, PickerField, SelectField, workspaceError } from "../../workspace-ui";
 
 /* ---------------------------------------------------------------------------
@@ -1125,6 +1131,16 @@ function TransmittalDialog({
       requiresAcknowledgement: recipient.requiresAcknowledgement,
     })) ?? [],
   );
+  const senderPicker = usePartyPicker(
+    lookups.parties,
+    senderPartyId,
+    partyPageFrom(lookups),
+  );
+  const recipientList = usePartyPickerList(
+    lookups.parties,
+    recipients.map((recipient) => recipient.partyId),
+    partyPageFrom(lookups),
+  );
   const [pickDrawingId, setPickDrawingId] = useState("");
   const [pickRevisionId, setPickRevisionId] = useState("");
   const [revisions, setRevisions] = useState<DrawingRevision[]>([]);
@@ -1229,7 +1245,12 @@ function TransmittalDialog({
             label="فرستنده"
             value={senderPartyId}
             onChange={setSenderPartyId}
-            options={lookups.parties.map((party) => ({ id: party.id, label: party.name }))}
+            options={senderPicker.options}
+            searchable
+            searchPlaceholder="جست‌وجوی طرف…"
+            onSearch={senderPicker.setTerm}
+            searching={senderPicker.searching}
+            searchNote={senderPicker.note}
             placeholder="— خود ما —"
           />
           <SelectField
@@ -1296,13 +1317,22 @@ function TransmittalDialog({
 
           <div className="sm:col-span-2 rounded-xl border border-border/80 p-3">
             <p className="mb-2 text-sm font-medium">گیرندگان</p>
-            {lookups.parties.length === 0 ? (
+            <SearchField
+              value={recipientList.term}
+              onChange={recipientList.setTerm}
+              label="جست‌وجوی گیرنده"
+              placeholder="جست‌وجوی گیرنده…"
+              className="mb-2"
+            />
+            {recipientList.options.length === 0 ? (
               <p className="text-xs text-muted-foreground">
-                طرفی در فهرست «اشخاص» ثبت نشده است؛ گیرنده باید یکی از طرف‌های همین کسب‌وکار باشد.
+                {recipientList.term.trim()
+                  ? "طرفی با این نام پیدا نشد."
+                  : "طرفی در فهرست «اشخاص» ثبت نشده است؛ گیرنده باید یکی از طرف‌های همین کسب‌وکار باشد."}
               </p>
             ) : (
               <ul className="flex flex-col gap-2">
-                {lookups.parties.map((party) => {
+                {recipientList.options.map((party) => {
                   const picked = recipients.find((recipient) => recipient.partyId === party.id);
                   return (
                     <li key={party.id} className="flex flex-wrap items-center gap-3 text-sm">
@@ -1312,7 +1342,7 @@ function TransmittalDialog({
                           checked={Boolean(picked)}
                           onChange={() => toggleRecipient(party.id)}
                         />
-                        {party.name}
+                        {party.label}
                       </label>
                       {picked ? (
                         <label className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -1337,6 +1367,9 @@ function TransmittalDialog({
                 })}
               </ul>
             )}
+            {recipientList.note ? (
+              <span className="text-xs text-muted-foreground">{recipientList.note}</span>
+            ) : null}
           </div>
 
           <div className="sm:col-span-2">

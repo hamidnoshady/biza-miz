@@ -41,9 +41,15 @@ export interface ReplicatedLoginCredential {
    * field, which keeps v1 behaviour deliberately.
    */
   platformUserId?: string | null;
-  email: string;
+  /** Nullable for phone-first global identities (ESH-199 / #1384). */
+  email: string | null;
   fullName: string;
-  passwordHash: string;
+  /** Nullable for passwordless global identities (ESH-199 / #1384). */
+  passwordHash: string | null;
+  /** Canonical E.164 phone on the global identity, when present (ESH-199). */
+  phoneE164?: string | null;
+  /** True when `phoneE164` is verified on `platform_users`. */
+  phoneVerified?: boolean;
   isActive: boolean;
   /** Monotonic version incremented on password change or global sign-out. */
   tokenVersion?: number;
@@ -73,16 +79,31 @@ export interface ReplicatedLoginCredential {
 export function loginCredentialsFingerprint(credentials: readonly ReplicatedLoginCredential[]): string {
   const canonical = [...credentials]
     .sort((a, b) => a.membershipId.localeCompare(b.membershipId))
-    .map((c) => ({
-      ...c,
-      platformUserId: normalizeIdentityId(c.platformUserId),
-      email: c.email.trim().toLowerCase(),
-      tokenVersion: c.tokenVersion ?? 1,
-      mfa: [...c.mfa].sort((a, b) => a.method.localeCompare(b.method)),
-      recoveryCodes: [...c.recoveryCodes]
-        .sort((a, b) => a.codeHash.localeCompare(b.codeHash))
-        .map((code) => ({ codeHash: code.codeHash, spent: code.usedAt !== null })),
-    }));
+    .map((c) => {
+      const normalizedPhone =
+        typeof c.phoneE164 === "string" && c.phoneE164.trim().length > 0
+          ? c.phoneE164.trim()
+          : null;
+      const base: Record<string, unknown> = {
+        ...c,
+        platformUserId: normalizeIdentityId(c.platformUserId),
+        email: typeof c.email === "string" ? c.email.trim().toLowerCase() : null,
+        passwordHash: c.passwordHash ?? null,
+        tokenVersion: c.tokenVersion ?? 1,
+        mfa: [...c.mfa].sort((a, b) => a.method.localeCompare(b.method)),
+        recoveryCodes: [...c.recoveryCodes]
+          .sort((a, b) => a.codeHash.localeCompare(b.codeHash))
+          .map((code) => ({ codeHash: code.codeHash, spent: code.usedAt !== null })),
+      };
+      if (normalizedPhone) {
+        base.phoneE164 = normalizedPhone;
+        base.phoneVerified = c.phoneVerified === true;
+      } else {
+        delete base.phoneE164;
+        delete base.phoneVerified;
+      }
+      return base;
+    });
   return createHash("sha256").update(stable(canonical)).digest("hex");
 }
 
@@ -99,6 +120,7 @@ export interface SpentRecoveryCode {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const E164 = /^\+[1-9][0-9]{7,14}$/;
 
 function isCredentialRecord(value: unknown): value is ReplicatedLoginCredential {
   if (!value || typeof value !== "object") return false;
@@ -109,8 +131,25 @@ function isCredentialRecord(value: unknown): value is ReplicatedLoginCredential 
   // be a real UUID, never a half-sent identifier we would bind a row to.
   if (record.platformUserId !== undefined && record.platformUserId !== null
     && (typeof record.platformUserId !== "string" || !UUID.test(record.platformUserId))) return false;
-  if (typeof record.email !== "string" || typeof record.fullName !== "string") return false;
-  if (typeof record.passwordHash !== "string" || record.passwordHash.length === 0) return false;
+  if (typeof record.fullName !== "string") return false;
+  const hasEmail = typeof record.email === "string" && record.email.trim().length > 0;
+  if (record.email !== null && !hasEmail) return false;
+  if (
+    record.phoneE164 !== undefined &&
+    record.phoneE164 !== null &&
+    (typeof record.phoneE164 !== "string" || !E164.test(record.phoneE164.trim()))
+  ) {
+    return false;
+  }
+  const hasPhone = typeof record.phoneE164 === "string" && E164.test(record.phoneE164.trim());
+  if (!hasEmail && !hasPhone) return false;
+  if (record.phoneVerified !== undefined && typeof record.phoneVerified !== "boolean") return false;
+  if (
+    record.passwordHash !== null &&
+    (typeof record.passwordHash !== "string" || record.passwordHash.length === 0)
+  ) {
+    return false;
+  }
   if (typeof record.isActive !== "boolean") return false;
   if (record.tokenVersion !== undefined && (typeof record.tokenVersion !== "number" || !Number.isFinite(record.tokenVersion))) return false;
   if (!Array.isArray(record.mfa) || !record.mfa.every((entry) => {
@@ -420,9 +459,12 @@ export function planIdentityBinding(input: {
   canonicalRowExists: boolean;
   /** The ID of the (unique) local row holding the credential's email. */
   emailRowId: string | null;
+  /** The ID of the (unique) local row holding the credential's verified phone. */
+  phoneRowId?: string | null;
 }): IdentityBindingPlan {
   const canonical = normalizeIdentityId(input.platformUserId);
   const emailRowId = input.emailRowId ? normalizeIdentityId(input.emailRowId) : null;
+  const phoneRowId = input.phoneRowId ? normalizeIdentityId(input.phoneRowId) : null;
   const linked = input.linkedPlatformUserId ? normalizeIdentityId(input.linkedPlatformUserId) : null;
 
   if (canonical) {
@@ -432,6 +474,9 @@ export function planIdentityBinding(input: {
       // (references move with it), preserving password/MFA/token version.
       return { platformUserId: canonical, rekeyFrom: emailRowId, insert: false };
     }
+    if (!emailRowId && phoneRowId && phoneRowId !== canonical) {
+      return { platformUserId: canonical, rekeyFrom: phoneRowId, insert: false };
+    }
     // No row for this person yet — or the membership is linked to a row that
     // is *not* this person (its email is not the credential's). Create the
     // canonical identity and relink; never overwrite the other row, which may
@@ -440,8 +485,9 @@ export function planIdentityBinding(input: {
   }
 
   // Legacy payload (contract v1): no canonical ID to bind to. Same person by
-  // unique email first, else today's linked row, else a plain insert.
+  // unique email first, else verified phone, else today's linked row, else a plain insert.
   if (emailRowId) return { platformUserId: emailRowId, rekeyFrom: null, insert: false };
+  if (phoneRowId) return { platformUserId: phoneRowId, rekeyFrom: null, insert: false };
   if (linked) return { platformUserId: linked, rekeyFrom: null, insert: false };
   return { platformUserId: null, rekeyFrom: null, insert: true };
 }

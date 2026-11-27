@@ -18,6 +18,11 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
   start_guided_tour: PERMISSIONS.aiUse,
   recommend_learning: PERMISSIONS.aiUse,
   show_report_widget: PERMISSIONS.aiUse,
+  // Issue #1546 — the knowledge tool was declared, routed and named in the
+  // system prompt but had no permission entry, so the fail-closed filter removed
+  // it from every tenant turn. Searching the tenant's own configured knowledge
+  // namespace is an assistant read, exactly like navigation/learning above.
+  search_business_knowledge: PERMISSIONS.aiUse,
   get_setup_state: PERMISSIONS.settingsManage,
   list_reports: PERMISSIONS.reportsView,
   run_report: PERMISSIONS.reportsView,

@@ -19,6 +19,7 @@ const ERROR_STATUS: Record<OwnerProfileError, number> = {
   invalid_phone: 400,
   no_changes: 400,
   email_taken: 409,
+  phone_taken: 409,
   cross_business_confirmation_required: 409,
   identity_missing: 409,
 };
@@ -96,19 +97,26 @@ export const PATCH = withPlatformScope(async (request: NextRequest, ctx: Ctx) =>
     entity: "user",
     entityId: result.after.membershipId,
     // Before/after, and nothing else: an audit row that carried a credential
-    // would be worse than no audit row (same rule as provisioning).
+    // would be worse than no audit row (same rule as provisioning). The
+    // membership copies (`users.email` / `users.phone_e164`) move with the
+    // identity in the same transaction, so they are recorded too — an auditor
+    // comparing against the tenant's rows must not see unexplained drift.
     payload: {
       reason,
       before: {
         fullName: result.before.fullName,
         email: result.before.email,
         phone: result.before.mfa.phoneE164,
+        membershipEmail: result.before.membershipEmail,
+        membershipPhone: result.before.membershipPhone,
         membershipActive: result.before.membershipActive,
       },
       after: {
         fullName: result.after.fullName,
         email: result.after.email,
         phone: result.after.mfa.phoneE164,
+        membershipEmail: result.after.membershipEmail,
+        membershipPhone: result.after.membershipPhone,
         membershipActive: result.after.membershipActive,
       },
       notices: result.notices,

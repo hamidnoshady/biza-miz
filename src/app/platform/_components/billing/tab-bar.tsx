@@ -21,6 +21,8 @@ export const BILLING_TABS = [
   // Issue #1041 — the per-service tariff and the destruction window are part
   // of the commercial console: money in (setup + hourly) and data out.
   { key: "services", label: "سرویس‌ها و نرخ ساعتی", cap: "billing.manage" },
+  // GitHub #1579 — how each app is offered and activated during signup.
+  { key: "signup", label: "دسترسی برنامه در ثبت‌نام", cap: "billing.manage" },
   { key: "retention", label: "نگهداری داده", cap: "retention.manage" },
   { key: "gateways", label: "درگاه‌های پرداخت", cap: "gateways.manage" },
   { key: "rules", label: "قواعد و تنظیمات", cap: "billing.manage" },

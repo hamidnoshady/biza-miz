@@ -32,6 +32,12 @@ vi.mock("./deployment-mode", () => ({
 vi.mock("./app-availability-service", () => ({
   effectiveAppAvailability: vi.fn(async () => ({})),
 }));
+// Issue #1579 — the gallery resolves signup offers from the policy catalogue.
+// These tests are about the non-billable selection contract, so no policy
+// applies: every app keeps ordinary published pricing.
+vi.mock("./complimentary-grant-service", () => ({
+  resolveSignupOffersForBusiness: vi.fn(async () => new Map()),
+}));
 vi.mock("./settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./settings")>();
   return { ...actual, getSetting: vi.fn(async () => null), setSetting: vi.fn(async () => {}) };
@@ -81,6 +87,15 @@ function card(overrides: Partial<SetupAppCard>): SetupAppCard {
       hourlyRial: 100,
       estimated24hRial: 2_400,
     },
+    offer: {
+      mode: "standard",
+      freeDays: null,
+      waiveSetup: false,
+      waiveRental: false,
+      scope: null,
+      policyVersion: null,
+    },
+    offerLabel: "نیاز به پرداخت",
     selected: true,
     hasSetupProgress: false,
     setupComplete: false,
