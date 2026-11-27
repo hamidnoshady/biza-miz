@@ -33,6 +33,7 @@ import { JalaliDatePicker } from "../jalali-date-picker";
 import { EmptyState, SectionCard, SectionCardSkeleton, StatusBadge } from "../page-chrome";
 import { api, ErrorBox, InfoBox } from "../ui";
 import { productionErrorMessage } from "./production-errors";
+import { SubcontractsSection, SUBCONTRACT_ACTION_LABELS, type Subcontract } from "./subcontracts-section";
 
 export interface ProductionPermissions {
   canAdjust: boolean;
@@ -41,7 +42,7 @@ export interface ProductionPermissions {
 
 interface Costs {
   materialRial: number; conversionRial: number; receivedRial: number; returnedRial: number;
-  writtenOffRial: number; wipRial: number; unitCostRial: string | null;
+  writtenOffRial: number; recoveredRial?: number; wipRial: number; unitCostRial: string | null;
 }
 
 export interface OrderSummary {
@@ -66,6 +67,9 @@ export interface OrderDetail {
   stages: Stage[];
   materials: Material[];
   actions: { id: string; action: string; actorName: string | null; amountRial: number | null; at: string; detail: Record<string, unknown> }[];
+  /** GH #1567 6.3 — subcontracted stages and the branch's suppliers. */
+  subcontracts?: Subcontract[];
+  suppliers?: { id: string; name: string }[];
 }
 
 interface Bom {
@@ -91,6 +95,7 @@ const ACTION_LABELS: Record<string, string> = {
   create: "ایجاد سفارش", release: "رزرو مواد", issue: "حوالهٔ مواد به تولید", return: "برگشت مواد مصرف‌نشده",
   progress: "ثبت پیشرفت مرحله", rework: "ارسال برای دوباره‌کاری", assign: "تعیین مسئول مرحله", cost: "ثبت هزینهٔ تبدیل",
   receive: "ورود محصول به انبار", complete: "بستن سفارش", cancel: "لغو سفارش",
+  ...SUBCONTRACT_ACTION_LABELS,
 };
 
 const COST_KIND_OPTIONS = [
@@ -394,6 +399,19 @@ function OrderPanel({ orderId, permissions, onChanged }: { orderId: string; perm
         </ol>
       </section>
 
+      <SubcontractsSection
+        subcontracts={detail.subcontracts ?? []}
+        suppliers={detail.suppliers ?? []}
+        stages={stages}
+        materials={materials}
+        orderStatus={order.status}
+        canAct={canAct}
+        canApprove={permissions.canWriteOff}
+        busy={busy}
+        onAct={act}
+        onError={setError}
+      />
+
       {canAct && order.status !== "draft" ? (
         <section aria-labelledby="po-cost" className="space-y-2">
           <h3 id="po-cost" className="font-medium">هزینهٔ تبدیل</h3>
@@ -637,6 +655,10 @@ interface Report {
   scrappedQuantity: string; scrapRate: string | null; receivedValueRial: number; averageUnitCostRial: string | null;
   materialCostRial: number; conversionCostRial: number; wipRial: number;
   reconciliation: { subledgerWipRial: number; glWipRial: number; reconciled: boolean };
+  subcontracting?: {
+    openSubcontracts: number; unitsWithSubcontractors: string; accruedRial: number; chargebackRial: number;
+    reconciliation: { subledgerPayableRial: number; glPayableRial: number; reconciled: boolean };
+  };
 }
 
 function ReportSection() {
@@ -673,6 +695,21 @@ function ReportSection() {
           ? <InfoBox>تطبیق است: {money.formatText(String(report.reconciliation.glWipRial))}</InfoBox>
           : <ErrorBox>مغایرت: سفارش‌ها {money.formatText(String(report.reconciliation.subledgerWipRial))}، دفتر کل {money.formatText(String(report.reconciliation.glWipRial))}</ErrorBox>}
       </SectionCard>
+      {report.subcontracting ? (
+        <SectionCard title="پیمانکاران" description="اجرت کار پذیرفته‌شده و کسر خسارت، در برابر بستانکار حساب‌های پرداختنی از همین قراردادها؛ تسویه با پرداخت عادی به تأمین‌کننده.">
+          <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            <div><dt className="text-muted-foreground">قرارداد باز</dt><dd className="font-medium">{fa(report.subcontracting.openSubcontracts)}</dd></div>
+            <div><dt className="text-muted-foreground">واحد نزد پیمانکاران</dt><dd className="font-medium">{fa(report.subcontracting.unitsWithSubcontractors)}</dd></div>
+            <div><dt className="text-muted-foreground">اجرت پذیرفته‌شده</dt><dd className="font-medium">{money.formatText(String(report.subcontracting.accruedRial))}</dd></div>
+            <div><dt className="text-muted-foreground">کسر خسارت</dt><dd className="font-medium">{money.formatText(String(report.subcontracting.chargebackRial))}</dd></div>
+          </dl>
+          <div className="mt-3">
+            {report.subcontracting.reconciliation.reconciled
+              ? <InfoBox>تطبیق است: {money.formatText(String(report.subcontracting.reconciliation.glPayableRial))}</InfoBox>
+              : <ErrorBox>مغایرت: قراردادها {money.formatText(String(report.subcontracting.reconciliation.subledgerPayableRial))}، دفتر کل {money.formatText(String(report.subcontracting.reconciliation.glPayableRial))}</ErrorBox>}
+          </div>
+        </SectionCard>
+      ) : null}
     </div>
   );
 }

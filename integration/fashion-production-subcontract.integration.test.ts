@@ -230,7 +230,7 @@ describe("fashion production 6.3 — a subcontracted sewing stage end to end", (
     let o = await cutOrder(shop, "10");
     expect(o.suppliers.map((s) => s.id)).toContain(sara);
 
-    let created = await newSubcontract(shop, o, sara);
+    const created = await newSubcontract(shop, o, sara);
     o = created.o;
     const id = created.id;
     expect(sub(o, id)).toMatchObject({ status: "draft", supplierName: "خیاطی سارا", stageCode: "sew", ratePerUnitRial: 150_000 });
@@ -334,7 +334,7 @@ describe("fashion production 6.3 — custody, cancellation and close", () => {
     const ap0 = await glNet(shop.id, "2100");
     const sara = await supplier(shop, "خیاطی سارا");
     let o = await cutOrder(shop, "5");
-    let { o: next, id } = await newSubcontract(shop, o, sara);
+    const { o: next, id } = await newSubcontract(shop, o, sara);
     o = await act(shop, next, { action: "subcontract_approve", subcontractId: id });
     o = await act(shop, o, { action: "subcontract_send", subcontractId: id, quantity: "5", materials: [{ materialItemId: shop.fabric, quantity: "10" }] });
     const fabricValueOut = (await stockOf(shop.fabric)).total;
@@ -361,7 +361,7 @@ describe("fashion production 6.3 — custody, cancellation and close", () => {
     const ap0 = await glNet(shop.id, "2100");
     const sara = await supplier(shop, "خیاطی سارا");
     let o = await cutOrder(shop, "4");
-    let { o: next, id } = await newSubcontract(shop, o, sara, 100_000);
+    const { o: next, id } = await newSubcontract(shop, o, sara, 100_000);
     o = await act(shop, next, { action: "subcontract_approve", subcontractId: id });
     o = await act(shop, o, { action: "subcontract_send", subcontractId: id, quantity: "4", materials: [{ materialItemId: shop.fabric, quantity: "9" }] });
     o = await act(shop, o, { action: "subcontract_receive", subcontractId: id, accepted: "3" });
@@ -420,7 +420,7 @@ describe("fashion production 6.3 — isolation, idempotency and concurrency", ()
     const ap0 = await glNet(shop.id, "2100");
     const sara = await supplier(shop, "خیاطی سارا");
     let o = await cutOrder(shop, "6");
-    let { o: next, id } = await newSubcontract(shop, o, sara, 50_000);
+    const { o: next, id } = await newSubcontract(shop, o, sara, 50_000);
     o = await act(shop, next, { action: "subcontract_approve", subcontractId: id });
     const key = `send-${randomUUID()}`;
     o = await act(shop, o, { action: "subcontract_send", subcontractId: id, quantity: "6" }, { key });
