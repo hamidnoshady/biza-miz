@@ -27,10 +27,20 @@
  *      violation inside <main> on each page at each width.
  *
  * Exits non-zero on any failed expectation. Nothing is skipped or retried
- * into a pass. VISUAL_CHROMIUM_PATH overrides the browser executable.
+ * into a pass; an unexpected error inside one page is recorded as a failure
+ * and the remaining pages still run.
+ *
+ * Optional environment:
+ *   VISUAL_CHROMIUM_PATH  browser executable (default: Playwright's Chromium)
+ *   E2E_SCREENSHOT_DIR    write a full-page screenshot per page and width
+ *   E2E_ONLY              comma list of pages (tailoring, production,
+ *                         size-packs, consignment, pos, reports) for local
+ *                         debugging; CI runs them all
+ *   E2E_STATE_FILE        reuse one seeded business and session across local
+ *                         runs (written on the first run, read afterwards)
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
@@ -339,18 +349,85 @@ const VIEWPORTS = [
   { name: "phone", width: 390, height: 844 },
 ] as const;
 
-async function main() {
-  console.log("Seeding a fresh fashion business…");
-  const fixture = await seed();
-  console.log(`  owner ${fixture.email}, contract ${fixture.contractRef}, order ${fixture.orderRef}`);
+/**
+ * Compile every page once with the browser closed. On small machines a dev
+ * server compiling the accounting tree while Chromium renders can exhaust
+ * memory; against a production server this is just a cheap first request.
+ */
+async function warmUp(state: { cookies: { name: string; value: string }[] }) {
+  const cookie = state.cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+  for (const [key, route] of Object.entries(PAGES)) {
+    if (!want(key)) continue;
+    const started = Date.now();
+    const response = await fetch(`${BASE_URL}${route}`, { headers: { cookie }, redirect: "manual" });
+    await response.arrayBuffer();
+    const location = response.headers.get("location");
+    console.log(`  warm ${route} → ${response.status}${location ? ` (${location})` : ""} in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+  }
+}
 
-  const browser = await chromium.launch({ headless: process.env.E2E_HEADED !== "1", executablePath: EXECUTABLE });
+const PAGES: Record<string, string> = {
+  tailoring: "/accounting/tailoring",
+  production: "/accounting/production-orders",
+  "size-packs": "/accounting/size-packs",
+  consignment: "/accounting/consignment",
+  pos: "/accounting/pos",
+  reports: "/accounting/reports",
+};
+
+/** `E2E_ONLY=pos,reports` limits the run to those pages (default: all). */
+const ONLY = (process.env.E2E_ONLY ?? "").split(",").map((key) => key.trim()).filter(Boolean);
+function want(key: string) {
+  return ONLY.length === 0 || ONLY.includes(key);
+}
+
+type StorageState = Awaited<ReturnType<BrowserContext["storageState"]>>;
+
+/** One page's checks; an unexpected error is a recorded failure, not the end of the run. */
+async function section(page: Page, viewport: string, key: string, run: () => Promise<void>) {
+  if (!want(key)) return;
   try {
-    const loginContext = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "fa-IR" });
-    await login(loginContext, fixture);
-    const storageState = await loginContext.storageState();
-    await loginContext.close();
-    if (failures.length > 0) throw new Error("login failed; nothing further can be checked");
+    await run();
+  } catch (error) {
+    check(`${viewport} ${key}: completed without an unexpected error`, false, (error as Error).message.split("\n")[0]);
+    await shot(page, `${viewport}-${key}-error`).catch(() => undefined);
+  }
+}
+
+async function main() {
+  const stateFile = process.env.E2E_STATE_FILE;
+  const saved = stateFile && existsSync(stateFile)
+    ? (JSON.parse(readFileSync(stateFile, "utf8")) as { fixture: Fixture; storageState: StorageState })
+    : null;
+  let fixture: Fixture;
+  if (saved) {
+    fixture = saved.fixture;
+    console.log(`Reusing ${stateFile}: owner ${fixture.email}`);
+  } else {
+    console.log("Seeding a fresh fashion business…");
+    fixture = await seed();
+    console.log(`  owner ${fixture.email}, contract ${fixture.contractRef}, order ${fixture.orderRef}`);
+  }
+
+  const launch = () => chromium.launch({ headless: process.env.E2E_HEADED !== "1", executablePath: EXECUTABLE });
+  let storageState: StorageState;
+  if (saved) {
+    storageState = saved.storageState;
+  } else {
+    const loginBrowser = await launch();
+    try {
+      const loginContext = await loginBrowser.newContext({ viewport: { width: 1280, height: 900 }, locale: "fa-IR" });
+      await login(loginContext, fixture);
+      storageState = await loginContext.storageState();
+    } finally {
+      await loginBrowser.close();
+    }
+  }
+  if (failures.length > 0) throw new Error("login failed; nothing further can be checked");
+  if (stateFile && !saved) writeFileSync(stateFile, JSON.stringify({ fixture, storageState }));
+  await warmUp(storageState);
+  const browser = await launch();
+  try {
     for (const viewport of VIEWPORTS) {
       console.log(`\n[${viewport.name} ${viewport.width}×${viewport.height}]`);
       const context = await browser.newContext({
@@ -368,98 +445,112 @@ async function main() {
       const v = viewport.name;
 
       // 6A — tailoring desk.
-      await page.goto(`${BASE_URL}/accounting/tailoring`, { waitUntil: "domcontentloaded" });
-      await pageBasics(page, `${v} 6A tailoring`, "خیاطی و دوخت");
-      await axe(page, `${v} 6A tailoring`);
-      await shot(page, `${v}-tailoring`);
+      await section(page, v, "tailoring", async () => {
+        await page.goto(`${BASE_URL}/accounting/tailoring`, { waitUntil: "domcontentloaded" });
+        await pageBasics(page, `${v} 6A tailoring`, "خیاطی و دوخت");
+        await axe(page, `${v} 6A tailoring`);
+        await shot(page, `${v}-tailoring`);
+      });
 
       // 6B + 6.3 — production order with its subcontract.
-      await page.goto(`${BASE_URL}/accounting/production-orders`, { waitUntil: "domcontentloaded" });
-      await pageBasics(page, `${v} 6B production`, "تولید پوشاک");
-      const orderButton = page.getByRole("button", { name: fixture.orderRef, exact: true }).first();
-      await orderButton.waitFor();
-      await orderButton.click();
-      const subcontracts = page.getByRole("region", { name: "پیمانکاران" }).or(page.locator('section[aria-labelledby="po-subcontracts"]')).first();
-      await subcontracts.waitFor();
-      check(`${v} 6.3 order detail lists the subcontractor`, (await subcontracts.getByText(fixture.supplierName).count()) > 0);
-      await settle(page);
-      await axe(page, `${v} 6B/6.3 order detail`);
-      await shot(page, `${v}-production-detail`);
-      await page.keyboard.press("Escape");
+      await section(page, v, "production", async () => {
+        await page.goto(`${BASE_URL}/accounting/production-orders`, { waitUntil: "domcontentloaded" });
+        await pageBasics(page, `${v} 6B production`, "تولید پوشاک");
+        const orderButton = page.getByRole("button", { name: fixture.orderRef, exact: true }).first();
+        await orderButton.waitFor();
+        await orderButton.click();
+        const subcontracts = page.getByRole("region", { name: "پیمانکاران" }).or(page.locator('section[aria-labelledby="po-subcontracts"]')).first();
+        await subcontracts.waitFor();
+        check(`${v} 6.3 order detail lists the subcontractor`, (await subcontracts.getByText(fixture.supplierName).count()) > 0);
+        await settle(page);
+        await axe(page, `${v} 6B/6.3 order detail`);
+        await shot(page, `${v}-production-detail`);
+        await page.keyboard.press("Escape");
+      });
 
       // 6C — size packs; the mixed pack names its consigned variant (C5).
-      await page.goto(`${BASE_URL}/accounting/size-packs`, { waitUntil: "domcontentloaded" });
-      await pageBasics(page, `${v} 6C size packs`, "بسته‌های سایزی");
-      await page.getByText(fixture.mixedPack).first().waitFor();
-      const mixedRow = page.getByRole("row").filter({ hasText: fixture.mixedPack }).first();
-      const ownedRow = page.getByRole("row").filter({ hasText: fixture.ownedPack }).first();
-      const mixedVisible = await mixedRow.isVisible().catch(() => false);
-      // At phone width the table may render as cards; read the card text then.
-      const mixedText = mixedVisible
-        ? await mixedRow.innerText()
-        : await page.locator("li, article, div").filter({ hasText: fixture.mixedPack }).last().innerText();
-      check(`${v} C5 mixed pack is named as consigned, not a shortage`, /کالای امانی است/.test(mixedText), mixedText.slice(0, 160));
-      const ownedText = (await ownedRow.isVisible().catch(() => false))
-        ? await ownedRow.innerText()
-        : await page.locator("li, article, div").filter({ hasText: fixture.ownedPack }).last().innerText();
-      check(`${v} 6C owned-only pack carries no consignment notice`, !/امانی/.test(ownedText));
-      await axe(page, `${v} 6C size packs`);
-      await shot(page, `${v}-size-packs`);
+      await section(page, v, "size-packs", async () => {
+        await page.goto(`${BASE_URL}/accounting/size-packs`, { waitUntil: "domcontentloaded" });
+        await pageBasics(page, `${v} 6C size packs`, "بسته‌های سایزی");
+        await page.getByText(fixture.mixedPack).first().waitFor();
+        const mixedRow = page.getByRole("row").filter({ hasText: fixture.mixedPack }).first();
+        const ownedRow = page.getByRole("row").filter({ hasText: fixture.ownedPack }).first();
+        const mixedVisible = await mixedRow.isVisible().catch(() => false);
+        // At phone width the table may render as cards; read the card text then.
+        const mixedText = mixedVisible
+          ? await mixedRow.innerText()
+          : await page.locator("li, article, div").filter({ hasText: fixture.mixedPack }).last().innerText();
+        check(`${v} C5 mixed pack is named as consigned, not a shortage`, /کالای امانی است/.test(mixedText), mixedText.slice(0, 160));
+        const ownedText = (await ownedRow.isVisible().catch(() => false))
+          ? await ownedRow.innerText()
+          : await page.locator("li, article, div").filter({ hasText: fixture.ownedPack }).last().innerText();
+        check(`${v} 6C owned-only pack carries no consignment notice`, !/امانی/.test(ownedText));
+        await axe(page, `${v} 6C size packs`);
+        await shot(page, `${v}-size-packs`);
+      });
 
       // 6D — consignment contract and its consigned on-hand.
-      await page.goto(`${BASE_URL}/accounting/consignment`, { waitUntil: "domcontentloaded" });
-      await pageBasics(page, `${v} 6D consignment`, "کالای امانی");
-      await page.getByText(fixture.contractRef).first().waitFor();
-      check(`${v} 6D contract is listed`, (await page.getByText(fixture.contractRef).count()) > 0);
-      await axe(page, `${v} 6D consignment`);
-      await shot(page, `${v}-consignment`);
+      await section(page, v, "consignment", async () => {
+        await page.goto(`${BASE_URL}/accounting/consignment`, { waitUntil: "domcontentloaded" });
+        await pageBasics(page, `${v} 6D consignment`, "کالای امانی");
+        // The table shows the reference in Persian digits; the row action names it verbatim.
+        const contractRow = page.getByRole("button", { name: `جزئیات قرارداد ${fixture.contractRef}`, exact: true }).first();
+        check(`${v} 6D contract is listed`, await contractRow.waitFor().then(() => true, () => false));
+        await axe(page, `${v} 6D consignment`);
+        await shot(page, `${v}-consignment`);
+      });
 
       // 6D/C5 — the till labels the consigned variant and refuses the mixed pack by name.
-      await page.goto(`${BASE_URL}/accounting/pos`, { waitUntil: "domcontentloaded" });
-      const picker = page.getByRole("button", { name: "انتخاب کالا" }).first();
-      await picker.waitFor({ timeout: 120_000 });
-      await settle(page);
-      check(`${v} till: html is RTL`, (await page.locator("html").getAttribute("dir")) === "rtl");
-      const tillOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-      check(`${v} till: no horizontal page scroll`, tillOverflow <= 1, `${tillOverflow}px`);
-      await picker.click();
-      const consignedOption = page.getByRole("option", { name: new RegExp(`امانی · موجودی`) }).first();
-      const consignedShown = await consignedOption.waitFor({ timeout: 15_000 }).then(() => true, () => false);
-      check(`${v} till labels the consigned variant «امانی»`, consignedShown);
-      await page.keyboard.press("Escape");
-      const packPicker = page.getByRole("button", { name: "انتخاب بسته" }).first();
-      if (await packPicker.isVisible().catch(() => false)) {
-        await packPicker.click();
-        await page.getByRole("option", { name: new RegExp(fixture.mixedPack) }).first().click();
-        const refusal = await page.getByRole("alert").filter({ hasText: /کالای امانی است/ }).first()
-          .waitFor({ timeout: 10_000 }).then(() => true, () => false);
-        check(`${v} till refuses the mixed pack by name (C5)`, refusal);
-        const add = page.getByRole("button", { name: /افزودن بسته به فاکتور/ }).first();
-        check(`${v} till keeps «add pack» disabled for the mixed pack`, await add.isDisabled());
-      } else {
-        check(`${v} till shows the size-pack panel`, false, "«انتخاب بسته» not visible");
-      }
-      await axe(page, `${v} till`);
-      await shot(page, `${v}-till`);
+      await section(page, v, "pos", async () => {
+        await page.goto(`${BASE_URL}/accounting/pos`, { waitUntil: "domcontentloaded" });
+        const picker = page.getByRole("button", { name: "انتخاب کالا" }).first();
+        await picker.waitFor({ timeout: 120_000 });
+        await settle(page);
+        check(`${v} till: html is RTL`, (await page.locator("html").getAttribute("dir")) === "rtl");
+        const tillOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+        check(`${v} till: no horizontal page scroll`, tillOverflow <= 1, `${tillOverflow}px`);
+        await picker.click();
+        const consignedOption = page.getByRole("option", { name: new RegExp(`امانی · موجودی`) }).first();
+        const consignedShown = await consignedOption.waitFor({ timeout: 15_000 }).then(() => true, () => false);
+        check(`${v} till labels the consigned variant «امانی»`, consignedShown);
+        await page.keyboard.press("Escape");
+        const packPicker = page.getByRole("button", { name: "انتخاب بسته" }).first();
+        if (await packPicker.isVisible().catch(() => false)) {
+          await packPicker.click();
+          await page.getByRole("option", { name: new RegExp(fixture.mixedPack) }).first().click();
+          const refusal = await page.getByRole("alert").filter({ hasText: /کالای امانی است/ }).first()
+            .waitFor({ timeout: 10_000 }).then(() => true, () => false);
+          check(`${v} till refuses the mixed pack by name (C5)`, refusal);
+          const add = page.getByRole("button", { name: /افزودن بسته به فاکتور/ }).first();
+          check(`${v} till keeps «add pack» disabled for the mixed pack`, await add.isDisabled());
+        } else {
+          check(`${v} till shows the size-pack panel`, false, "«انتخاب بسته» not visible");
+        }
+        await axe(page, `${v} till`);
+        await shot(page, `${v}-till`);
+      });
 
       // 6E — the advisory report from the reports workspace.
-      await page.goto(`${BASE_URL}/accounting/reports`, { waitUntil: "domcontentloaded" });
-      await pageBasics(page, `${v} reports`, "گزارش‌ها");
-      const reportEntry = page.getByRole("button", { name: /پیشنهادهای خرید و چیدمان/ })
-        .or(page.getByRole("link", { name: /پیشنهادهای خرید و چیدمان/ }))
-        .or(page.getByRole("option", { name: /پیشنهادهای خرید و چیدمان/ }))
-        .first();
-      const entryFound = await reportEntry.waitFor({ timeout: 30_000 }).then(() => true, () => false);
-      check(`${v} 6E advisory report is offered`, entryFound);
-      if (entryFound) {
-        await reportEntry.click();
-        const advisory = await page.getByRole("note").filter({ hasText: /هیچ خرید، ثبت انبار، تغییر قیمت یا پیامی/ }).first()
-          .waitFor({ timeout: 60_000 }).then(() => true, () => false);
-        check(`${v} 6E report says it is advisory`, advisory);
-        await settle(page);
-        await axe(page, `${v} 6E advisory report`);
-        await shot(page, `${v}-advice`);
-      }
+      await section(page, v, "reports", async () => {
+        // `?tab=` opens the section directly; on a phone the bare page lists sections first.
+        await page.goto(`${BASE_URL}/accounting/reports?tab=standard`, { waitUntil: "domcontentloaded" });
+        await pageBasics(page, `${v} reports`, "گزارش‌ها");
+        const reportEntry = page.getByRole("button", { name: /پیشنهادهای خرید و چیدمان/ })
+          .or(page.getByRole("link", { name: /پیشنهادهای خرید و چیدمان/ }))
+          .or(page.getByRole("option", { name: /پیشنهادهای خرید و چیدمان/ }))
+          .first();
+        const entryFound = await reportEntry.waitFor({ timeout: 30_000 }).then(() => true, () => false);
+        check(`${v} 6E advisory report is offered`, entryFound);
+        if (entryFound) {
+          await reportEntry.click();
+          const advisory = await page.getByRole("note").filter({ hasText: /هیچ خرید، ثبت انبار، تغییر قیمت یا پیامی/ }).first()
+            .waitFor({ timeout: 60_000 }).then(() => true, () => false);
+          check(`${v} 6E report says it is advisory`, advisory);
+          await settle(page);
+          await axe(page, `${v} 6E advisory report`);
+          await shot(page, `${v}-advice`);
+        }
+      });
 
       check(`${v}: no uncaught page error`, pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
       await context.close();

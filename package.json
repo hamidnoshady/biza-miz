@@ -25,6 +25,7 @@
     "test:e2e:commission": "node scripts/e2e-commission.mjs",
     "test:e2e:commission:transport": "tsx scripts/e2e-commission-transport.ts",
     "test:e2e:cheques": "node scripts/e2e-cheques.mjs",
+    "test:e2e:fashion": "tsx scripts/e2e-fashion.ts",
     "test:e2e:kitchen-batch": "node scripts/e2e-kitchen-batch.mjs",
     "test:e2e:crm-queue-links": "node scripts/e2e-crm-queue-links.mjs",
     "test:e2e:guided-tours": "node scripts/e2e-guided-tours.mjs",
