@@ -226,3 +226,55 @@ describe("workflow: intake → estimate → approval → fitting → QC → pick
       .rejects.toThrow("tailoring_party_not_found");
   });
 });
+
+describe("party merge never moves or strands live measurements (GH #1567 C2)", () => {
+  async function customer(name: string): Promise<string> {
+    return (await db.query<{ id: string }>("INSERT INTO parties (business_id, name, role) VALUES ($1, $2, 'customer') RETURNING id", [A.id, name])).rows[0].id;
+  }
+
+  it("refuses a merge while the archived side holds live measurements, then allows it once they are erased", async () => {
+    const crm = await import("../src/lib/crm-service");
+    const winner = await customer("سارا (پروندهٔ اصلی)");
+    const loser = await customer("سارا (تکراری)");
+    await tailoring.recordMeasurements(actorA(), winner, { unit: "cm", values: { chest: 90 } });
+    const loserProfile = await tailoring.recordMeasurements(actorA(), loser, { unit: "cm", values: { chest: 91 } });
+    const job = await tailoring.createTailoringJob(actorA(), { locationId: A.locationId, partyId: loser, kind: "made_to_measure",
+      description: "مانتو", measurementProfileId: loserProfile.id, dueDate: "2026-12-20" });
+
+    const preview = await crm.previewMerge(A.id, winner, loser);
+    expect(preview?.blockers).toEqual([{ table: "tailoring_measurement_profiles", label: "اندازه‌های بدن (خیاطی)", count: 1 }]);
+    const refused = await crm.mergeCustomers(A.id, winner, loser).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(crm.PartyMergeRefusedError);
+    expect((refused as InstanceType<typeof crm.PartyMergeRefusedError>).code).toBe("party_merge_blocked");
+    // Nothing moved: the job, the profile and the loser itself are untouched.
+    const state = async () => (await db.query<{ job_party: string; merged: string | null; active: boolean }>(
+      `SELECT (SELECT party_id FROM tailoring_jobs WHERE id = $1) AS job_party, merged_into_id AS merged, is_active AS active
+         FROM parties WHERE id = $2`, [job.id, loser])).rows[0];
+    expect(await state()).toEqual({ job_party: loser, merged: null, active: true });
+    const versions = async (party: string) => (await db.query<{ version: number }>(
+      "SELECT version FROM tailoring_measurement_profiles WHERE party_id = $1 ORDER BY version", [party])).rows.map((r) => r.version);
+    expect(await versions(winner)).toEqual([1]);
+    expect(await versions(loser)).toEqual([1]);
+
+    // After an explicit, reasoned erase the merge goes through. The erased row
+    // (no body data) and the access log stay with the archived record; the
+    // winner's own history is not interleaved with it.
+    await tailoring.eraseMeasurements(actorA(), loser, "ادغام پرونده‌های تکراری");
+    expect((await crm.previewMerge(A.id, winner, loser))?.blockers).toEqual([]);
+    expect(await crm.mergeCustomers(A.id, winner, loser)).toMatchObject({ winnerId: winner, loserId: loser });
+    expect(await state()).toMatchObject({ job_party: winner, merged: winner });
+    expect(await versions(winner)).toEqual([1]);
+    expect(await versions(loser)).toEqual([1]);
+    const log = await db.query<{ party_id: string }>("SELECT DISTINCT party_id FROM tailoring_measurement_access_log WHERE party_id = ANY($1)", [[winner, loser]]);
+    expect(log.rows.map((r) => r.party_id).sort()).toEqual([winner, loser].sort());
+  });
+
+  it("a winner's own measurements never block (nothing of theirs moves)", async () => {
+    const crm = await import("../src/lib/crm-service");
+    const winner = await customer("مینا");
+    const loser = await customer("مینا ۲");
+    await tailoring.recordMeasurements(actorA(), winner, { unit: "cm", values: { waist: 70 } });
+    expect((await crm.previewMerge(A.id, winner, loser))?.blockers).toEqual([]);
+    expect(await crm.mergeCustomers(A.id, winner, loser)).toMatchObject({ winnerId: winner });
+  });
+});
