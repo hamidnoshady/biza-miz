@@ -508,7 +508,10 @@ jobs:
           # API routes, no new package, cache or source-map. 6C adds 5 routes
           # and 1 page more (~0.5 MiB). Budget moves 316 -> 322 MiB (~3 MiB
           # headroom over the measured branch), the same reviewed reason as the
-          # moves above. PENDING OWNER SIGN-OFF on PR #1575.
+          # moves above. APPROVED by the owner 2026-11-27 as a one-time
+          # exception (issue #1567, comment 7216762779) — no further increases.
+          # After merging main (35 commits) the branch measured 337,261,876 B =
+          # 321.638 MiB at f3f40084a; 6.3 therefore adds no route or page.
           if ($bytes -gt 322MB) { throw "Staged runtime $mib MiB exceeds 322 MiB budget" }
 
       # Runs after the budget step even when it fails: the notices and the

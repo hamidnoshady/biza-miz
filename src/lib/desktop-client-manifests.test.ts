@@ -138,7 +138,8 @@ describe("desktop client-reference manifest compaction", () => {
     // then 677 -> 725 MB with the staged-runtime gate's 300 MiB move (issue #902 / PR #1152),
     // which keeps this payload at the same ~420 MiB above that gate, then 725 -> 732 MB with
     // the staged-runtime gate's 316 -> 322 MiB move for GH #1567 / PR #1575 (measured +5.3 MiB
-    // of new route/page surface; pending owner sign-off on that PR).
+    // of new route/page surface; approved by the owner 2026-11-27 as a one-time exception,
+    // issue #1567 comment 7216762779 — no further increases).
     expect(workflow).toContain("if ($unpacked -gt 732MB)");
     // The installer baseline moved 175 -> 176 MiB on owner instruction (2026-11-25,
     // PR #1563) for the first measured crossing of the release baseline — see the

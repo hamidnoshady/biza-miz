@@ -652,7 +652,8 @@ jobs:
           # by the same amount plus 1 MiB: packaged Windows run for e804cd427 measured 725.8 MiB
           # installed payload against 720.5 MiB on main 39b49545a (+5.3 MiB, the same new route and
           # page surface; installer 175.2 vs 174.5 MiB, still under the unchanged 176 MiB release
-          # baseline). PENDING OWNER SIGN-OFF on PR #1575.
+          # baseline). APPROVED by the owner 2026-11-27 as a one-time exception (issue #1567,
+          # comment 7216762779); installer baseline stays 176 MiB; no further increases.
           if ($unpacked -gt 732MB) { throw "Installed payload $installedMiB MiB exceeds 732 MiB budget" }
 
       # Runs after the budgets even when they fail. The packaged payload and the
