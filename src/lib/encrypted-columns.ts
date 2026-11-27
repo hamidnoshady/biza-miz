@@ -118,6 +118,48 @@ export const ENCRYPTED_TABLES: Record<string, EncryptedTable> = {
 };
 
 /**
+ * GH #1567 C1 — sealed columns: business-DEK ciphertext with **no plaintext
+ * twin at all**, ever. Unlike `ENCRYPTED_TABLES` (a dual-write transition from
+ * a plaintext column), these were born encrypted and the only way to read them
+ * is the owning service's audited reveal path. Consequences, each asserted:
+ *   - the schema test checks the `bytea` column exists and that **no
+ *     plaintext column** matching `plaintextPattern` appears beside it
+ *     (`integration/field-encryption.integration.test.ts`);
+ *   - bulk tenant export never decrypts them (they are not in
+ *     `ENCRYPTED_TABLES`, the only list `tenant-export.ts` decrypts) — a
+ *     tenant archive restores them as the same ciphertext under the same
+ *     business key; a person's own copy goes through the audited export;
+ *   - erasure sets the column to NULL (a CHECK ties it to `erased_at`), and
+ *     party merge is blocked for the table (`party-merge-references.ts`);
+ *   - the guarding permission is excluded from every AI/MCP read
+ *     (`AI_EXCLUDED_PERMISSIONS`).
+ */
+export interface SealedColumn {
+  table: string;
+  encColumn: string;
+  tier: EncryptionTier;
+  /** Column names that would mean someone added a plaintext copy. */
+  plaintextPattern: RegExp;
+  /** The only module allowed to decrypt it. */
+  readPath: string;
+  /** Permission guarding every reveal; must be AI-excluded. */
+  permission: string;
+  note: string;
+}
+
+export const SEALED_COLUMNS: readonly SealedColumn[] = [
+  {
+    table: "tailoring_measurement_profiles",
+    encColumn: "measurements_enc",
+    tier: "Tier A",
+    plaintextPattern: /(measure|chest|waist|hip|inseam|sleeve|shoulder|neck|height|weight|body)/,
+    readPath: "src/lib/tailoring-service.ts",
+    permission: "tailoring.measurements",
+    note: "Customer body measurements (health-adjacent personal data). Versioned, never overwritten; every record/view/export/erase is written to tailoring_measurement_access_log with a purpose.",
+  },
+];
+
+/**
  * Tier A — pure secrets, zero query impact, listed here because the phase doc
  * calls them the highest value-to-cost ratio in the wave and the next person
  * should not have to re-derive the list from the prose.
@@ -163,6 +205,7 @@ export function encryptedPhysicalColumns(): { table: string; column: string; dat
       if (col.kindColumn) out.push({ table, column: col.kindColumn, dataType: "text" });
     }
   }
+  for (const sealed of SEALED_COLUMNS) out.push({ table: sealed.table, column: sealed.encColumn, dataType: "bytea" });
   return out;
 }
 
