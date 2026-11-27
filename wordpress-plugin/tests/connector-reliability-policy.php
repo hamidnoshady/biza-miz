@@ -385,6 +385,8 @@ check( false !== strpos( $queue, 'self::reconcile_swept_state(' ) || false !== s
 check( false !== strpos( $queue, "WHERE id = %d AND status = 'failed'" ), 'a swept failed row is requeued in place, keeping its delivery id' );
 $sync = file_get_contents( dirname( __DIR__ ) . '/pos-accounting-connector/includes/class-pos-sync.php' );
 check( 2 === substr_count( $sync, 'reconcile_swept_state(' ), 'both order-sweep walks reconcile before enqueueing' );
+check( 2 === substr_count( $sync, "'type'          => 'shop_order'," ), 'both order-sweep walks exclude refund rows from wc_get_orders' );
+check( false !== strpos( $sync, "'shop_order' !== \$order->get_type()" ), 'a refund never enters the order enqueue path' );
 check( false !== strpos( $sync, 'public static function export_orders( $days = 7, $force = false )' ), 'an explicit export can still force a re-send' );
 check( false !== strpos( $queue, "SET payload = '' WHERE status = 'sent'" ), 'housekeeping clears delivered bodies left by the old schema' );
 check( false !== strpos( $queue, "topic NOT IN ('order.created', 'order.updated', 'refund.created', 'content.deleted', 'customer.deleted')" ), 'non-financial, non-tombstone failed rows expire; financial rows and deletions do not' );
