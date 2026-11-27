@@ -24,11 +24,13 @@ import { findDuplicateItemGroups, type DuplicateReportOptions, type DuplicateSku
 import {
   planHistoricalDuplicates,
   planRaceOrphans,
+  planVariantFamilyOrphans,
   type ItemInventory,
   type ItemReference,
   type OrphanBlocker,
   type OrphanPlan,
 } from "./duplicate-items-resolution";
+import type { DuplicateVerdict } from "./duplicate-items";
 
 /** What the integration itself writes when it creates an item — not anyone's history. */
 const SYNC_OWNED_TABLES = new Set(["item_stock", "item_variant_attributes"]);
@@ -38,6 +40,7 @@ const SYNC_OWNED_PRICE_ROW = "NOT (source = 'sync' AND reason = 'woocommerce_pro
 
 /** The audit row written when a proven duplicate row is archived. */
 export function archiveActionFor(kind: OrphanPlan["kind"]): string {
+  if (kind === "historical_variant_orphan") return "item.duplicate_variant_orphan_archived";
   return kind === "historical_duplicate_candidate"
     ? "item.duplicate_historical_archived"
     : "item.duplicate_orphan_archived";
@@ -128,11 +131,15 @@ export async function planDuplicateOrphanArchives(
   businessId: string,
   options: DuplicateReportOptions = {},
 ): Promise<OrphanPlan[]> {
-  const groups = (await findDuplicateItemGroups(businessId, options)).filter(
-    (g) => g.verdict === "race_orphan" || g.verdict === "historical_duplicate_candidate",
-  );
+  const groups = (await findDuplicateItemGroups(businessId, options)).filter((g) => PLANNED_VERDICTS.has(g.verdict));
   return planOrphanArchivesForGroups(businessId, groups);
 }
+
+const PLANNED_VERDICTS = new Set<DuplicateVerdict>([
+  "race_orphan",
+  "historical_duplicate_candidate",
+  "historical_variant_orphan",
+]);
 
 /**
  * The same plan for groups a caller already holds — the duplicate review screen
@@ -143,9 +150,7 @@ export async function planOrphanArchivesForGroups(
   businessId: string,
   groups: readonly DuplicateSkuGroup[],
 ): Promise<OrphanPlan[]> {
-  const planned = groups.filter(
-    (g) => g.verdict === "race_orphan" || g.verdict === "historical_duplicate_candidate",
-  );
+  const planned = groups.filter((g) => PLANNED_VERDICTS.has(g.verdict));
   if (planned.length === 0) return [];
   return withTenant(businessId, async () => {
     const client = await getPool().connect();
@@ -166,7 +171,9 @@ export async function planOrphanArchivesForGroups(
         plans.push(
           ...(group.verdict === "race_orphan"
             ? planRaceOrphans(group.members, references, inventories)
-            : planHistoricalDuplicates(group.members, references, inventories)),
+            : group.verdict === "historical_duplicate_candidate"
+              ? planHistoricalDuplicates(group.members, references, inventories)
+              : planVariantFamilyOrphans(group.members, references, inventories)),
         );
       }
       return plans;
@@ -213,7 +220,8 @@ export async function restoreArchivedDuplicateItem(
     const { rows: archivedByThis } = await client.query<{ action: string }>(
       `SELECT action FROM audit_log
         WHERE business_id = $1 AND entity = 'item' AND entity_id = $2
-          AND action IN ('item.duplicate_orphan_archived', 'item.duplicate_historical_archived')
+          AND action IN ('item.duplicate_orphan_archived', 'item.duplicate_historical_archived',
+                         'item.duplicate_variant_orphan_archived')
         ORDER BY created_at DESC LIMIT 1`,
       [businessId, input.itemId],
     );
@@ -294,6 +302,19 @@ export async function archiveDuplicateOrphans(
         else {
           if (!twin[0].is_active) found.push("twin_inactive");
           if (normalisedName(twin[0].name) !== normalisedName(locked[0].name)) found.push("different_name");
+          if (plan.kind === "historical_variant_orphan") {
+            const { rows: children } = await client.query(
+              `SELECT 1 FROM items c
+                WHERE c.parent_item_id = $1 AND c.location_id = $3 AND c.is_active
+                  AND EXISTS (SELECT 1 FROM integration_mappings m
+                               WHERE m.business_id = $2 AND m.local_id = c.id AND m.entity_type = 'product')
+                LIMIT 1`,
+              [plan.twinItemId, businessId, locked[0].location_id],
+            );
+            if (locked[0].kind !== "simple" || twin[0].kind !== "variant_parent" || children.length === 0) {
+              found.push("twin_not_variant_family");
+            }
+          }
         }
         if (found.length > 0) return found;
 

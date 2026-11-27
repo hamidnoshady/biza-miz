@@ -41,6 +41,7 @@ describe("the duplicate review's words", () => {
     expect(Object.keys(DUPLICATE_VERDICT_COPY).sort()).toEqual([
       "distinct_remote_records",
       "historical_duplicate_candidate",
+      "historical_variant_orphan",
       "per_branch_copies",
       "race_orphan",
       "same_remote_mapped_twice",
@@ -59,6 +60,7 @@ describe("the duplicate review's words", () => {
       "inventory_unchecked",
       "nonzero_stock",
       "twin_inactive",
+      "twin_not_variant_family",
       "twin_not_woo_product",
     ]);
   });

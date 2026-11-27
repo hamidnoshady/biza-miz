@@ -860,7 +860,11 @@ async function ensureVariationStub(
     // child would be another duplicate. Leave the line on the parent (no
     // duplicate row, no invented stock) and let the product reconciliation run
     // settle identity; the sale itself must still import.
-    await lockProductSkuIdentity(db, locationId, line.sku ?? null);
+    await lockProductSkuIdentity(
+      db,
+      locationId,
+      line.sku ? { column: "sku", value: line.sku } : null,
+    );
     const matches = await findLocalSkuMatches(db, {
       businessId: connection.business_id,
       locationId,

@@ -3,6 +3,7 @@ import type { DuplicateItemMapping, DuplicateItemMember } from "./duplicate-item
 import {
   planHistoricalDuplicates,
   planRaceOrphans,
+  planVariantFamilyOrphans,
   type ItemInventory,
   type ItemReference,
 } from "./duplicate-items-resolution";
@@ -210,5 +211,65 @@ describe("planHistoricalDuplicates", () => {
     );
     expect(plan.status).toBe("blocked");
     expect(plan.blockers).toEqual(["different_name"]);
+  });
+});
+
+describe("planVariantFamilyOrphans", () => {
+  const august = "2026-08-26T08:00:00.000Z";
+  const family = [
+    member("parent", { kind: "variant_parent", quantity: null, mappings: [woo("10")] }),
+    member("child1", { kind: "variant_child", parentItemId: "parent", mappings: [woo("11")] }),
+    member("child2", { kind: "variant_child", parentItemId: "parent", mappings: [woo("12")] }),
+  ];
+
+  it("plans the flat August copy of a mapped variable family for archive", () => {
+    const [plan] = planVariantFamilyOrphans(
+      [...family, member("flat", { createdAt: august })],
+      none("flat"),
+      empty("flat"),
+    );
+    expect(plan).toMatchObject({
+      kind: "historical_variant_orphan",
+      orphanItemId: "flat",
+      twinItemId: "parent",
+      status: "archive",
+    });
+  });
+
+  it("blocks a flat copy that still holds stock", () => {
+    const [plan] = planVariantFamilyOrphans(
+      [...family, member("flat", { createdAt: august, quantity: "1" })],
+      none("flat"),
+      new Map([["flat", { quantity: "1" }]]),
+    );
+    expect(plan.status).toBe("blocked");
+    expect(plan.blockers).toEqual(["nonzero_stock"]);
+  });
+
+  it("does not plan a family with no flat orphan", () => {
+    expect(planVariantFamilyOrphans(family, new Map(), new Map())).toEqual([]);
+  });
+
+  it("does not pair a differently-named simple row", () => {
+    expect(
+      planVariantFamilyOrphans(
+        [...family, member("flat", { createdAt: august, name: "کرم دیگر" })],
+        none("flat"),
+        empty("flat"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps tenant/branch isolation: a family in another branch is not a twin", () => {
+    expect(
+      planVariantFamilyOrphans(
+        [
+          ...family.map((m) => ({ ...m, locationId: "loc-2" })),
+          member("flat", { createdAt: august }),
+        ],
+        none("flat"),
+        empty("flat"),
+      ),
+    ).toEqual([]);
   });
 });
