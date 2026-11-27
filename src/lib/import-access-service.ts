@@ -58,6 +58,16 @@ export interface ImportAccessTarget {
    * session it does not have.
    */
   permissionAlreadyEnforced?: boolean;
+  /**
+   * Do not use the deployment profile as an import gate (#1580).
+   *
+   * The background engine is asked whether the *service* may receive writes;
+   * the install's deployment capability is an authorization answer the HTTP
+   * route already applied, and an import staged on Cloud must be able to run
+   * on a Hybrid install of the same business. Workspace eligibility (#1110) and
+   * service state are still enforced.
+   */
+  deploymentAgnostic?: boolean;
 }
 
 export interface ImportAccessTargetInput extends ImportAccessTarget {
@@ -225,13 +235,21 @@ export async function importAccessForTargets(
           grant === undefined
             ? { status: "pending", startsAt: at, expiresAt: at }
             : grant,
-        workspace: isWorkspace ? axes.workspace : null,
+        workspace: isWorkspace
+          ? axes.workspace
+            ? {
+                ...axes.workspace,
+                deploymentSupported:
+                  target.deploymentAgnostic === true ? true : axes.workspace.deploymentSupported,
+              }
+            : null
+          : null,
         permitted:
           target.permissionAlreadyEnforced === true ||
           importPermissionHeld(permissions, target.requiredPermission),
         importable: target.importable,
         industryEligible: target.industryEligible,
-        deploymentSupported: appKey ? axes.availability[appKey] ?? true : true,
+        deploymentSupported: appKey ? axes.availability[appKey] !== false : true,
         at,
       });
     }),

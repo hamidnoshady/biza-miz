@@ -112,6 +112,11 @@ async function importEntityAccess(
     permissions: new Set<string>(),
     importable: true,
     permissionAlreadyEnforced: true,
+    // The HTTP route already applied the install's deployment gate. The worker
+    // must not re-litigate a property of the *install* (and #1110's runtime
+    // decision is unchanged by an import); industry eligibility and service
+    // state are still read from the canonical axes.
+    deploymentAgnostic: true,
   });
 }
 

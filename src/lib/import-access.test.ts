@@ -186,10 +186,11 @@ describe("resolveImportAccess — selected but not active", () => {
     }
   });
 
-  it("refuses an app the operator switched off", () => {
+  it("refuses an app the operator switched off, but still allows staging", () => {
     const decision = resolveImportAccess(input({ deploymentSupported: false }));
     expect(decision.reason).toBe("app_unavailable");
-    expect(decision.stagingAllowed).toBe(false);
+    expect(decision.allowed).toBe(false);
+    expect(decision.stagingAllowed).toBe(true);
   });
 });
 
@@ -232,12 +233,12 @@ describe("resolveImportAccess — My Workspace", () => {
     expect(decision.allowed).toBe(false);
   });
 
-  it("blocks a deployment that cannot run Workspace", () => {
-    expect(
-      resolveImportAccess(
-        input({ appKey: null, workspace: { ...workspace, deploymentSupported: false } }),
-      ).reason,
-    ).toBe("deployment_unsupported");
+  it("blocks a deployment that cannot run Workspace, but staging stays possible", () => {
+    const decision = resolveImportAccess(
+      input({ appKey: null, workspace: { ...workspace, deploymentSupported: false } }),
+    );
+    expect(decision.reason).toBe("deployment_unsupported");
+    expect(decision.stagingAllowed).toBe(true);
   });
 
   it("is not an APP_KEY: a selection that omits it never matters", () => {

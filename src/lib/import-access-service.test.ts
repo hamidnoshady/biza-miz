@@ -162,6 +162,40 @@ describe("importAccessForTarget", () => {
     expect(decision.reason).toBe("permission");
   });
 
+  it("does not re-litigate the install's deployment for a background import", async () => {
+    mockWorkspace.mockResolvedValue({
+      available: false,
+      eligible: true,
+      serviceEnabled: true,
+      deploymentSupported: false,
+      permitted: true,
+      reason: "DEPLOYMENT_UNSUPPORTED",
+      industry: "architecture_construction",
+      industryReason: "INDUSTRY_ELIGIBLE",
+    });
+    const denied = await importAccessForTarget({
+      businessId,
+      module: "workspace",
+      importable: true,
+      permissions: PERMITTED,
+      at: AT,
+    });
+    expect(denied.reason).toBe("deployment_unsupported");
+
+    const engine = await importAccessForTarget({
+      businessId,
+      module: "workspace",
+      importable: true,
+      permissions: new Set<string>(),
+      permissionAlreadyEnforced: true,
+      deploymentAgnostic: true,
+      at: AT,
+    });
+    // The route already applied the deployment gate; the worker asks only the
+    // service axis and must not strand a job staged on another install.
+    expect(engine.allowed).toBe(true);
+  });
+
   it("uses the Workspace decision for workspace targets, not an APP_KEY", async () => {
     const decision = await importAccessForTarget({
       businessId,

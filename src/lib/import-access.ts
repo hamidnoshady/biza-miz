@@ -240,8 +240,8 @@ export function resolveImportAccess(
     if (!workspace.deploymentSupported) {
       return denied(
         "deployment_unsupported",
-        "این نسخه از استقرار، «میز کار من» را اجرا نمی‌کند.",
-        false,
+        "این نسخه از استقرار، «میز کار من» را اجرا نمی‌کند؛ آماده‌سازی فایل ممکن است اما ورود انجام نمی‌شود.",
+        true,
       );
     }
     if (!workspace.serviceEnabled) {
@@ -280,8 +280,8 @@ export function resolveImportAccess(
   if (input.deploymentSupported === false) {
     return denied(
       "app_unavailable",
-      "این برنامه در حال حاضر در دسترس نیست؛ ورود اطلاعات تا فعال‌شدن آن انجام نمی‌شود.",
-      false,
+      "این برنامه در حال حاضر در دسترس نیست؛ می‌توانید فایل را آماده کنید اما ورود تا فعال‌شدن آن انجام نمی‌شود.",
+      true,
     );
   }
 
