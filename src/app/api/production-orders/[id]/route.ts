@@ -37,6 +37,22 @@ const actionBody = z.discriminatedUnion("action", [
   z.object({ action: z.literal("receive"), quantity, ...common }).strict(),
   z.object({ action: z.literal("complete"), ...common }).strict(),
   z.object({ action: z.literal("cancel"), reason: z.string().trim().min(3).max(300), returns: materialLines.nullable().optional(), ...common }).strict(),
+  // GH #1567 6.3 — subcontracted stages (same route, same lock and idempotency).
+  z.object({ action: z.literal("subcontract_create"), supplierId: uuid, stage: stageCode,
+    ratePerUnitRial: z.number().int().min(0).max(1e13), reference: z.string().trim().max(60).nullable().optional(), ...common }).strict(),
+  z.object({ action: z.literal("subcontract_approve"), subcontractId: uuid, ...common }).strict(),
+  z.object({ action: z.literal("subcontract_send"), subcontractId: uuid, quantity: quantity.nullable().optional(),
+    materials: materialLines.nullable().optional(), ...common }).strict(),
+  z.object({ action: z.literal("subcontract_receive"), subcontractId: uuid, accepted: quantity.nullable().optional(),
+    rework: quantity.nullable().optional(), scrapped: quantity.nullable().optional(), shortage: quantity.nullable().optional(),
+    note: z.string().trim().max(300).nullable().optional(), ...common }).strict(),
+  z.object({ action: z.literal("subcontract_return_materials"), subcontractId: uuid, lines: materialLines.min(1), ...common }).strict(),
+  z.object({ action: z.literal("subcontract_dispute"), subcontractId: uuid, note: z.string().trim().min(3).max(300), ...common }).strict(),
+  z.object({ action: z.literal("subcontract_resolve"), subcontractId: uuid, note: z.string().trim().min(3).max(300),
+    chargebackRial: z.number().int().min(0).max(1e13).nullable().optional(), ...common }).strict(),
+  z.object({ action: z.literal("subcontract_close"), subcontractId: uuid, declareRemainingLost: z.boolean().nullable().optional(),
+    chargebackRial: z.number().int().min(0).max(1e13).nullable().optional(), ...common }).strict(),
+  z.object({ action: z.literal("subcontract_cancel"), subcontractId: uuid, reason: z.string().trim().min(3).max(300), ...common }).strict(),
 ]);
 
 /** GH #1567 6B — one step of a production order (idempotent, version-checked). */

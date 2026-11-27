@@ -178,10 +178,12 @@ export interface WipState {
   receivedValue: bigint;
   returnedValue: bigint;
   writtenOff: bigint;
+  /** GH #1567 6.3 — value charged back to a subcontractor (Dr A/P / Cr WIP). */
+  recovered?: bigint;
 }
 
 export function wipBalance(w: WipState): bigint {
-  return w.materialCost + w.conversionCost - w.receivedValue - w.returnedValue - w.writtenOff;
+  return w.materialCost + w.conversionCost - w.receivedValue - w.returnedValue - w.writtenOff - (w.recovered ?? 0n);
 }
 
 /**
@@ -270,10 +272,18 @@ export function materialCoversReceipt(
   return null;
 }
 
+// GH #1567 6.3 — a subcontract can be prepared and approved before the
+// order starts; work and material go out once the order is released (sending
+// material, like any issue, moves the order into production).
+const SUBCONTRACT_SETUP = ["subcontract_create", "subcontract_approve", "subcontract_cancel"];
+const SUBCONTRACT_WORK = ["subcontract_send", "subcontract_receive", "subcontract_return_materials", "subcontract_dispute",
+  "subcontract_resolve", "subcontract_close"];
+
 const ALLOWED: Record<ProductionOrderStatus, readonly string[]> = {
-  draft: ["release", "cancel", "assign"],
-  released: ["issue", "assign", "cost", "cancel"],
-  in_progress: ["issue", "return", "progress", "scrap", "rework", "assign", "cost", "receive", "complete", "cancel"],
+  draft: ["release", "cancel", "assign", ...SUBCONTRACT_SETUP],
+  released: ["issue", "assign", "cost", "cancel", ...SUBCONTRACT_SETUP, "subcontract_send"],
+  in_progress: ["issue", "return", "progress", "scrap", "rework", "assign", "cost", "receive", "complete", "cancel",
+    ...SUBCONTRACT_SETUP, ...SUBCONTRACT_WORK],
   completed: [],
   cancelled: [],
 };

@@ -22,6 +22,8 @@ export const AP_SOURCE_ATTRIBUTION_CONTRACT = {
   ap_payment_reversal: { mode: "supplier", path: "ap_payment_reversal → ap_payments.supplier_id" },
   cheque: { mode: "conditional", path: "cheques.supplier_id or cheque_events.endorsed_to_supplier_id" },
   installment_interest: { mode: "supplier", path: "installments.party_id → one supplier alias at the plan location" },
+  // GH #1567 6.3 — accepted subcontract work (Cr 2100) and chargebacks (Dr 2100).
+  item_production_subcontract: { mode: "supplier", path: "item_production_order_actions.subcontract_id → item_production_subcontracts.supplier_id" },
   manual: { mode: "intentional_unknown", path: "manual journal has no counterparty dimension" },
   manual_adjustment: { mode: "intentional_unknown", path: "manual adjustment has no counterparty dimension" },
   opening: { mode: "intentional_unknown", path: "opening balance has no counterparty dimension" },
@@ -95,6 +97,12 @@ const sources: Source[] = [
        ORDER BY si.id LIMIT 1
     ) alias ON true`, scope: "ins.business_id = $1 AND ins.direction = 'payable'",
     id: "ins.id", supplier: "alias.id", fields: { installment_plan_id: "ins.id" } },
+  // The journal source id is the production action id; the action names the
+  // subcontract, the subcontract names its supplier alias.
+  { type: "item_production_subcontract",
+    from: "item_production_order_actions pa JOIN item_production_subcontracts psc ON psc.id = pa.subcontract_id",
+    scope: "pa.business_id = $1 AND psc.business_id = $1",
+    id: "pa.id", supplier: "psc.supplier_id", fields: { note: "psc.reference" } },
 ];
 
 export function apSupplierAttributionSql(supplierParameter?: "$3::uuid"): string {

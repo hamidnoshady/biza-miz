@@ -31,6 +31,8 @@ export async function productionScope(guard: GuardResult):
       businessId: session.businessId,
       userId: session.sub ?? null,
       canWriteOff: Boolean(permissions?.has(PERMISSIONS.ledgerApprove)),
+      // GH #1567 6.3 — approving a subcontract commits a payable: same key.
+      canApprove: Boolean(permissions?.has(PERMISSIONS.ledgerApprove)),
     },
   };
 }

@@ -13,6 +13,11 @@
  *   output received     Dr {trade} inventory   / Cr 1310 WIP
  *   WIP written off     Dr 5170 write-down     / Cr 1310 WIP (controlled cancellation)
  *
+ * GH #1567 6.3 — subcontracted stages (journal source `item_production_subcontract`,
+ * attributed to the supplier alias through ap-attribution.ts):
+ *   accepted work       Dr 1310 WIP            / Cr 2100 Accounts Payable
+ *   chargeback          Dr 2100 Accounts Payable / Cr 1310 WIP
+ *
  * Unlike rules that return null when an account is missing, these throw: the
  * stock movement runs in the same transaction, so a missing account must roll
  * the whole action back rather than leave stock moved with no ledger entry.
@@ -36,6 +41,8 @@ export const FASHION_PRODUCTION_EVENTS = {
   conversionAbsorbed: "item_production.conversion_absorbed",
   outputReceived: "item_production.output_received",
   wipWrittenOff: "item_production.wip_written_off",
+  subcontractAccrued: "item_production.subcontract_accrued",
+  subcontractChargeback: "item_production.subcontract_chargeback",
 } as const;
 
 function rule(eventType: string, debit: string, credit: string, memo: string, postingKind: string): void {
@@ -70,3 +77,7 @@ rule(FASHION_PRODUCTION_EVENTS.outputReceived, INVENTORY, WELL_KNOWN_CODES.workI
   "ورود محصول تولیدشده به انبار", "item_production_output");
 rule(FASHION_PRODUCTION_EVENTS.wipWrittenOff, WELL_KNOWN_CODES.inventoryWriteDownExpense, WELL_KNOWN_CODES.workInProgress,
   "زیان کالای در جریان ساخت سفارش لغوشده", "item_production_wip_write_off");
+rule(FASHION_PRODUCTION_EVENTS.subcontractAccrued, WELL_KNOWN_CODES.workInProgress, WELL_KNOWN_CODES.accountsPayable,
+  "اجرت پیمانکار برای کار پذیرفته‌شده در سفارش تولید", "item_production_subcontract_accrual");
+rule(FASHION_PRODUCTION_EVENTS.subcontractChargeback, WELL_KNOWN_CODES.accountsPayable, WELL_KNOWN_CODES.workInProgress,
+  "کسر خسارت از طلب پیمانکار سفارش تولید", "item_production_subcontract_chargeback");

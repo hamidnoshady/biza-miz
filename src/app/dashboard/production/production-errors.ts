@@ -40,6 +40,23 @@ const MESSAGES: Record<string, string> = {
   stock_insufficient: "موجودی ماده کافی نیست.",
   stock_stock_missing: "این ماده هنوز موجودی ثبت‌شده ندارد.",
   stock_cost_missing: "این ماده بهای تمام‌شده ندارد؛ ابتدا خرید یا موجودی اول دوره را ثبت کنید.",
+  // GH #1567 6.3 — subcontracted stages.
+  supplier_not_found: "این تأمین‌کننده در این شعبه پیدا نشد.",
+  supplier_inactive: "این تأمین‌کننده غیرفعال است.",
+  subcontract_not_found: "قرارداد پیمانکار پیدا نشد.",
+  subcontract_action_not_allowed: "این کار در وضعیت فعلی قرارداد پیمانکار مجاز نیست.",
+  subcontract_approval_required: "تأیید قرارداد پیمانکار به دسترسی «تأیید سند حسابداری» نیاز دارد.",
+  subcontract_quantity_exceeded: "این تعداد بیش از واحدهای در دسترس این مرحله یا نزد پیمانکار است.",
+  nothing_to_send: "تعداد یا موادی برای ارسال به پیمانکار وارد نشده است.",
+  material_not_in_custody: "این ماده نزد این پیمانکار نیست.",
+  custody_return_exceeds_held: "بیش از مقدار نزد پیمانکار نمی‌توان برگشت گرفت.",
+  material_held_by_subcontractor: "بخشی از این ماده نزد پیمانکار است؛ آن را از قرارداد پیمانکار برگشت بگیرید.",
+  units_with_subcontractor: "این واحدها نزد پیمانکار است؛ نتیجهٔ آن‌ها را از قرارداد پیمانکار ثبت کنید.",
+  subcontract_not_settled: "هنوز واحد یا ماده‌ای نزد پیمانکار مانده است؛ ابتدا تحویل، برگشت یا اعلام مفقودی کنید.",
+  subcontract_has_accepted_work: "کار پذیرفته‌شده دارد و لغو نمی‌شود؛ قرارداد را ببندید.",
+  subcontract_custody_held: "ابتدا مواد نزد پیمانکار را برگشت بگیرید.",
+  subcontract_open: "این سفارش قرارداد پیمانکار باز دارد؛ ابتدا آن را ببندید یا لغو کنید.",
+  chargeback_exceeds_wip: "مبلغ کسر خسارت از مانده کالای در جریان ساخت بیشتر است.",
 };
 
 export function productionErrorMessage(code: unknown, fallback = "انجام نشد. دوباره تلاش کنید."): string {

@@ -48,6 +48,18 @@ import { rialText } from "./inventory-exact";
 import { ItemStockValuationError, lockFungibleStock, relieveFungibleStock, restoreFungibleStock } from "./item-stock-valuation";
 import { emitDomainEvent } from "./posting-engine";
 import { WELL_KNOWN_CODES } from "./coa-template";
+import {
+  branchSuppliers,
+  custodyHeldByMaterial,
+  hasOpenSubcontract,
+  heldUnitsAt,
+  loadSubcontracts,
+  runSubcontractAction,
+  subcontractDetails,
+  SUBCONTRACT_SOURCE_TYPE,
+  type SubcontractOrderAction,
+} from "./fashion-production-subcontract-service";
+import { isSubcontractAction } from "./fashion-production-subcontract";
 
 export const PRODUCTION_SOURCE_TYPE = "item_production_order";
 
@@ -56,6 +68,8 @@ export interface ProductionActor {
   userId: string | null;
   /** Holds `ledger.approve` — required to write residual WIP off on cancel/close. */
   canWriteOff: boolean;
+  /** GH #1567 6.3 — may approve a subcontract (commits a payable). Defaults to `canWriteOff` (both are `ledger.approve`). */
+  canApprove?: boolean;
 }
 
 export class FashionProductionError extends Error {
@@ -196,18 +210,19 @@ interface OrderRow {
   id: string; location_id: string; bom_id: string | null; output_item_id: string; reference: string;
   planned_quantity: string; received_quantity: string; scrapped_quantity: string; status: ProductionOrderStatus;
   due_date: string | null; material_cost_rial: string; conversion_cost_rial: string; received_value_rial: string;
-  returned_value_rial: string; written_off_rial: string; version: number; created_at: string; closed_at: string | null;
+  returned_value_rial: string; written_off_rial: string; recovered_rial: string; version: number; created_at: string; closed_at: string | null;
 }
 
 const ORDER_COLUMNS = `id, location_id, bom_id, output_item_id, reference, trim_scale(planned_quantity)::text AS planned_quantity,
   trim_scale(received_quantity)::text AS received_quantity, trim_scale(scrapped_quantity)::text AS scrapped_quantity, status,
   due_date::text, material_cost_rial::text, conversion_cost_rial::text, received_value_rial::text, returned_value_rial::text,
-  written_off_rial::text, version, created_at::text, closed_at::text`;
+  written_off_rial::text, recovered_rial::text, version, created_at::text, closed_at::text`;
 
 function wipOf(o: OrderRow) {
   return {
     materialCost: BigInt(o.material_cost_rial), conversionCost: BigInt(o.conversion_cost_rial),
     receivedValue: BigInt(o.received_value_rial), returnedValue: BigInt(o.returned_value_rial), writtenOff: BigInt(o.written_off_rial),
+    recovered: BigInt(o.recovered_rial),
   };
 }
 
@@ -221,7 +236,8 @@ function orderSummary(o: OrderRow, outputName: string, stages: StageState[]) {
     outstandingQuantity: outstandingUnits(o.planned_quantity, o.scrapped_quantity, o.received_quantity),
     costs: {
       materialRial: Number(wip.materialCost), conversionRial: Number(wip.conversionCost), receivedRial: Number(wip.receivedValue),
-      returnedRial: Number(wip.returnedValue), writtenOffRial: Number(wip.writtenOff), wipRial: Number(wipBalance(wip)),
+      returnedRial: Number(wip.returnedValue), writtenOffRial: Number(wip.writtenOff), recoveredRial: Number(wip.recovered ?? 0n),
+      wipRial: Number(wipBalance(wip)),
       unitCostRial: unitCost(wip.receivedValue, o.received_quantity),
     },
   };
@@ -271,7 +287,7 @@ async function readOrder(client: PoolClient, businessId: string, locationId: str
 
 async function orderDetail(client: PoolClient, businessId: string, locationId: string, orderId: string) {
   const order = await readOrder(client, businessId, locationId, orderId, false);
-  const [stages, materials, output, actions] = await Promise.all([
+  const [stages, materials, output, actions, subcontracts, suppliers] = await Promise.all([
     loadStages(client, orderId),
     loadMaterials(client, orderId),
     client.query<{ name: string; unit: string | null }>(`SELECT name, unit FROM items WHERE id = $1`, [order.output_item_id]),
@@ -281,6 +297,8 @@ async function orderDetail(client: PoolClient, businessId: string, locationId: s
         WHERE a.order_id = $1 ORDER BY a.at, a.id`,
       [orderId],
     ),
+    subcontractDetails(client, orderId),
+    branchSuppliers(client, businessId, locationId),
   ]);
   const stageStates = stages.map((s) => ({ seq: s.seq, code: s.code, completed: s.completed, scrapped: s.scrapped }));
   return {
@@ -298,6 +316,9 @@ async function orderDetail(client: PoolClient, businessId: string, locationId: s
       id: a.id, action: a.action, actorName: a.actor_name, detail: a.detail,
       amountRial: a.amount_rial == null ? null : Number(a.amount_rial), at: a.at,
     })),
+    // GH #1567 6.3 — subcontracted stages and the branch's canonical suppliers.
+    subcontracts,
+    suppliers,
   };
 }
 
@@ -352,12 +373,12 @@ async function priorAction(client: PoolClient, businessId: string, key: string) 
 
 async function logAction(
   client: PoolClient, actor: ProductionActor, orderId: string, actionId: string, action: string, key: string,
-  detail: Record<string, unknown>, amount: bigint | null,
+  detail: Record<string, unknown>, amount: bigint | null, subcontractId: string | null = null,
 ) {
   await client.query(
-    `INSERT INTO item_production_order_actions (id, business_id, order_id, action, idempotency_key, actor_user_id, detail, amount_rial)
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
-    [actionId, actor.businessId, orderId, action, key, actor.userId, JSON.stringify(detail), amount == null ? null : amount.toString()],
+    `INSERT INTO item_production_order_actions (id, business_id, order_id, action, idempotency_key, actor_user_id, detail, amount_rial, subcontract_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)`,
+    [actionId, actor.businessId, orderId, action, key, actor.userId, JSON.stringify(detail), amount == null ? null : amount.toString(), subcontractId],
   );
 }
 
@@ -445,7 +466,8 @@ export type ProductionOrderAction =
   | { action: "cost"; kind: ProductionCostKind; amountRial: number; stage?: string | null; note?: string | null; supplierName?: string | null }
   | { action: "receive"; quantity: string }
   | { action: "complete" }
-  | { action: "cancel"; reason: string; returns?: { materialItemId: string; quantity: string }[] | null };
+  | { action: "cancel"; reason: string; returns?: { materialItemId: string; quantity: string }[] | null }
+  | SubcontractOrderAction;
 
 async function reservedElsewhere(client: PoolClient, businessId: string, orderId: string, itemIds: string[]): Promise<Map<string, string>> {
   const { rows } = await client.query<{ material_item_id: string; reserved: string }>(
@@ -468,15 +490,67 @@ async function lockMaterialStock(client: PoolClient, itemIds: string[]): Promise
   return onHand;
 }
 
+/**
+ * Issues material into the order's WIP at the exact WAC value relieved
+ * (Dr 1310 / Cr trade inventory) — the one issue path, shared by the in-house
+ * issue and a subcontract's material send (GH #1567 6.3).
+ */
+async function issueMaterials(
+  client: PoolClient, actor: ProductionActor, locationId: string, orderId: string, actionId: string,
+  materials: Awaited<ReturnType<typeof loadMaterials>>, requested: { materialItemId: string; quantity: string }[],
+): Promise<{ total: bigint; issued: { materialItemId: string; quantity: string; valueRial: string }[] }> {
+  const byId = new Map(materials.map((m) => [m.material_item_id, m]));
+  for (const l of requested) if (!byId.has(l.materialItemId)) fail("material_not_on_order", 409, { materialItemId: l.materialItemId });
+  const ids = requested.map((l) => l.materialItemId);
+  const onHand = await lockMaterialStock(client, ids);
+  const elsewhere = await reservedElsewhere(client, actor.businessId, orderId, ids);
+  const short = shortages(requested.map((l) => ({
+    materialItemId: l.materialItemId, name: byId.get(l.materialItemId)!.name, need: l.quantity,
+    onHand: onHand.get(l.materialItemId) ?? "0", reservedElsewhere: elsewhere.get(l.materialItemId) ?? "0",
+  })));
+  if (short.length > 0) fail("material_shortage", 409, { shortages: short });
+  let total = 0n;
+  const issued: { materialItemId: string; quantity: string; valueRial: string }[] = [];
+  for (const l of requested) {
+    const relief = await relieveFungibleStock(client, { itemId: l.materialItemId, quantity: l.quantity });
+    const value = BigInt(relief.value);
+    total += value;
+    issued.push({ materialItemId: l.materialItemId, quantity: l.quantity, valueRial: value.toString() });
+    await client.query(
+      `UPDATE item_production_order_materials SET issued_quantity = issued_quantity + $3, issued_value_rial = issued_value_rial + $4
+        WHERE order_id = $1 AND material_item_id = $2`,
+      [orderId, l.materialItemId, l.quantity, value.toString()],
+    );
+  }
+  await client.query(`UPDATE item_production_orders SET material_cost_rial = material_cost_rial + $2 WHERE id = $1`, [orderId, total.toString()]);
+  await post(client, actor, locationId, orderId, actionId, FASHION_PRODUCTION_EVENTS.materialsIssued, total);
+  return { total, issued };
+}
+
+/** In-house returns may not touch material a subcontractor still holds (GH #1567 6.3). */
+async function assertNotInCustody(client: PoolClient, orderId: string, materials: Awaited<ReturnType<typeof loadMaterials>>,
+  lines: { materialItemId: string; quantity: string }[]): Promise<void> {
+  const custody = await custodyHeldByMaterial(client, orderId);
+  const byId = new Map(materials.map((m) => [m.material_item_id, m]));
+  for (const l of lines) {
+    const line = byId.get(l.materialItemId);
+    if (!line) continue;
+    const onFloor = new Decimal(line.issued).minus(line.returned).minus(custody.get(l.materialItemId) ?? "0");
+    if (new Decimal(l.quantity).gt(onFloor)) {
+      fail("material_held_by_subcontractor", 409, { materialItemId: l.materialItemId, available: Decimal.max(onFloor, 0).toFixed() });
+    }
+  }
+}
+
 async function post(client: PoolClient, actor: ProductionActor, locationId: string, orderId: string, actionId: string,
-  eventType: string, amount: bigint) {
+  eventType: string, amount: bigint, sourceType: string = PRODUCTION_SOURCE_TYPE) {
   if (amount <= 0n) return;
   await emitDomainEvent(client, {
     businessId: actor.businessId,
     locationId,
     eventType,
     payload: { amount: rialText(amount.toString()), productionOrderId: orderId },
-    sourceType: PRODUCTION_SOURCE_TYPE,
+    sourceType,
     sourceId: orderId,
     createdBy: actor.userId,
     postingSourceId: actionId,
@@ -517,10 +591,22 @@ export async function applyProductionOrderAction(
     const stagesRaw = await loadStages(client, orderId);
     const stages: StageState[] = stagesRaw.map((s) => ({ seq: s.seq, code: s.code, completed: s.completed, scrapped: s.scrapped }));
     const materials = await loadMaterials(client, orderId);
+    const subcontracts = await loadSubcontracts(client, orderId, false);
     let nextStatus: ProductionOrderStatus = order.status;
     let amount: bigint | null = null;
     let detail: Record<string, unknown> = {};
+    let subcontractId: string | null = null;
     const wip = wipOf(order);
+    // In-house work at a stage may not touch units a subcontractor holds.
+    const assertFreeAtStage = (stage: string, quantity: Decimal) => {
+      const index = stages.findIndex((s) => s.code === stage);
+      if (index < 0) return;
+      const held = new Decimal(heldUnitsAt(subcontracts, stage));
+      if (held.lte(0)) return;
+      const inflow = index === 0 ? new Decimal(order.planned_quantity) : new Decimal(stages[index - 1].completed);
+      const free = inflow.minus(stages[index].completed).minus(stages[index].scrapped).minus(held);
+      if (quantity.gt(free)) fail("units_with_subcontractor", 409, { stage, held: held.toFixed(), available: Decimal.max(free, 0).toFixed() });
+    };
 
     try {
       switch (input.action) {
@@ -546,31 +632,7 @@ export async function applyProductionOrderAction(
               .map((m) => ({ materialItemId: m.material_item_id, quantity: Decimal.max(new Decimal(m.required).minus(m.issued), 0).toFixed() }))
               .filter((l) => new Decimal(l.quantity).gt(0));
           if (requested.length === 0) fail("nothing_to_issue");
-          const byId = new Map(materials.map((m) => [m.material_item_id, m]));
-          for (const l of requested) if (!byId.has(l.materialItemId)) fail("material_not_on_order", 409, { materialItemId: l.materialItemId });
-          const ids = requested.map((l) => l.materialItemId);
-          const onHand = await lockMaterialStock(client, ids);
-          const elsewhere = await reservedElsewhere(client, actor.businessId, orderId, ids);
-          const short = shortages(requested.map((l) => ({
-            materialItemId: l.materialItemId, name: byId.get(l.materialItemId)!.name, need: l.quantity,
-            onHand: onHand.get(l.materialItemId) ?? "0", reservedElsewhere: elsewhere.get(l.materialItemId) ?? "0",
-          })));
-          if (short.length > 0) fail("material_shortage", 409, { shortages: short });
-          let total = 0n;
-          const issued: { materialItemId: string; quantity: string; valueRial: string }[] = [];
-          for (const l of requested) {
-            const relief = await relieveFungibleStock(client, { itemId: l.materialItemId, quantity: l.quantity });
-            const value = BigInt(relief.value);
-            total += value;
-            issued.push({ materialItemId: l.materialItemId, quantity: l.quantity, valueRial: value.toString() });
-            await client.query(
-              `UPDATE item_production_order_materials SET issued_quantity = issued_quantity + $3, issued_value_rial = issued_value_rial + $4
-                WHERE order_id = $1 AND material_item_id = $2`,
-              [orderId, l.materialItemId, l.quantity, value.toString()],
-            );
-          }
-          await client.query(`UPDATE item_production_orders SET material_cost_rial = material_cost_rial + $2 WHERE id = $1`, [orderId, total.toString()]);
-          await post(client, actor, locationId, orderId, actionId, FASHION_PRODUCTION_EVENTS.materialsIssued, total);
+          const { total, issued } = await issueMaterials(client, actor, locationId, orderId, actionId, materials, requested);
           amount = total;
           nextStatus = "in_progress";
           detail = { issued };
@@ -578,11 +640,13 @@ export async function applyProductionOrderAction(
         }
         case "return": {
           if (!input.lines || input.lines.length === 0) fail("nothing_to_return", 400);
+          await assertNotInCustody(client, orderId, materials, input.lines.map((l) => ({ materialItemId: l.materialItemId, quantity: positiveQuantity(l.quantity) })));
           amount = await returnMaterials(client, actor, locationId, orderId, actionId, materials, input.lines, wip);
           detail = { returned: input.lines };
           break;
         }
         case "progress": {
+          assertFreeAtStage(input.stage, new Decimal(input.completed ?? "0").plus(input.scrapped ?? "0"));
           const after = applyProgress(stages, order.planned_quantity, input.stage, {
             completed: input.completed ?? undefined, scrapped: input.scrapped ?? undefined,
           });
@@ -594,6 +658,7 @@ export async function applyProductionOrderAction(
           break;
         }
         case "rework": {
+          assertFreeAtStage(input.fromStage, new Decimal(positiveQuantity(input.quantity)));
           const after = applyRework(stages, order.planned_quantity, input.fromStage, input.toStage, input.quantity);
           await writeStages(client, orderId, stages, after, input.toStage, positiveQuantity(input.quantity));
           detail = { fromStage: input.fromStage, toStage: input.toStage, quantity: positiveQuantity(input.quantity), note: input.note ?? null };
@@ -640,10 +705,13 @@ export async function applyProductionOrderAction(
           await post(client, actor, locationId, orderId, actionId, FASHION_PRODUCTION_EVENTS.outputReceived, value);
           amount = value;
           detail = { quantity: qty, valueRial: value.toString() };
-          if (new Decimal(outstanding).eq(qty)) nextStatus = "completed";
+          // The last receipt completes the order — unless a subcontract is still
+          // open (custody or a dispute to settle); then «بستن سفارش» does it.
+          if (new Decimal(outstanding).eq(qty) && !hasOpenSubcontract(subcontracts)) nextStatus = "completed";
           break;
         }
         case "complete": {
+          if (hasOpenSubcontract(subcontracts)) fail("subcontract_open", 409);
           const outstanding = outstandingUnits(order.planned_quantity, order.scrapped_quantity, order.received_quantity);
           if (new Decimal(outstanding).gt(0)) fail("units_outstanding", 409, { outstanding });
           amount = await writeOffResidual(client, actor, locationId, orderId, actionId, wipBalance(wip));
@@ -652,8 +720,10 @@ export async function applyProductionOrderAction(
           break;
         }
         case "cancel": {
+          if (hasOpenSubcontract(subcontracts)) fail("subcontract_open", 409);
           let returned = 0n;
           if (input.returns && input.returns.length > 0) {
+            await assertNotInCustody(client, orderId, materials, input.returns.map((l) => ({ materialItemId: l.materialItemId, quantity: positiveQuantity(l.quantity) })));
             returned = await returnMaterials(client, actor, locationId, orderId, actionId, materials, input.returns, wip);
           }
           const residual = wipBalance({ ...wip, returnedValue: wip.returnedValue + returned });
@@ -661,6 +731,26 @@ export async function applyProductionOrderAction(
           amount = returned + writtenOff;
           nextStatus = "cancelled";
           detail = { reason: input.reason, returns: input.returns ?? [], returnedRial: returned.toString(), writtenOffRial: writtenOff.toString() };
+          break;
+        }
+        default: {
+          if (!isSubcontractAction(input.action)) fail("action_not_allowed", 409);
+          const result = await runSubcontractAction({
+            client,
+            actor: { businessId: actor.businessId, userId: actor.userId, canApprove: actor.canApprove ?? actor.canWriteOff },
+            locationId, orderId, actionId,
+            plannedQuantity: order.planned_quantity, orderScrapped: order.scrapped_quantity, orderReceived: order.received_quantity,
+            stages, materials, wip,
+            fail,
+            issue: (lines) => issueMaterials(client, actor, locationId, orderId, actionId, materials, lines),
+            returnToStock: (lines) => returnMaterials(client, actor, locationId, orderId, actionId, materials, lines, wip),
+            writeStages: (before, after) => writeStages(client, orderId, before, after),
+            post: (eventType, value, sourceType) => post(client, actor, locationId, orderId, actionId, eventType, value, sourceType),
+          }, input as SubcontractOrderAction);
+          subcontractId = result.subcontractId;
+          detail = result.detail;
+          amount = result.amount;
+          if (result.statusAfterOrder) nextStatus = result.statusAfterOrder;
           break;
         }
       }
@@ -675,7 +765,7 @@ export async function applyProductionOrderAction(
         WHERE id = $1`,
       [orderId, nextStatus],
     );
-    await logAction(client, actor, orderId, actionId, input.action, input.idempotencyKey, detail, amount);
+    await logAction(client, actor, orderId, actionId, input.action, input.idempotencyKey, detail, amount, subcontractId);
     return { ...(await orderDetail(client, actor.businessId, locationId, orderId)), duplicate: false };
   });
 }
@@ -738,14 +828,14 @@ export async function productionReport(actor: ProductionActor, locationId: strin
               trim_scale(COALESCE(sum(received_quantity), 0))::text AS received,
               trim_scale(COALESCE(sum(scrapped_quantity), 0))::text AS scrapped,
               COALESCE(sum(received_value_rial), 0)::text AS received_value,
-              COALESCE(sum(material_cost_rial + conversion_cost_rial - received_value_rial - returned_value_rial - written_off_rial), 0)::text AS wip,
+              COALESCE(sum(material_cost_rial + conversion_cost_rial - received_value_rial - returned_value_rial - written_off_rial - recovered_rial), 0)::text AS wip,
               COALESCE(sum(conversion_cost_rial), 0)::text AS conversion,
               COALESCE(sum(material_cost_rial - returned_value_rial), 0)::text AS material
          FROM item_production_orders WHERE business_id = $1 AND location_id = $2`,
       [actor.businessId, locationId],
     );
     const { rows: [sub] } = await client.query<{ wip: string }>(
-      `SELECT COALESCE(sum(material_cost_rial + conversion_cost_rial - received_value_rial - returned_value_rial - written_off_rial), 0)::text AS wip
+      `SELECT COALESCE(sum(material_cost_rial + conversion_cost_rial - received_value_rial - returned_value_rial - written_off_rial - recovered_rial), 0)::text AS wip
          FROM item_production_orders WHERE business_id = $1`,
       [actor.businessId],
     );
@@ -754,6 +844,30 @@ export async function productionReport(actor: ProductionActor, locationId: strin
          FROM journal_lines jl JOIN accounts a ON a.id = jl.account_id
         WHERE a.business_id = $1 AND a.code = $2`,
       [actor.businessId, WELL_KNOWN_CODES.workInProgress],
+    );
+    // GH #1567 6.3 — the subcontract payable subledger (accrued − charged
+    // back) against the A/P lines its journal source posted, plus what is
+    // still outside the business (units and material with subcontractors).
+    const { rows: [sc] } = await client.query<{ open: string; held: string; accrued: string; chargeback: string }>(
+      `SELECT count(*) FILTER (WHERE sc.status IN ('draft', 'approved', 'disputed'))::text AS open,
+              trim_scale(COALESCE(sum(sc.sent_quantity - sc.accepted_quantity - sc.scrapped_quantity - sc.shortage_quantity)
+                FILTER (WHERE sc.status IN ('approved', 'disputed')), 0))::text AS held,
+              COALESCE(sum(sc.accrued_rial), 0)::text AS accrued, COALESCE(sum(sc.chargeback_rial), 0)::text AS chargeback
+         FROM item_production_subcontracts sc JOIN item_production_orders o ON o.id = sc.order_id
+        WHERE sc.business_id = $1 AND o.location_id = $2`,
+      [actor.businessId, locationId],
+    );
+    const { rows: [scSub] } = await client.query<{ net: string }>(
+      `SELECT COALESCE(sum(accrued_rial - chargeback_rial), 0)::text AS net FROM item_production_subcontracts WHERE business_id = $1`,
+      [actor.businessId],
+    );
+    const { rows: [scGl] } = await client.query<{ net: string }>(
+      `SELECT COALESCE(sum(jl.credit - jl.debit), 0)::text AS net
+         FROM journal_lines jl
+         JOIN journal_entries je ON je.id = jl.entry_id
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE je.business_id = $1 AND je.source_type = $2 AND a.code = $3`,
+      [actor.businessId, SUBCONTRACT_SOURCE_TYPE, WELL_KNOWN_CODES.accountsPayable],
     );
     const processed = new Decimal(s.received).plus(s.scrapped);
     return {
@@ -764,6 +878,13 @@ export async function productionReport(actor: ProductionActor, locationId: strin
       materialCostRial: Number(s.material), conversionCostRial: Number(s.conversion), wipRial: Number(s.wip),
       reconciliation: {
         subledgerWipRial: Number(sub.wip), glWipRial: Number(gl.balance), reconciled: BigInt(sub.wip) === BigInt(gl.balance),
+      },
+      subcontracting: {
+        openSubcontracts: Number(sc.open), unitsWithSubcontractors: sc.held,
+        accruedRial: Number(sc.accrued), chargebackRial: Number(sc.chargeback),
+        reconciliation: {
+          subledgerPayableRial: Number(scSub.net), glPayableRial: Number(scGl.net), reconciled: BigInt(scSub.net) === BigInt(scGl.net),
+        },
       },
     };
   });

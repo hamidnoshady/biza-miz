@@ -71,6 +71,7 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   periodic_closing: "بستن دوره انبار (ادواری)",
   item_stock_count: "شمارش موجودی کالا",
   item_production_order: "سفارش تولید",
+  item_production_subcontract: "پیمانکار تولید",
   // GH #1567 6D — fashion consignment (امانی) by contract.
   fashion_consignment_contract: "قرارداد کالای امانی",
   fashion_consignment_sale: "فروش کالای امانی",
