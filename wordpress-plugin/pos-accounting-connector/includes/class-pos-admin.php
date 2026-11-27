@@ -193,8 +193,10 @@ class POS_Connector_Admin {
 	private static function render_tabs( $current ) {
 		echo '<nav class="pos-tabs" aria-label="' . esc_attr__( 'بخش‌های افزونه', 'pos-accounting-connector' ) . '">';
 		foreach ( self::sections() as $key => $section ) {
-			$url = admin_url( 'admin.php?page=' . $section['slug'] );
-			echo '<a class="pos-tab ' . ( $current === $key ? 'is-active' : '' ) . '" href="' . esc_url( $url ) . '">' . esc_html( $section['label'] ) . '</a>';
+			$url      = admin_url( 'admin.php?page=' . $section['slug'] );
+			$is_active = $current === $key;
+			echo '<a class="pos-tab ' . ( $is_active ? 'is-active' : '' ) . '" href="' . esc_url( $url ) . '"'
+				. ( $is_active ? ' aria-current="page"' : '' ) . '>' . esc_html( $section['label'] ) . '</a>';
 		}
 		echo '</nav>';
 	}
@@ -205,8 +207,10 @@ class POS_Connector_Admin {
 		}
 		$section  = self::current_section();
 		$settings = pos_connector_settings();
-		$counts   = POS_Connector_Queue::counts();
 		$notice   = isset( $_GET['pos_notice'] ) ? self::notice_text( sanitize_key( wp_unslash( $_GET['pos_notice'] ) ) ) : null;
+		// The detail a handler left for this user. It was read before it was
+		// assigned, so every notice silently lost its explanation (#1206).
+		$detail   = $notice ? self::take_notice_detail() : '';
 		?>
 		<div class="wrap pos-admin" dir="rtl">
 			<header class="pos-hero">
@@ -229,13 +233,13 @@ class POS_Connector_Admin {
 			<?php elseif ( empty( $settings['base_url'] ) || empty( $settings['token'] ) ) : ?>
 				<?php self::render_wizard( $settings ); ?>
 			<?php elseif ( 'dashboard' === $section ) : ?>
-				<?php self::render_dashboard( $settings, $counts ); ?>
+				<?php self::render_dashboard( $settings, POS_Connector_Queue::counts() ); ?>
 			<?php elseif ( 'connection' === $section ) : ?>
 				<?php self::render_connection( $settings ); ?>
 			<?php elseif ( 'synchronization' === $section ) : ?>
 				<?php self::render_synchronization( $settings ); ?>
 			<?php elseif ( 'queue' === $section ) : ?>
-				<?php self::render_queue( $counts ); ?>
+				<?php self::render_queue(); ?>
 			<?php elseif ( 'diagnostics' === $section ) : ?>
 				<?php self::render_diagnostics( $settings ); ?>
 			<?php elseif ( 'updates' === $section ) : ?>
@@ -600,13 +604,108 @@ class POS_Connector_Admin {
 		<?php
 	}
 
-	private static function render_queue( $counts ) {
+	/**
+	 * The local queue, one bounded server-side page at a time (#1206 UX-04).
+	 *
+	 * Deliberately not a client-side table: a 10,000-row queue must never be
+	 * rendered or shipped to the browser. Filters are read-only GET state, and
+	 * the page only receives topic/reference/status/attempts/timestamps and a
+	 * sanitized error line — never the event payload, a token or customer data.
+	 */
+	private static function render_queue() {
+		$counts   = POS_Connector_Queue::counts();
+		$statuses = array(
+			'open'     => __( 'باز (در انتظار و ناموفق)', 'pos-accounting-connector' ),
+			'pending'  => __( 'در انتظار', 'pos-accounting-connector' ),
+			'deferred' => __( 'تلاش مجدد زمان‌بندی‌شده', 'pos-accounting-connector' ),
+			'failed'   => __( 'ناموفق', 'pos-accounting-connector' ),
+			'sent'     => __( 'ارسال‌شده', 'pos-accounting-connector' ),
+			'all'      => __( 'همه', 'pos-accounting-connector' ),
+		);
+		$status = isset( $_GET['pos_queue_status'] ) ? sanitize_key( wp_unslash( $_GET['pos_queue_status'] ) ) : 'open';
+		if ( ! isset( $statuses[ $status ] ) ) {
+			$status = 'open';
+		}
+		$search = isset( $_GET['pos_queue_search'] ) ? sanitize_text_field( wp_unslash( $_GET['pos_queue_search'] ) ) : '';
+		$after  = isset( $_GET['pos_queue_after'] ) ? max( 0, (int) $_GET['pos_queue_after'] ) : 0;
+		$page   = POS_Connector_Queue::page( $after, 20, $status, $search );
+		$link   = static function ( array $extra ) {
+			return add_query_arg(
+				array_merge( array( 'page' => 'pos-connector-queue' ), $extra ),
+				admin_url( 'admin.php' )
+			);
+		};
+		$tones = array(
+			'sent'    => 'good',
+			'failed'  => 'bad',
+			'pending' => 'neutral',
+		);
 		?>
 		<section class="pos-panel">
-			<h2><?php esc_html_e( 'صف محلی افزونه و خطاها', 'pos-accounting-connector' ); ?></h2>
-			<p><?php esc_html_e( 'این صف داخل وردپرس است؛ با صف خروجی پنل بیزامیز یکی نیست. اگر وردپرس نتواند به پنل برسد، رویدادها اینجا باقی می‌مانند.', 'pos-accounting-connector' ); ?></p>
+			<h2><?php esc_html_e( 'صف محلی وردپرس ← بیزامیز', 'pos-accounting-connector' ); ?></h2>
+			<p><?php esc_html_e( 'این صف داخل وردپرس است و فقط یک جهت دارد: رویدادهای وردپرس که هنوز به بیزامیز نرسیده‌اند. صف خروجی بیزامیز ← وردپرس جداست. فقط موضوع، شناسه، وضعیت و خطای پاک‌سازی‌شده نمایش داده می‌شود؛ محتوای رویداد و اطلاعات مشتری هرگز اینجا دیده نمی‌شود.', 'pos-accounting-connector' ); ?></p>
 			<div class="pos-grid pos-grid--cards"><?php self::card( __( 'وضعیت صف', 'pos-accounting-connector' ), array( __( 'در انتظار', 'pos-accounting-connector' ) => (int) $counts['pending'], __( 'در بک‌آف', 'pos-accounting-connector' ) => POS_Connector_Queue::deferred_count(), __( 'ناموفق', 'pos-accounting-connector' ) => (int) $counts['failed'], __( 'ارسال‌شده', 'pos-accounting-connector' ) => (int) $counts['sent'] ) ); ?></div>
-			<div class="pos-actions"><?php self::action_button( 'pos_connector_retry', __( 'تلاش دوباره برای ناموفق‌ها', 'pos-accounting-connector' ), 'secondary' ); ?></div>
+			<form method="get" action="<?php echo esc_url( admin_url( 'admin.php' ) ); ?>" class="pos-form pos-queue-filters">
+				<input type="hidden" name="page" value="pos-connector-queue" />
+				<label>
+					<span><?php esc_html_e( 'وضعیت', 'pos-accounting-connector' ); ?></span>
+					<select name="pos_queue_status">
+						<?php foreach ( $statuses as $value => $label ) : ?>
+							<option value="<?php echo esc_attr( $value ); ?>" <?php selected( $status, $value ); ?>><?php echo esc_html( $label ); ?></option>
+						<?php endforeach; ?>
+					</select>
+				</label>
+				<label>
+					<span><?php esc_html_e( 'جست‌وجو', 'pos-accounting-connector' ); ?></span>
+					<input type="search" name="pos_queue_search" value="<?php echo esc_attr( $search ); ?>" placeholder="<?php esc_attr_e( 'موضوع یا شناسهٔ رویداد', 'pos-accounting-connector' ); ?>" />
+				</label>
+				<?php submit_button( __( 'اعمال', 'pos-accounting-connector' ), 'secondary', 'submit', false ); ?>
+			</form>
+			<p class="description"><?php esc_html_e( 'حداکثر ۲۰ رویداد در هر صفحه؛ برای دیدن بقیه از «صفحهٔ بعد» استفاده کنید.', 'pos-accounting-connector' ); ?></p>
+			<div class="pos-queue-scroll">
+				<table class="widefat striped pos-queue-table">
+					<thead>
+						<tr>
+							<th><?php esc_html_e( 'موضوع', 'pos-accounting-connector' ); ?></th>
+							<th><?php esc_html_e( 'شناسه', 'pos-accounting-connector' ); ?></th>
+							<th><?php esc_html_e( 'وضعیت', 'pos-accounting-connector' ); ?></th>
+							<th><?php esc_html_e( 'تلاش', 'pos-accounting-connector' ); ?></th>
+							<th><?php esc_html_e( 'ایجاد', 'pos-accounting-connector' ); ?></th>
+							<th><?php esc_html_e( 'تلاش بعدی', 'pos-accounting-connector' ); ?></th>
+							<th><?php esc_html_e( 'آخرین خطا', 'pos-accounting-connector' ); ?></th>
+						</tr>
+					</thead>
+					<tbody>
+						<?php if ( empty( $page['rows'] ) ) : ?>
+							<tr><td colspan="7"><?php esc_html_e( 'در این فیلتر رویدادی نیست.', 'pos-accounting-connector' ); ?></td></tr>
+						<?php endif; ?>
+						<?php foreach ( $page['rows'] as $row ) : ?>
+							<tr>
+								<td><code dir="ltr"><?php echo esc_html( $row['topic'] ); ?></code></td>
+								<td><code dir="ltr"><?php echo esc_html( '' !== $row['remoteId'] ? $row['remoteId'] : '—' ); ?></code></td>
+								<td><?php echo self::status_badge( $row['status'], isset( $tones[ $row['status'] ] ) ? $tones[ $row['status'] ] : 'neutral' ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?></td>
+								<td><?php echo esc_html( (int) $row['attempts'] ); ?></td>
+								<td><?php echo esc_html( self::format_time( $row['createdAt'] ) ); ?></td>
+								<td><?php
+									// "Next attempt" only exists while a pending row is deferred.
+									$next_ts = $row['availableAt'] ? strtotime( $row['availableAt'] ) : false;
+									echo esc_html( 'pending' === $row['status'] && $next_ts && $next_ts > time() ? self::format_time( $row['availableAt'] ) : '—' );
+								?></td>
+								<td><?php echo esc_html( $row['lastError'] ? $row['lastError'] : '—' ); ?></td>
+							</tr>
+						<?php endforeach; ?>
+					</tbody>
+				</table>
+			</div>
+			<div class="pos-actions">
+				<?php if ( $page['next'] ) : ?>
+					<a class="button" href="<?php echo esc_url( $link( array( 'pos_queue_status' => $status, 'pos_queue_search' => $search, 'pos_queue_after' => (int) $page['next'] ) ) ); ?>"><?php esc_html_e( 'صفحهٔ بعد', 'pos-accounting-connector' ); ?></a>
+				<?php endif; ?>
+				<?php if ( $after > 0 ) : ?>
+					<a class="button" href="<?php echo esc_url( $link( array( 'pos_queue_status' => $status, 'pos_queue_search' => $search ) ) ); ?>"><?php esc_html_e( 'بازگشت به ابتدای فهرست', 'pos-accounting-connector' ); ?></a>
+				<?php endif; ?>
+				<?php self::action_button( 'pos_connector_retry', __( 'تلاش دوباره برای ناموفق‌ها', 'pos-accounting-connector' ), 'secondary' ); ?>
+			</div>
 		</section>
 		<?php
 	}

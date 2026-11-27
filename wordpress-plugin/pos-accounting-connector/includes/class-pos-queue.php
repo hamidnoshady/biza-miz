@@ -635,36 +635,90 @@ class POS_Connector_Queue {
 	}
 
 	/**
-	 * One page of the same problem rows the strip shows (issue #1076).
+	 * Normalize the queue screen's filters (#1206 UX-04).
+	 *
+	 * Pure and bounded so the screen cannot request an unknown status or a
+	 * megabyte-long LIKE pattern, and so those bounds are testable without a
+	 * database.
+	 *
+	 * @param string $status Requested status filter.
+	 * @param string $search Requested topic/reference search.
+	 * @return array{status:string,search:string}
+	 */
+	public static function normalize_page_filters( $status, $search ) {
+		$allowed = array( 'open', 'pending', 'deferred', 'failed', 'sent', 'all' );
+		$status  = (string) $status;
+		$search  = trim( (string) $search );
+		$search  = mb_substr( $search, 0, 80, 'UTF-8' );
+		return array(
+			'status' => in_array( $status, $allowed, true ) ? $status : 'open',
+			'search' => $search,
+		);
+	}
+
+	/**
+	 * One page of the same problem rows the strip shows (issues #1076, #1206).
 	 *
 	 * Keyset on the row id, deliberately NOT the strip's failure ordering: a
 	 * page has to walk every row exactly once, and ordering by status would
 	 * re-shuffle rows between pages the moment a retry flips one to `pending`.
 	 * The id order is stable for the lifetime of a row.
 	 *
-	 * @param int $after Exclusive lower bound — the `next` of the previous page.
-	 * @param int $limit Bounded page size; the app refuses more than 25 too.
+	 * `$status` and `$search` exist for the WordPress «صف و خطاها» screen
+	 * (#1206 UX-04). They are validated here rather than in the view so the
+	 * screen cannot ask for an unbounded scan or an injected clause; the
+	 * defaults keep the app-side page exactly as it was.
+	 *
+	 * @param int    $after  Exclusive lower bound — the `next` of the previous page.
+	 * @param int    $limit  Bounded page size; the app refuses more than 25 too.
+	 * @param string $status `open` (pending+failed), `pending`, `deferred`,
+	 *                       `failed`, `sent`, or `all`.
+	 * @param string $search Case-insensitive topic/remote-id filter, max 80 chars.
 	 * @return array{rows:array<int,array<string,mixed>>,next:int|null}
 	 */
-	public static function page( $after = 0, $limit = 10 ) {
+	public static function page( $after = 0, $limit = 10, $status = 'open', $search = '' ) {
 		$empty = array( 'rows' => array(), 'next' => null );
 		if ( ! self::table_exists() ) {
 			return $empty;
 		}
 		global $wpdb;
-		$table = self::table_name();
-		$after = max( 0, (int) $after );
-		$limit = max( 1, min( 25, (int) $limit ) );
+		$table   = self::table_name();
+		$after   = max( 0, (int) $after );
+		$limit   = max( 1, min( 25, (int) $limit ) );
+		$filters = self::normalize_page_filters( $status, $search );
+		$status  = $filters['status'];
+		$search  = $filters['search'];
+
+		$where  = array();
+		$params = array();
+		if ( 'open' === $status ) {
+			$where[] = "status IN ('pending', 'failed')";
+		} elseif ( 'deferred' === $status ) {
+			$where[]  = "status = 'pending' AND available_at > %s";
+			$params[] = current_time( 'mysql', true );
+		} elseif ( 'all' !== $status ) {
+			$where[]  = 'status = %s';
+			$params[] = $status;
+		}
+		if ( '' !== $search ) {
+			$like     = '%' . $wpdb->esc_like( $search ) . '%';
+			$where[]  = '(topic LIKE %s OR remote_id LIKE %s)';
+			$params[] = $like;
+			$params[] = $like;
+		}
+		$cursor_sql = ' AND id > %d';
+		$where_sql  = $where ? implode( ' AND ', $where ) . $cursor_sql : ltrim( $cursor_sql );
+		$params[]   = $after;
 		// One extra row proves a further page exists without a second query.
-		$rows = $wpdb->get_results(
+		$params[] = $limit + 1;
+		$rows     = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT id, topic, remote_id, status, attempts, last_error, created_at
+				"SELECT id, topic, remote_id, status, attempts, last_error, created_at, available_at
 				   FROM {$table}
-				  WHERE status IN ('pending', 'failed') AND id > %d
+				  WHERE {$where_sql}
 				  ORDER BY id ASC
 				  LIMIT %d",
-				$after,
-				$limit + 1
+				$params
 			),
 			ARRAY_A
 		);
@@ -676,8 +730,11 @@ class POS_Connector_Queue {
 		$out  = array();
 		$next = null;
 		foreach ( $rows as $row ) {
-			$out[] = self::format_problem_row( $row );
-			$next  = (int) $row['id'];
+			$formatted   = self::format_problem_row( $row );
+			$available   = isset( $row['available_at'] ) ? strtotime( $row['available_at'] . ' UTC' ) : false;
+			$formatted['availableAt'] = $available ? gmdate( 'c', $available ) : null;
+			$out[]       = $formatted;
+			$next        = (int) $row['id'];
 		}
 		return array( 'rows' => $out, 'next' => $has_more ? $next : null );
 	}
