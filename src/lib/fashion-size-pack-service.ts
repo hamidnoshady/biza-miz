@@ -80,6 +80,11 @@ export interface SizePackView {
   available: number;
   shortages: PackShortage[];
   components: SizePackComponentView[];
+  /**
+   * GH #1567 C3 — a barcode migration 0334 had to clear because an item at
+   * this branch already scans with it. Shown until the pack is saved again.
+   */
+  clearedBarcode: string | null;
 }
 
 interface ComponentRow {
@@ -101,8 +106,15 @@ const COMPONENT_SELECT = `
     JOIN items i ON i.id = c.item_id
     LEFT JOIN item_stock s ON s.item_id = c.item_id`;
 
+type PackRow = { id: string; name: string; barcode: string | null; is_active: boolean; version: number; cleared_barcode: string | null };
+
+const PACK_COLUMNS = `p.id, p.name, p.barcode, p.is_active, p.version,
+  (SELECT c.code FROM scan_code_collisions c
+    WHERE c.cleared_kind = 'size_pack' AND c.cleared_id = p.id AND c.resolved_at IS NULL
+    ORDER BY c.detected_at DESC LIMIT 1) AS cleared_barcode`;
+
 function packView(
-  pack: { id: string; name: string; barcode: string | null; is_active: boolean; version: number },
+  pack: PackRow,
   rows: ComponentRow[],
 ): SizePackView {
   const components = rows.map((r) => ({
@@ -114,16 +126,16 @@ function packView(
   return {
     id: pack.id, name: pack.name, barcode: pack.barcode, isActive: pack.is_active, version: pack.version,
     priceRial: totals.priceRial, pieces: totals.pieces, available: availability.available, shortages: availability.shortages,
-    components,
+    components, clearedBarcode: pack.cleared_barcode,
   };
 }
 
 export async function listSizePacks(actor: SizePackActor, locationId: string, opts: { activeOnly?: boolean } = {}): Promise<SizePackView[]> {
   return withTenantTransaction(actor.businessId, async (client) => {
-    const { rows: packs } = await client.query<{ id: string; name: string; barcode: string | null; is_active: boolean; version: number }>(
-      `SELECT id, name, barcode, is_active, version FROM item_size_packs
-        WHERE business_id = $1 AND location_id = $2 ${opts.activeOnly ? "AND is_active" : ""}
-        ORDER BY is_active DESC, name`,
+    const { rows: packs } = await client.query<PackRow>(
+      `SELECT ${PACK_COLUMNS} FROM item_size_packs p
+        WHERE p.business_id = $1 AND p.location_id = $2 ${opts.activeOnly ? "AND p.is_active" : ""}
+        ORDER BY p.is_active DESC, p.name`,
       [actor.businessId, locationId],
     );
     if (packs.length === 0) return [];
@@ -136,8 +148,8 @@ export async function listSizePacks(actor: SizePackActor, locationId: string, op
 }
 
 async function readPack(client: PoolClient, actor: SizePackActor, locationId: string, packId: string): Promise<SizePackView> {
-  const { rows } = await client.query<{ id: string; name: string; barcode: string | null; is_active: boolean; version: number }>(
-    `SELECT id, name, barcode, is_active, version FROM item_size_packs WHERE id = $1 AND business_id = $2 AND location_id = $3`,
+  const { rows } = await client.query<PackRow>(
+    `SELECT ${PACK_COLUMNS} FROM item_size_packs p WHERE p.id = $1 AND p.business_id = $2 AND p.location_id = $3`,
     [packId, actor.businessId, locationId],
   );
   if (!rows[0]) fail("pack_not_found", 404);
@@ -210,10 +222,16 @@ export async function saveSizePack(
     } catch (error) {
       if ((error as { code?: string }).code === "23505") {
         const constraint = (error as { constraint?: string }).constraint ?? "";
-        fail(constraint.includes("barcode") ? "pack_barcode_taken" : "pack_name_taken", 409);
+        fail(constraint.includes("barcode") || constraint === "location_scan_codes_pkey" ? "pack_barcode_taken" : "pack_name_taken", 409);
       }
       throw error;
     }
+    // GH #1567 C3: saving the pack is the owner's answer to a cleared barcode.
+    await client.query(
+      `UPDATE scan_code_collisions SET resolved_at = now()
+        WHERE business_id = $1 AND cleared_kind = 'size_pack' AND cleared_id = $2 AND resolved_at IS NULL`,
+      [actor.businessId, id],
+    );
     for (const [position, c] of input.components.entries()) {
       await client.query(
         `INSERT INTO item_size_pack_components (pack_id, business_id, item_id, position, quantity, unit_price_rial)

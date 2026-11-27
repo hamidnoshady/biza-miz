@@ -45,7 +45,7 @@ beforeEach(() => {
       if (saveResponse) return new Response(JSON.stringify(saveResponse.body), { status: saveResponse.status });
       return new Response(JSON.stringify({ pack: PACK }), { status: 201 });
     }
-    if (url === "/api/size-packs") return new Response(JSON.stringify({ packs: [PACK, { ...PACK, id: "x", name: "بستهٔ تمام‌شده", available: 0, shortages: [{ itemId: "l", name: "پیراهن (L)", need: 2, onHand: "1", missing: "1" }] }] }));
+    if (url === "/api/size-packs") return new Response(JSON.stringify({ packs: [PACK, { ...PACK, id: "x", name: "بستهٔ تمام‌شده", available: 0, clearedBarcode: "2000000000015", shortages: [{ itemId: "l", name: "پیراهن (L)", need: 2, onHand: "1", missing: "1" }] }] }));
     if (url === "/api/size-packs/matrix") return new Response(JSON.stringify({ styles: [{ id: STYLE_ID, name: "پیراهن", sku: "DR", variants: 3 }] }));
     if (url === `/api/size-packs/matrix?styleId=${STYLE_ID}`) return new Response(JSON.stringify({ axes: ["رنگ", "سایز"], cells: CELLS }));
     if (url === "/api/size-packs/sales") return new Response(JSON.stringify({ sales: [] }));
@@ -102,6 +102,9 @@ describe("SizePackManager", () => {
     expect(within(rows[1]).getByText("بستهٔ عمده مشکی")).toBeTruthy();
     expect(within(rows[1]).getByText("۵")).toBeTruthy();
     expect(within(rows[2]).getByText(/کمبود: پیراهن \(L\)/)).toBeTruthy();
+    // GH #1567 C3: a barcode migration 0334 cleared is explained on the row.
+    expect(within(rows[2]).getByText(/بارکد ۲۰۰۰۰۰۰۰۰۰۰۱۵ برداشته شد/)).toBeTruthy();
+    expect(within(rows[1]).queryByText(/برداشته شد/)).toBeNull();
     expect(screen.getByRole("button", { name: /بستهٔ تازه/ })).toBeTruthy();
   });
 

@@ -33,6 +33,13 @@ export interface SizePack {
   id: string; name: string; barcode: string | null; isActive: boolean; version: number; priceRial: number; pieces: number;
   available: number; shortages: { itemId: string; name: string; need: number; onHand: string; missing: string }[];
   components: PackComponent[];
+  /** GH #1567 C3 — barcode cleared by migration because an item already scans with it. */
+  clearedBarcode?: string | null;
+}
+
+/** Shown on a pack whose barcode an item at this branch already used. */
+export function clearedBarcodeText(code: string): string {
+  return `بارکد ${toPersianDigits(code)} برداشته شد چون کالای دیگری در این شعبه با همین بارکد اسکن می‌شود؛ بارکد تازه‌ای بدهید و بسته را ذخیره کنید.`;
 }
 
 interface Style { id: string; name: string; sku: string | null; variants: number }
@@ -123,6 +130,7 @@ function PacksSection({ canEdit }: { canEdit: boolean }) {
                 <Td>
                   <span className="block font-medium">{p.name}</span>
                   {p.barcode ? <span className="block text-xs text-muted-foreground" dir="ltr">{p.barcode}</span> : null}
+                  {p.clearedBarcode ? <span className="block text-xs text-destructive">{clearedBarcodeText(p.clearedBarcode)}</span> : null}
                 </Td>
                 <Td><span className="block max-w-xs truncate text-xs">{p.components.map((c) => `${c.attributes || c.name} ×${fa(c.quantity)}`).join("، ")}</span></Td>
                 <Td>{fa(p.pieces)}</Td>

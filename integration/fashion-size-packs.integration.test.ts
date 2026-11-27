@@ -4,6 +4,8 @@
 // variants (WAC COGS per variant), atomically, exactly once, with a snapshot
 // that survives later edits; returns and voids go through the existing
 // per-line services; stock and GL reconcile at the end.
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Client, type PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -360,5 +362,110 @@ describe("virtual size packs (GH #1567 6C)", () => {
       await client.query("ROLLBACK");
       client.release();
     }
+  });
+});
+
+describe("one scannable code per branch, enforced by the database (GH #1567 C3)", () => {
+  async function holdInOpenTransaction(sql: string, params: unknown[]): Promise<Client> {
+    const holder = new Client({ connectionString: process.env.DATABASE_URL });
+    await holder.connect();
+    await holder.query("BEGIN");
+    await holder.query(sql, params);
+    return holder;
+  }
+
+  it("an item barcode not yet committed makes a concurrent pack save with the same code fail on the constraint (the pre-check cannot see it)", async () => {
+    const ctx = await seed("rc");
+    const code = ean13();
+    const holder = await holdInOpenTransaction(
+      "INSERT INTO item_barcodes (location_id, item_id, code, symbology) VALUES ($1, $2, $3, 'EAN13')", [ctx.tenant.locationId, ctx.m, code]);
+    try {
+      const pending = codeOf(packs.saveSizePack(ctx.actor, ctx.tenant.locationId, {
+        name: "بستهٔ هم‌زمان", barcode: code, components: [{ itemId: ctx.s, quantity: 1, unitPriceRial: 1 }],
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await holder.query("COMMIT");
+      expect(await pending).toBe("pack_barcode_taken");
+    } finally {
+      await holder.end();
+    }
+    const { rows } = await db.query("SELECT owner_kind FROM location_scan_codes WHERE location_id = $1 AND code = $2", [ctx.tenant.locationId, code]);
+    expect(rows).toEqual([{ owner_kind: "item_barcode" }]);
+    expect((await db.query("SELECT 1 FROM item_size_packs WHERE location_id = $1 AND barcode = $2", [ctx.tenant.locationId, code])).rows).toHaveLength(0);
+  });
+
+  it("and the reverse: a pack barcode not yet committed makes a concurrent item barcode fail with the readable conflict", async () => {
+    const ctx = await seed("rv");
+    const code = ean13();
+    const holder = await holdInOpenTransaction(
+      "INSERT INTO item_size_packs (business_id, location_id, name, barcode) VALUES ($1, $2, 'بستهٔ باز', $3)",
+      [ctx.tenant.businessId, ctx.tenant.locationId, code]);
+    try {
+      const pending = barcodes.assignBarcode(ctx.l, { code }).then(() => "resolved", (e: unknown) => (e as Error).constructor.name);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await holder.query("COMMIT");
+      expect(await pending).toBe("BarcodeConflictError");
+    } finally {
+      await holder.end();
+    }
+    expect((await db.query("SELECT 1 FROM item_barcodes WHERE location_id = $1 AND code = $2", [ctx.tenant.locationId, code])).rows).toHaveLength(0);
+  });
+
+  it("keeps the registry in step on edit and delete, and the same code is free at another branch", async () => {
+    const ctx = await seed("ed");
+    const first = ean13();
+    const second = ean13();
+    const pack = await packs.saveSizePack(ctx.actor, ctx.tenant.locationId, {
+      name: "بستهٔ ویرایشی", barcode: first, components: [{ itemId: ctx.s, quantity: 1, unitPriceRial: 1 }],
+    });
+    await packs.saveSizePack(ctx.actor, ctx.tenant.locationId, {
+      name: "بستهٔ ویرایشی", barcode: second, components: [{ itemId: ctx.s, quantity: 1, unitPriceRial: 1 }],
+    }, pack.id);
+    const codes = async () => (await db.query<{ code: string }>(
+      "SELECT code FROM location_scan_codes WHERE owner_kind = 'size_pack' AND owner_id = $1", [pack.id])).rows.map((r) => r.code);
+    expect(await codes()).toEqual([second]);
+    // The released code can now go to an item.
+    await barcodes.assignBarcode(ctx.m, { code: first });
+    const other = await seed("ed2");
+    await packs.saveSizePack(other.actor, other.tenant.locationId, {
+      name: "شعبهٔ دیگر", barcode: first, components: [{ itemId: other.s, quantity: 1, unitPriceRial: 1 }],
+    });
+    await db.query("DELETE FROM item_barcodes WHERE item_id = $1 AND code = $2", [ctx.m, first]);
+    expect((await db.query("SELECT 1 FROM location_scan_codes WHERE location_id = $1 AND code = $2", [ctx.tenant.locationId, first])).rows).toHaveLength(0);
+  });
+
+  it("migration 0334 records and clears an existing pack/item collision instead of failing, and the pack screen says so until it is saved", async () => {
+    const ctx = await seed("mg");
+    const { rows: [{ code }] } = await db.query<{ code: string }>("SELECT code FROM item_barcodes WHERE item_id = $1", [ctx.s]);
+    // Reproduce what the old race could leave behind.
+    await db.query("ALTER TABLE item_size_packs DISABLE TRIGGER item_size_packs_scan_code");
+    let packId: string;
+    try {
+      packId = (await db.query<{ id: string }>(
+        "INSERT INTO item_size_packs (business_id, location_id, name, barcode) VALUES ($1, $2, 'بستهٔ قدیمی', $3) RETURNING id",
+        [ctx.tenant.businessId, ctx.tenant.locationId, code])).rows[0].id;
+      await db.query("INSERT INTO item_size_pack_components (pack_id, business_id, item_id, position, quantity, unit_price_rial) VALUES ($1, $2, $3, 0, 1, 1)",
+        [packId, ctx.tenant.businessId, ctx.s]);
+    } finally {
+      await db.query("ALTER TABLE item_size_packs ENABLE TRIGGER item_size_packs_scan_code");
+    }
+    await db.query(readFileSync(path.join(process.cwd(), "migrations/0334_location_scan_codes.sql"), "utf8"));
+
+    const { rows: [pack] } = await db.query<{ barcode: string | null; version: number }>("SELECT barcode, version FROM item_size_packs WHERE id = $1", [packId]);
+    expect(pack).toEqual({ barcode: null, version: 2 });
+    const { rows: collisions } = await db.query("SELECT code, kept_kind, cleared_kind, cleared_name, resolved_at FROM scan_code_collisions WHERE cleared_id = $1", [packId]);
+    expect(collisions).toEqual([{ code, kept_kind: "item_barcode", cleared_kind: "size_pack", cleared_name: "بستهٔ قدیمی", resolved_at: null }]);
+    expect((await db.query("SELECT owner_kind FROM location_scan_codes WHERE location_id = $1 AND code = $2", [ctx.tenant.locationId, code])).rows)
+      .toEqual([{ owner_kind: "item_barcode" }]);
+    // The item, its stock and the ledger are untouched.
+    expect(await stockOf(ctx.s)).toBe(5);
+
+    const listed = (await packs.listSizePacks(ctx.actor, ctx.tenant.locationId)).find((p) => p.id === packId);
+    expect(listed?.clearedBarcode).toBe(code);
+    const fresh = ean13();
+    const saved = await packs.saveSizePack(ctx.actor, ctx.tenant.locationId, {
+      name: "بستهٔ قدیمی", barcode: fresh, components: [{ itemId: ctx.s, quantity: 1, unitPriceRial: 1 }],
+    }, packId);
+    expect(saved).toMatchObject({ barcode: fresh, clearedBarcode: null });
   });
 });
