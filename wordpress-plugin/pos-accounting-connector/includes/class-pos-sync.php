@@ -2790,7 +2790,12 @@ class POS_Connector_Sync {
 				return;
 
 			case 'orders_export':
-				self::export_orders( isset( $payload['sinceDays'] ) && $payload['sinceDays'] ? (int) $payload['sinceDays'] : (int) $settings['resync_orders_days'] );
+				// An explicit app request is a re-send, not the periodic sweep:
+				// it keeps the old "queue every order in the window" behaviour.
+				self::export_orders(
+					isset( $payload['sinceDays'] ) && $payload['sinceDays'] ? (int) $payload['sinceDays'] : (int) $settings['resync_orders_days'],
+					true
+				);
 				return;
 
 			case 'content_export':
@@ -3754,7 +3759,7 @@ class POS_Connector_Sync {
 	 * is drained or the hard ceiling is reached, and the log says when a
 	 * ceiling was hit so the next sweep's shorter window still backfills.
 	 */
-	public static function export_orders( $days = 7 ) {
+	public static function export_orders( $days = 7, $force = false ) {
 		$days  = max( 1, min( 365, (int) $days ) );
 		$after = gmdate( 'Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ) );
 
@@ -3813,8 +3818,12 @@ class POS_Connector_Sync {
 				if ( $ts < $boundary_ts || ( $ts === $boundary_ts && isset( $boundary_seen[ $order_id ] ) ) ) {
 					continue;
 				}
-				POS_Connector_Queue::enqueue( 'order.updated', $order->get_id(), self::order_payload( $order ) );
-				++$enqueued;
+				$payload     = self::order_payload( $order );
+				$fingerprint = POS_Connector_Queue::fingerprint_for( 'order.updated', $payload );
+				if ( $force || ! POS_Connector_Queue::reconcile_swept_state( 'order.updated', $order_id, $fingerprint ) ) {
+					POS_Connector_Queue::enqueue( 'order.updated', $order_id, $payload );
+					++$enqueued;
+				}
 				++$fresh;
 				if ( $ts !== $boundary_ts ) {
 					$boundary_ts   = $ts;
@@ -3865,8 +3874,12 @@ class POS_Connector_Sync {
 					)
 				);
 				foreach ( $orders as $order ) {
-					POS_Connector_Queue::enqueue( 'order.updated', $order->get_id(), self::order_payload( $order ) );
-					++$enqueued;
+					$payload     = self::order_payload( $order );
+					$fingerprint = POS_Connector_Queue::fingerprint_for( 'order.updated', $payload );
+					if ( $force || ! POS_Connector_Queue::reconcile_swept_state( 'order.updated', $order->get_id(), $fingerprint ) ) {
+						POS_Connector_Queue::enqueue( 'order.updated', $order->get_id(), $payload );
+						++$enqueued;
+					}
 				}
 				++$page;
 			} while ( count( $orders ) === self::ORDER_SWEEP_LIMIT && $page <= 100 );

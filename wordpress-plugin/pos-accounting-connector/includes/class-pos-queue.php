@@ -51,6 +51,18 @@ class POS_Connector_Queue {
 	const BACKOFF_BASE_SECONDS = 60;
 	const BACKOFF_MAX_SECONDS  = 3600;
 
+	/**
+	 * How long a swept, unchanged `failed` row is left alone before the next
+	 * sweep retries it in place.
+	 *
+	 * A financial row that the app rejects deterministically (an order the
+	 * store reopened after a refund) used to be copied into a new row — with a
+	 * new delivery id — on every sweep, so one stuck order produced several
+	 * rows an hour forever. Reusing the row keeps the delivery identity and
+	 * the evidence; the cooldown bounds the retries without hiding the state.
+	 */
+	const SWEEP_FAILED_RETRY_SECONDS = 6 * 3600;
+
 	public static function table_name() {
 		global $wpdb;
 		return $wpdb->prefix . self::TABLE;
@@ -169,21 +181,7 @@ class POS_Connector_Queue {
 			return 0;
 		}
 
-		$fingerprint = '';
-		$is_content_state = 'content.updated' === $topic && ! isset( $payload['_snapshot_id'] )
-			&& ! isset( $payload['revision'] ) && ! isset( $payload['operation_id'] );
-		$is_taxonomy_state = 'catalogue.taxonomy_terms' === $topic && ! isset( $payload['snapshot_id'] );
-		if ( $is_content_state || $is_taxonomy_state || in_array( $topic, array( 'product.updated', 'customer.updated', 'order.updated' ), true ) ) {
-			// WooCommerce can advance its save timestamp without changing any
-			// catalogue data consumed by Bizamiz.
-			if ( 'product.updated' === $topic || $is_content_state ) {
-				unset( $payload['date_modified'] );
-			}
-			if ( $is_taxonomy_state ) {
-				unset( $payload['generated_at'] );
-			}
-			$fingerprint = hash( 'sha256', wp_json_encode( $payload ) );
-		}
+		$fingerprint = self::fingerprint_for( $topic, $payload );
  
 		$encoded = self::pack_payload( $encoded );
 
@@ -244,6 +242,121 @@ class POS_Connector_Queue {
 			array( '%s', '%s', '%s', '%s', '%s', '%s', '%d', '%s', '%s', '%s' )
 		);
 		return (int) $wpdb->insert_id;
+	}
+
+	/**
+	 * The fingerprint of the state a topic carries, or '' when the topic is not
+	 * comparable by state.
+	 *
+	 * Shared by `enqueue()` and the periodic sweeps so a sweep decides with the
+	 * same bytes the producer stored. The volatile save timestamp is excluded
+	 * for product/content state: WooCommerce can advance it without changing
+	 * anything Bizamiz consumes.
+	 *
+	 * @return string SHA-256 hex digest, or '' when the topic has no state identity.
+	 */
+	public static function fingerprint_for( $topic, array $payload ) {
+		$is_content_state = 'content.updated' === $topic && ! isset( $payload['_snapshot_id'] )
+			&& ! isset( $payload['revision'] ) && ! isset( $payload['operation_id'] );
+		$is_taxonomy_state = 'catalogue.taxonomy_terms' === $topic && ! isset( $payload['snapshot_id'] );
+		if ( ! $is_content_state && ! $is_taxonomy_state
+			&& ! in_array( $topic, array( 'product.updated', 'customer.updated', 'order.updated' ), true ) ) {
+			return '';
+		}
+		if ( 'product.updated' === $topic || $is_content_state ) {
+			unset( $payload['date_modified'] );
+		}
+		if ( $is_taxonomy_state ) {
+			unset( $payload['generated_at'] );
+		}
+		$encoded = wp_json_encode( $payload );
+		return false === $encoded ? '' : hash( 'sha256', $encoded );
+	}
+
+	/**
+	 * What a periodic sweep should do with a state it just re-read.
+	 *
+	 * @param string $status             Newest row's status.
+	 * @param string $stored_fingerprint Newest row's fingerprint.
+	 * @param string $fingerprint        Fingerprint of the state just read.
+	 * @param int    $updated_at         Newest row's last-write UNIX time.
+	 * @param int    $now                Current UNIX time.
+	 * @param int    $cooldown           Seconds before a failed row is retried.
+	 * @return string `enqueue`, `skip` or `requeue`.
+	 */
+	public static function swept_state_decision( $status, $stored_fingerprint, $fingerprint, $updated_at, $now, $cooldown = self::SWEEP_FAILED_RETRY_SECONDS ) {
+		if ( '' === (string) $fingerprint || (string) $stored_fingerprint !== (string) $fingerprint ) {
+			return 'enqueue';
+		}
+		if ( 'pending' === $status || 'sent' === $status ) {
+			// A pending row will deliver it; a sent row is the proof it already
+			// was. Re-reading an unchanged order is not a new sale or refund.
+			return 'skip';
+		}
+		if ( 'failed' === $status ) {
+			return ( (int) $now - (int) $updated_at ) >= (int) $cooldown ? 'requeue' : 'skip';
+		}
+		return 'enqueue';
+	}
+
+	/**
+	 * Reconcile a state re-read by a periodic sweep against the newest row.
+	 *
+	 * Unlike `enqueue()`, this deliberately does not create a second row for a
+	 * delivered financial snapshot: the sweep re-reads the same order every
+	 * cycle, and treating that as a fresh event made one store write ~10k
+	 * identical `order.updated` rows a day. A genuinely changed state has a
+	 * different fingerprint and is enqueued normally. A permanently rejected
+	 * state is retried in place after the cooldown, keeping its delivery id,
+	 * so idempotency survives and one bad order cannot mint rows forever.
+	 *
+	 * @return bool True when the caller must not enqueue another row.
+	 */
+	public static function reconcile_swept_state( $topic, $remote_id, $fingerprint ) {
+		if ( '' === (string) $fingerprint || ! self::table_exists() ) {
+			return false;
+		}
+		global $wpdb;
+		$table = self::table_name();
+		$row   = $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT id, status, payload_fingerprint, updated_at FROM {$table}
+				 WHERE topic = %s AND remote_id = %s ORDER BY id DESC LIMIT 1",
+				$topic,
+				(string) $remote_id
+			),
+			ARRAY_A
+		);
+		if ( ! $row ) {
+			return false;
+		}
+		$updated_ts = strtotime( (string) $row['updated_at'] . ' UTC' );
+		$decision   = self::swept_state_decision(
+			(string) $row['status'],
+			(string) $row['payload_fingerprint'],
+			(string) $fingerprint,
+			false === $updated_ts ? 0 : $updated_ts,
+			time()
+		);
+		if ( 'enqueue' === $decision ) {
+			return false;
+		}
+		if ( 'requeue' === $decision ) {
+			$now = current_time( 'mysql', true );
+			// Keep last_error: the row is due again, but the reason it failed
+			// must remain visible until a later attempt replaces it.
+			$wpdb->query(
+				$wpdb->prepare(
+					"UPDATE {$table}
+						SET status = 'pending', attempts = 0, available_at = %s, updated_at = %s
+						WHERE id = %d AND status = 'failed'",
+					$now,
+					$now,
+					(int) $row['id']
+				)
+			);
+		}
+		return true;
 	}
 
 	/**
