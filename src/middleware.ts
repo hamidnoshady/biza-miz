@@ -198,6 +198,12 @@ const PUBLIC_PATHS = [
   "/admin",
   "/api/auth/login",
   "/api/auth/pin-login",
+  // #1585 — the remembered-login renewal endpoint. No session exists when it is
+  // called (obtaining one is its whole purpose), and the credential it
+  // authenticates with is an HttpOnly, SameSite=Lax, host-only cookie that this
+  // route's own same-origin check backs up. It is listed here, in the
+  // credential-exchange bucket below, and in BROWSER_LOGIN_MUTATION_PATHS.
+  "/api/auth/refresh",
   // The public Mini App bootstrap and the Telegram secret-token webhook are
   // verified by their handlers; neither needs a tenant session first.
   "/telegram",
@@ -639,6 +645,11 @@ const BROWSER_LOGIN_MUTATION_PATHS = [
   // behind the same Origin rule: our page's fetch carries a matching Origin, and
   // a cross-site page cannot make a victim's browser finish a signing step.
   "/api/sign",
+  // #1585 — renewal is a browser-driven, pre-session mutation: a cross-site
+  // POST must not be able to force a renewal (or a step-up prompt) in a
+  // victim's browser. The cookie's SameSite=Lax is the first line; this is the
+  // second.
+  "/api/auth/refresh",
 ];
 
 /** Is this one of the browser-driven, pre-session sign-in mutations? */
@@ -946,6 +957,9 @@ const AUTH_RATE_LIMITED_PATHS = [
   // phone-otp.ts; this per-IP bucket is the outer ceiling.
   "/api/auth/phone-otp/request",
   "/api/auth/phone-otp/verify",
+  // #1585 — renewal presenting a password for a changed device context is a
+  // credential exchange, so it shares the per-IP brute-force bucket.
+  "/api/auth/refresh",
   // #1386 — password recovery spends SMS credit and guesses a 6-digit code
   // without a session, like the login OTP pair above. It shares the per-IP
   // bucket; the per-number limiter lives in `password-recovery.ts`.

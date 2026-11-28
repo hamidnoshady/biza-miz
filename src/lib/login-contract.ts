@@ -38,6 +38,17 @@ export const MAX_LOGIN_NEXT_LENGTH = 2048;
 export const TRUSTED_DEVICE_DAYS = 7;
 
 /**
+ * #1585 — the idle window of a remembered login, in days.
+ *
+ * Lives here, not in `remembered-login.ts`, for exactly the reason
+ * `TRUSTED_DEVICE_DAYS` does: the login forms print it, and that module reaches
+ * the database. The server's policy default is derived from this number (and
+ * may be tightened through `REMEMBERED_LOGIN_IDLE_DAYS`), so the copy a member
+ * reads can never promise a longer window than the server enforces.
+ */
+export const REMEMBERED_LOGIN_IDLE_DAYS = 30;
+
+/**
  * The canonical "is this a safe same-site destination?" rule.
  *
  * Returns `fallback` for anything that is not a relative path on this origin.

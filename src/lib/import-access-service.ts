@@ -96,7 +96,7 @@ interface SharedAxes {
     ok: boolean;
     state: ServiceState | null;
   }>;
-  grantFor: (appKey: AppKey | null) => Promise<ImportAccessGrantInput | null | undefined>;
+  grantFor: (appKey: AppKey | null) => Promise<ImportAccessGrantInput | null>;
 }
 
 async function readSharedAxes(
@@ -119,7 +119,7 @@ async function readSharedAxes(
   const activations = new Map<string, Promise<{ ok: boolean; state: ServiceState | null }>>();
   const grants = new Map<
     string,
-    Promise<ImportAccessGrantInput | null | undefined>
+    Promise<ImportAccessGrantInput | null>
   >();
 
   return {
@@ -186,9 +186,10 @@ async function readSharedAxes(
               }
             : null;
         } catch {
-          // Undefined is "unknown": the pure rule treats it as non-effective
-          // access, never as a paid activation.
-          return undefined;
+          // A failed read is "no proven grant", not a grant that expired: the
+          // activation state still decides, and a selected app falls back to
+          // «منتظر فعال‌سازی» rather than a misleading expiry message.
+          return null;
         }
       })();
       grants.set(appKey, read);
@@ -231,10 +232,7 @@ export async function importAccessForTargets(
         appKey,
         selection: axes.selection,
         activationState,
-        grant:
-          grant === undefined
-            ? { status: "pending", startsAt: at, expiresAt: at }
-            : grant,
+        grant,
         workspace: isWorkspace
           ? axes.workspace
             ? {

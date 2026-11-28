@@ -36,6 +36,7 @@ import { WebAuthnManager } from "@/components/auth/webauthn-manager";
 import { signOutDestination, signOutResultMessage, useSignOut } from "@/components/auth/sign-out";
 import type { ProfileBranchInfo } from "@/lib/profile-branch";
 import { TwoFactorSettings } from "../two-factor-settings";
+import { RememberedDevicesCard } from "./remembered-devices-card";
 
 export interface ProfileSectionProps {
   fullName: string;
@@ -275,6 +276,19 @@ export function ProfileSection({
 
       <SelfSessionsCard
         onSignedOutEverywhere={() => {
+          router.push("/login");
+          router.refresh();
+        }}
+      />
+
+      {/*
+        Issue #1585 — the persistent-login authority, manageable on its own. It
+        sits beside the sessions card because both are “where am I signed in”,
+        and separate from the trusted-device list because revoking one must not
+        silently change the other.
+      */}
+      <RememberedDevicesCard
+        onSignedOut={() => {
           router.push("/login");
           router.refresh();
         }}

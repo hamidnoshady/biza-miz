@@ -87,6 +87,7 @@ export function PhoneOtpStep({
   onVerified,
   onCancel,
   deviceToken = null,
+  remember = false,
 }: {
   sendSpec: PhoneOtpSendSpec;
   /** The token the parent's first send minted — verify starts from it. */
@@ -95,6 +96,13 @@ export function PhoneOtpStep({
   onVerified: () => void;
   onCancel: () => void;
   deviceToken?: string | null;
+  /**
+   * #1585 — the «مرا در این دستگاه به خاطر بسپار» choice made on the form that
+   * opened this step. Carried through every half of the ceremony (the code, the
+   * business choice, the second factor) so it is honoured only on the request
+   * that actually completes the login, and never lost on the way.
+   */
+  remember?: boolean;
 }) {
   const [token, setToken] = useState(initialToken);
   const [maskedPhone, setMaskedPhone] = useState(initialMaskedPhone);
@@ -265,12 +273,12 @@ export function PhoneOtpStep({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    await verify({ code, deviceToken, trustDevice }, token);
+    await verify({ code, deviceToken, trustDevice, ...(remember ? { remember: true } : {}) }, token);
   }
 
   async function chooseBusiness(businessId: string) {
     if (!selection?.token) return;
-    await verify({ businessId, deviceToken }, selection.token);
+    await verify({ businessId, deviceToken, ...(remember ? { remember: true } : {}) }, selection.token);
   }
 
   if (mfaPending) {
@@ -283,6 +291,8 @@ export function PhoneOtpStep({
         endpointPrefix="/api/auth/mfa"
         offerTrustDevice
         trustDeviceDefault={trustDevice}
+        offerRememberLogin
+        rememberLoginDefault={remember}
         onVerified={onVerified}
         onCancel={() => {
           setMfaPending(null);

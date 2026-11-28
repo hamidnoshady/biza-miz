@@ -36,12 +36,13 @@ import { withLoginNextParam } from "@/lib/login-contract";
  *   over it would be wrong. Ordinary login/OTP/MFA credential failures use
  *   their own codes (`invalid_credentials`, `invalid_code`, ...), never the
  *   bare `"unauthorized"` string, so this cannot misfire mid-login either.
- * - This listener only navigates. It does not call the sign-out endpoint,
- *   revoke anything, or clear any cache itself — it is reacting to a decision
- *   the server already made in its own response, the same way a server
- *   component's own `redirect("/login")` after a null `getSession()` does for
- *   a page load. The actual session/device/trusted-device/login logic stays
- *   owned by #885/#889's work; nothing here duplicates it.
+ * - This listener never decides *whether* the session is over. It first asks
+ *   `/api/auth/refresh` (#1585) whether this browser's remembered login can
+ *   mint a new short-lived session — that decision is the server's, made from
+ *   identity, membership, token version and risk — and only when the answer is
+ *   no does it navigate. It never calls the sign-out endpoint, revokes
+ *   anything, or clears any cache itself, exactly as before: it is reacting to
+ *   a decision the server already made in its own response.
  * - Guarded to fire once per mount. A single page routinely fires several
  *   independent reads at once (issue #909's own "load independent reads
  *   concurrently" requirement makes this more true, not less); without the
@@ -53,14 +54,49 @@ export function SessionExpiryListener() {
   const firedRef = useRef(false);
 
   useEffect(() => {
-    function handleSessionExpired() {
+    async function handleSessionExpired() {
       if (firedRef.current) return;
       firedRef.current = true;
+
+      /*
+       * #1585 — a dead access session is not necessarily the end of the
+       * session. If this browser was remembered, the server can mint a new
+       * short-lived one after re-validating identity, membership, token version
+       * and risk; that decision belongs to the server, so this asks rather than
+       * decides, and only then falls back to the sign-in page.
+       *
+       * A refusal (401) or an unavailable endpoint simply means "no remembered
+       * login", which is the pre-#1585 behaviour. `409` means a sibling tab
+       * rotated first and already set the new cookie, so one retry is enough.
+       */
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const res = await fetch("/api/auth/refresh", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+            credentials: "same-origin",
+          });
+          if (res.ok) {
+            // Renewed: re-render the page in place. Re-arm so a later expiry
+            // can renew again instead of being swallowed by this guard.
+            firedRef.current = false;
+            router.refresh();
+            return;
+          }
+          if (res.status !== 409) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        } catch {
+          break;
+        }
+      }
+
       const next = `${window.location.pathname}${window.location.search}`;
       router.replace(withLoginNextParam("/login", next));
     }
-    window.addEventListener("biza:session-expired", handleSessionExpired);
-    return () => window.removeEventListener("biza:session-expired", handleSessionExpired);
+    const listener = () => void handleSessionExpired();
+    window.addEventListener("biza:session-expired", listener);
+    return () => window.removeEventListener("biza:session-expired", listener);
   }, [router]);
 
   return null;

@@ -240,6 +240,13 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   // cascades away with the member or the business.
   'tour_action_evidence.user_id': 'personal learning evidence (guided tours)',
   'trusted_devices.user_id': 'sign-in security',
+  // Issue #1585 — a remembered-login family is a sign-in credential, not a work
+  // record: it is written during authentication, names the member (and the
+  // global identity) it was issued to, and cascades away with either. What the
+  // renewed session then does is attributable where it happens, exactly as with
+  // `trusted_devices` above.
+  'remembered_login_families.user_id': 'sign-in security',
+  'remembered_login_families.platform_user_id': 'sign-in security',
   'telegram_identity_links.platform_user_id': 'global account-link security; not business activity',
   'telegram_link_challenges.platform_user_id': 'short-lived account-link authentication state',
   'user_locations.user_id': 'access grants — removed with the membership',
