@@ -184,12 +184,12 @@ export function ContractForm({ onSaved }: { onSaved: () => void }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    void api<{ consignors?: Consignor[] }>("/api/consignment-contracts/consignors").then((res) => setConsignors(res.data.consignors ?? []));
-    void api<{ styles?: Style[] }>("/api/size-packs/matrix").then((res) => setStyles(res.data.styles ?? []));
+    void api<{ consignors?: Consignor[] }>("/api/consignment-contracts?view=consignors").then((res) => setConsignors(res.data.consignors ?? []));
+    void api<{ styles?: Style[] }>("/api/size-packs?view=styles").then((res) => setStyles(res.data.styles ?? []));
   }, []);
   useEffect(() => {
     if (!styleId) { setCells(null); return; }
-    void api<{ cells?: Cell[] } & ApiError>(`/api/size-packs/matrix?styleId=${styleId}`).then((res) => {
+    void api<{ cells?: Cell[] } & ApiError>(`/api/size-packs?view=matrix&styleId=${styleId}`).then((res) => {
       if (!res.ok) { setError(failure(res.data)); return; }
       setCells(res.data.cells ?? []);
     });
@@ -489,7 +489,7 @@ function OwnersSection({ canEdit }: { canEdit: boolean }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const load = useCallback(async () => {
-    const res = await api<{ consignors?: Consignor[] } & ApiError>("/api/consignment-contracts/consignors");
+    const res = await api<{ consignors?: Consignor[] } & ApiError>("/api/consignment-contracts?view=consignors");
     if (!res.ok) setError(failure(res.data));
     setOwners(res.data.consignors ?? []);
   }, []);
@@ -499,7 +499,7 @@ function OwnersSection({ canEdit }: { canEdit: boolean }) {
     if (!name.trim()) { setError("نام امانت‌گذار لازم است."); return; }
     setBusy(true);
     setError("");
-    const res = await api<ApiError>("/api/consignment-contracts/consignors", {
+    const res = await api<ApiError>("/api/consignment-contracts?view=consignors", {
       method: "POST", body: JSON.stringify({ name: name.trim(), phone: phone.trim() || null, notes: null }),
     });
     setBusy(false);

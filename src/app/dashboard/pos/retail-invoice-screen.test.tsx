@@ -724,7 +724,7 @@ describe("RetailInvoiceScreen — fashion size packs (GH #1567 6C)", () => {
   it("a scanned pack barcode that matches no item adds the pack as one size_pack line", async () => {
     const fetchMock = fetchMockWith([
       { pattern: /\/api\/barcodes\/lookup/, body: { matches: [] } },
-      { pattern: /\/api\/size-packs\/lookup\?code=PACK-1$/, body: { pack: PACK } },
+      { pattern: /\/api\/size-packs\?view=lookup&code=PACK-1$/, body: { pack: PACK } },
     ]);
     vi.stubGlobal("fetch", fetchMock);
     render(<RetailInvoiceScreen industry="fashion_apparel" />);
@@ -739,7 +739,7 @@ describe("RetailInvoiceScreen — fashion size packs (GH #1567 6C)", () => {
   it("a scanned pack with a consigned component is refused by name, not as a shortage (GH #1567 C5)", async () => {
     const fetchMock = fetchMockWith([
       { pattern: /\/api\/barcodes\/lookup/, body: { matches: [] } },
-      { pattern: /\/api\/size-packs\/lookup\?code=PACK-1$/, body: { pack: { ...PACK, available: 0, consignedComponents: ["پیراهن (M)"] } } },
+      { pattern: /\/api\/size-packs\?view=lookup&code=PACK-1$/, body: { pack: { ...PACK, available: 0, consignedComponents: ["پیراهن (M)"] } } },
     ]);
     vi.stubGlobal("fetch", fetchMock);
     render(<RetailInvoiceScreen industry="fashion_apparel" />);

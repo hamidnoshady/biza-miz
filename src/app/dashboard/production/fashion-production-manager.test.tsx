@@ -57,7 +57,7 @@ beforeEach(() => {
       return new Response(JSON.stringify(detail({ ...current, version: current.version + 1 })));
     }
     if (url === `/api/production-orders/${ORDER_ID}`) return new Response(JSON.stringify(detail(current)));
-    if (url === "/api/production-orders/report") {
+    if (url === "/api/production-orders?view=report") {
       return new Response(JSON.stringify({ report: {
         openOrders: 1, completedOrders: 2, cancelledOrders: 0, plannedQuantity: "30", receivedQuantity: "18", scrappedQuantity: "2",
         scrapRate: "0.1", receivedValueRial: 3_100_000, averageUnitCostRial: "172222.22", materialCostRial: 3_000_000,

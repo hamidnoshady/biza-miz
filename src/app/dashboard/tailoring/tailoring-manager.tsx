@@ -704,7 +704,7 @@ function RetentionSection() {
   const [confirm, setConfirm] = useState(false);
 
   const load = useCallback(async () => {
-    const res = await api<RetentionState & { error?: string }>("/api/tailoring/retention");
+    const res = await api<RetentionState & { error?: string }>("/api/tailoring/measurements?view=retention");
     if (!res.ok) {
       setError(tailoringErrorMessage(res.data.error));
       return;
@@ -720,7 +720,7 @@ function RetentionSection() {
   async function post(body: Record<string, unknown>, done: string) {
     setBusy(true);
     setError("");
-    const res = await api<{ error?: string }>("/api/tailoring/retention", {
+    const res = await api<{ error?: string }>("/api/tailoring/measurements?view=retention", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

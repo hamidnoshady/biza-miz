@@ -3,14 +3,29 @@ import { z } from "zod";
 import { requirePermissions, withTenantScope } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
 import { PRODUCTION_ORDER_STATUSES } from "@/lib/fashion-production";
-import { createProductionOrder, listProductionOrders } from "@/lib/fashion-production-service";
+import { createProductionOrder, listProductionOrders, productionReport } from "@/lib/fashion-production-service";
 import { idempotencyKey, productionFailure, productionScope, quantity, stageCode, uuid } from "@/lib/fashion-production-http";
 
-/** GH #1567 6B — fashion production orders of the active branch. */
+/**
+ * GH #1567 6B — fashion production orders of the active branch.
+ * `GET ?view=report` is the production summary (units, scrap, unit cost, WIP)
+ * and the WIP subledger ↔ GL 1310 reconciliation — a view here rather than its
+ * own route, because each route adds ~0.15 MiB to the desktop runtime.
+ */
 export const GET = withTenantScope(async (request: Request) => {
+  const params = new URL(request.url).searchParams;
+  const view = params.get("view");
+  if (view !== null && view !== "report") return NextResponse.json({ error: "bad_request" }, { status: 400 });
   const scope = await productionScope(await requirePermissions(PERMISSIONS.inventoryView));
   if (scope.error) return scope.error;
-  const status = z.enum(PRODUCTION_ORDER_STATUSES).optional().safeParse(new URL(request.url).searchParams.get("status") ?? undefined);
+  if (view === "report") {
+    try {
+      return NextResponse.json({ report: await productionReport(scope.actor, scope.locationId) });
+    } catch (error) {
+      return productionFailure(error);
+    }
+  }
+  const status = z.enum(PRODUCTION_ORDER_STATUSES).optional().safeParse(params.get("status") ?? undefined);
   if (!status.success) return NextResponse.json({ error: "bad_request" }, { status: 400 });
   try {
     return NextResponse.json({ orders: await listProductionOrders(scope.actor, scope.locationId, status.data) });

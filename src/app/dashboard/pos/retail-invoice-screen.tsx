@@ -1048,7 +1048,7 @@ function BarcodeScanField({
     if (matches.length === 0) {
       // GH #1567 6C — a fashion till also scans wholesale size packs.
       if (industry === "fashion_apparel") {
-        const packRes = await api<{ pack?: TillSizePack | null }>(`/api/size-packs/lookup?code=${encodeURIComponent(needle)}`);
+        const packRes = await api<{ pack?: TillSizePack | null }>(`/api/size-packs?view=lookup&code=${encodeURIComponent(needle)}`);
         const pack = packRes.ok ? packRes.data.pack : null;
         if (pack) {
           if (pack.consignedComponents && pack.consignedComponents.length > 0) {

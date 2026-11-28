@@ -54,7 +54,7 @@ beforeEach(() => {
     calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : null });
     if (url === "/api/consignment-contracts" && method === "POST") return new Response(JSON.stringify({ contract: CONTRACT }), { status: 201 });
     if (url === "/api/consignment-contracts") return new Response(JSON.stringify({ contracts: [CONTRACT, { ...CONTRACT, id: "x", reference: "C-1300", status: "closed", onHand: 0, outstandingRial: 0 }] }));
-    if (url === "/api/consignment-contracts/consignors") return new Response(JSON.stringify({ consignors: [{ id: OWNER_ID, name: "تولیدی نگار", phone: null }] }));
+    if (url === "/api/consignment-contracts?view=consignors") return new Response(JSON.stringify({ consignors: [{ id: OWNER_ID, name: "تولیدی نگار", phone: null }] }));
     if (url === `/api/consignment-contracts/${CONTRACT.id}` && method === "POST") {
       if (actionResponse) return new Response(JSON.stringify(actionResponse.body), { status: actionResponse.status });
       return new Response(JSON.stringify({ contract: detail }));
@@ -62,8 +62,8 @@ beforeEach(() => {
     if (url === `/api/consignment-contracts/${CONTRACT.id}`) {
       return new Response(JSON.stringify({ contract: detail, movements: [{ id: "mv", kind: "receive", itemName: "مانتو (مشکی / M)", quantity: 4, ownerShareRial: null, commissionRial: null, amountRial: null, note: null, actorName: "مالک", at: "2026-11-20T08:00:00Z" }] }));
     }
-    if (url === "/api/size-packs/matrix") return new Response(JSON.stringify({ styles: [{ id: STYLE_ID, name: "مانتو", sku: "MT", variants: 3 }] }));
-    if (url === `/api/size-packs/matrix?styleId=${STYLE_ID}`) return new Response(JSON.stringify({ axes: ["رنگ", "سایز"], cells: CELLS }));
+    if (url === "/api/size-packs?view=styles") return new Response(JSON.stringify({ styles: [{ id: STYLE_ID, name: "مانتو", sku: "MT", variants: 3 }] }));
+    if (url === `/api/size-packs?view=matrix&styleId=${STYLE_ID}`) return new Response(JSON.stringify({ axes: ["رنگ", "سایز"], cells: CELLS }));
     return new Response(JSON.stringify({}), { status: 404 });
   }));
 });

@@ -214,7 +214,7 @@ export function MeasurementsPanel({
     setBusy(true);
     setError("");
     const res = await api<Record<string, unknown> & { error?: string }>(
-      `/api/tailoring/measurements/export?partyId=${encodeURIComponent(partyId)}`,
+      `/api/tailoring/measurements?view=export&partyId=${encodeURIComponent(partyId)}`,
       { cache: "no-store" },
     );
     setBusy(false);
@@ -235,8 +235,8 @@ export function MeasurementsPanel({
   async function erase() {
     setBusy(true);
     setError("");
-    const res = await api<{ erased?: number; error?: string }>("/api/tailoring/measurements/erase", {
-      method: "POST",
+    const res = await api<{ erased?: number; error?: string }>("/api/tailoring/measurements", {
+      method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ partyId, reason: eraseReason.trim(), confirm: true }),
     });
@@ -255,7 +255,7 @@ export function MeasurementsPanel({
   async function loadLog() {
     setBusy(true);
     const res = await api<{ entries?: AccessLogEntry[]; error?: string }>(
-      `/api/tailoring/measurements/log?partyId=${encodeURIComponent(partyId)}`,
+      `/api/tailoring/measurements?view=log&partyId=${encodeURIComponent(partyId)}`,
     );
     setBusy(false);
     if (!res.ok) {

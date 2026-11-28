@@ -46,9 +46,9 @@ beforeEach(() => {
       return new Response(JSON.stringify({ pack: PACK }), { status: 201 });
     }
     if (url === "/api/size-packs") return new Response(JSON.stringify({ packs: [PACK, { ...PACK, id: "x", name: "بستهٔ تمام‌شده", available: 0, clearedBarcode: "2000000000015", consignedComponents: ["پیراهن (M)"], shortages: [{ itemId: "l", name: "پیراهن (L)", need: 2, onHand: "1", missing: "1" }] }] }));
-    if (url === "/api/size-packs/matrix") return new Response(JSON.stringify({ styles: [{ id: STYLE_ID, name: "پیراهن", sku: "DR", variants: 3 }] }));
-    if (url === `/api/size-packs/matrix?styleId=${STYLE_ID}`) return new Response(JSON.stringify({ axes: ["رنگ", "سایز"], cells: CELLS }));
-    if (url === "/api/size-packs/sales") return new Response(JSON.stringify({ sales: [] }));
+    if (url === "/api/size-packs?view=styles") return new Response(JSON.stringify({ styles: [{ id: STYLE_ID, name: "پیراهن", sku: "DR", variants: 3 }] }));
+    if (url === `/api/size-packs?view=matrix&styleId=${STYLE_ID}`) return new Response(JSON.stringify({ axes: ["رنگ", "سایز"], cells: CELLS }));
+    if (url === "/api/size-packs?view=sales") return new Response(JSON.stringify({ sales: [] }));
     return new Response(JSON.stringify({}), { status: 404 });
   }));
 });
@@ -124,7 +124,7 @@ describe("SizePackManager", () => {
 
 describe("PackBuilder", () => {
   async function pickStyle() {
-    await waitFor(() => expect(calls.some((c) => c.url === "/api/size-packs/matrix")).toBe(true));
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/size-packs?view=styles")).toBe(true));
     await waitFor(() => expect(screen.getByRole("button", { name: "مدل" }).getAttribute("aria-busy")).not.toBe("true"));
     fireEvent.click(screen.getByRole("button", { name: "مدل" }));
     fireEvent.click(await screen.findByRole("option", { name: "پیراهن (DR)" }));

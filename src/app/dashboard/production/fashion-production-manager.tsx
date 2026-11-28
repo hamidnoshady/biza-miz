@@ -666,7 +666,7 @@ function ReportSection() {
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    void api<{ report?: Report; error?: string }>("/api/production-orders/report").then((res) => {
+    void api<{ report?: Report; error?: string }>("/api/production-orders?view=report").then((res) => {
       if (!res.ok || !res.data.report) { setError(productionErrorMessage(res.data.error)); return; }
       setReport(res.data.report);
     });

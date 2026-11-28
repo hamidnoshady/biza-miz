@@ -184,11 +184,11 @@ export function PackBuilder({ pack, onSaved }: { pack: SizePack | null; onSaved:
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    void api<{ styles?: Style[] }>("/api/size-packs/matrix").then((res) => setStyles(res.data.styles ?? []));
+    void api<{ styles?: Style[] }>("/api/size-packs?view=styles").then((res) => setStyles(res.data.styles ?? []));
   }, []);
   useEffect(() => {
     if (!styleId) { setMatrix(null); return; }
-    void api<{ axes?: string[]; cells?: Cell[]; error?: string }>(`/api/size-packs/matrix?styleId=${styleId}`).then((res) => {
+    void api<{ axes?: string[]; cells?: Cell[]; error?: string }>(`/api/size-packs?view=matrix&styleId=${styleId}`).then((res) => {
       if (!res.ok) { setError(sizePackErrorMessage(res.data.error)); return; }
       setMatrix({ axes: res.data.axes ?? [], cells: res.data.cells ?? [] });
     });
@@ -356,7 +356,7 @@ function SalesSection() {
   const [sales, setSales] = useState<PackSale[] | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    void api<{ sales?: PackSale[]; error?: string }>("/api/size-packs/sales").then((res) => {
+    void api<{ sales?: PackSale[]; error?: string }>("/api/size-packs?view=sales").then((res) => {
       if (!res.ok) setError(sizePackErrorMessage(res.data.error));
       setSales(res.data.sales ?? []);
     });
