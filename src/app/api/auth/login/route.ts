@@ -39,6 +39,12 @@ import {
   revokeTrustedDevicesForPlatformUser,
   verifyTrustedDevice,
 } from "@/lib/trusted-device";
+import { deviceContextFromUserAgent } from "@/lib/login-risk";
+import {
+  issueRememberedLogin,
+  rememberedLoginCookieOptions,
+  REMEMBERED_LOGIN_COOKIE,
+} from "@/lib/remembered-login";
 
 interface PlatformUserRow extends Record<string, unknown> {
   id: string;
@@ -90,7 +96,14 @@ async function loginHostBusinessId(
 }
 
 export async function POST(request: NextRequest) {
-  let body: { email?: unknown; identifier?: unknown; password?: unknown; businessId?: unknown };
+  let body: {
+    email?: unknown;
+    identifier?: unknown;
+    password?: unknown;
+    businessId?: unknown;
+    /** #1585 — «مرا در این دستگاه به خاطر بسپار». Opt-in only. */
+    remember?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -355,9 +368,41 @@ export async function POST(request: NextRequest) {
       }),
     );
 
+    /*
+     * #1585 — persistent login, only when the person explicitly asked for it on
+     * this sign-in and every required factor above has passed. It is a
+     * *separate* authority from the session just minted and from the seven-day
+     * trusted-device exemption: this mints no session and waives no factor, it
+     * only permits a future renewal after the server re-validates everything.
+     * The MFA branch above returns before this, so a member who still owes a
+     * second factor cannot obtain one here.
+     */
+    const remembered =
+      body.remember === true
+        ? await issueRememberedLogin({
+            businessId: chosen.businessId,
+            userId: chosen.userId,
+            platformUserId: usableIdentity.id,
+            platformTokenVersion: usableIdentity.token_version,
+            loginMethod: "password",
+            mfaVerified: false,
+            otpOnlyAssurance: false,
+            authenticatedAt: new Date(),
+            deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? null,
+            device: deviceContextFromUserAgent(request.headers.get("user-agent")),
+          }).catch((err) => {
+            // The session is already going to be minted; a failure here must not
+            // fail the sign-in, but it must not silently promise persistence
+            // either — the response says `remembered: false`.
+            console.error("Remembered-login registration failed", err);
+            return null;
+          })
+        : null;
+
     const res = NextResponse.json({
       user: { id: chosen.userId, role: chosen.role, fullName: chosen.fullName },
       business: { id: chosen.businessId, name: chosen.businessName, slug: chosen.businessSlug },
+      ...(body.remember === true ? { remembered: Boolean(remembered) } : {}),
       ...(graceNotice ?? {}),
     });
     res.cookies.set(
@@ -365,6 +410,13 @@ export async function POST(request: NextRequest) {
       await sessionFor(chosen, usableIdentity.id, usableIdentity.token_version, empSession.id),
       sessionCookieOptions(),
     );
+    if (remembered) {
+      res.cookies.set(
+        REMEMBERED_LOGIN_COOKIE,
+        remembered.secret,
+        rememberedLoginCookieOptions(remembered.absoluteExpiresAt),
+      );
+    }
     return res;
   });
 }

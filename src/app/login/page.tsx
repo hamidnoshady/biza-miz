@@ -15,6 +15,7 @@ import { endedSupportSessionClaims, getSession } from "@/lib/auth";
 import { safeLoginNextPath } from "@/lib/login-contract";
 import { SupportSessionEnded } from "@/app/dashboard/support-session-banner";
 import { SignedInNotice } from "@/components/auth/signed-in-notice";
+import { RememberedSessionBootstrap } from "@/components/auth/remembered-session-bootstrap";
 import LoginForm from "./login-form";
 
 // The alias resolution above reads the request's Host header, so this route
@@ -91,6 +92,15 @@ export default async function LoginPage({
           </div>
         </div>
       ) : null}
+      {/*
+        Issue #1585 — a browser that was remembered reopens here, because the
+        access JWT it held is deliberately short-lived and the server rightly
+        sent it back. The remembered credential is HttpOnly and host-only, so
+        only a server call can use it; one silent attempt is made and, on
+        success, the person walks into the app instead of retyping a password.
+        With no credential (or any refusal) this renders nothing.
+      */}
+      <RememberedSessionBootstrap next={next} />
       <LoginForm />
     </>
   );

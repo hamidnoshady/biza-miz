@@ -11,6 +11,12 @@ import {
 import { endPendingRevocation, logoutResponse, pendingRevocationFor } from "@/lib/logout-service";
 import { clearNativeDeviceAuthStateOnSignOut } from "@/lib/native-device-service";
 import { supportSessionReturnPath } from "@/lib/support-session";
+import {
+  clearedRememberedLoginCookieOptions,
+  readRememberedLoginToken,
+  REMEMBERED_LOGIN_COOKIE,
+  revokeRememberedLoginBySecret,
+} from "@/lib/remembered-login";
 
 /**
  * Sign this browser out (Phase 20 Wave 2; #854 follow-up).
@@ -81,7 +87,30 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  return logoutResponse({
+  /*
+   * #1585 — a sign-out ends this browser's remembered-login authorization too.
+   *
+   * The issue is explicit that this is not optional: a remaining seven-day
+   * trusted-device cookie must not quietly log the person back in after they
+   * pressed «خروج», and a still-valid refresh credential would do exactly that
+   * on the next page load. Revocation is keyed on the browser's own cookie, so
+   * it can only ever end the family this browser holds — never another
+   * device's — and a failure is swallowed here because clearing the cookie
+   * below already removes the ability to present it; the server-side row is
+   * still revoked on the next sign-out or security event.
+   *
+   * This does **not** touch the trusted-device exemption. The two authorities
+   * stay independently manageable.
+   */
+  const rememberedToken = readRememberedLoginToken(request);
+  if (rememberedToken) {
+    await revokeRememberedLoginBySecret({ secret: rememberedToken, reason: "sign_out" }).catch((err) => {
+      console.error("Remembered-login revocation on sign-out failed", err);
+      return { revoked: false, familyId: null };
+    });
+  }
+
+  const res = await logoutResponse({
     outcome,
     stillPending,
     clearSessionCookie: true,
@@ -89,4 +118,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     ...(session ? { session } : {}),
     ...(session?.imp ? { redirectTo: supportSessionReturnPath(session.businessId) } : {}),
   });
+  if (rememberedToken) {
+    res.cookies.set(REMEMBERED_LOGIN_COOKIE, "", clearedRememberedLoginCookieOptions());
+  }
+  return res;
 }

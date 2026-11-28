@@ -95,6 +95,16 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "auth/logout":
     "ends only the session named by the caller's own signed cookie (never a body field) and " +
     "always clears that cookie — a sign-out must work for a session the server already considers stale",
+  // Issue #1585 — renewal is pre-session by definition: the point of the
+  // endpoint is that the access session is gone. Its credential is an HttpOnly,
+  // SameSite=Lax, host-only cookie holding a 256-bit opaque secret, checked
+  // against an HMAC digest server-side; a same-origin check refuses a
+  // cross-site caller, and the route mints only a short-lived session for the
+  // membership that cookie names.
+  "auth/refresh":
+    "remembered-login renewal — runs with no session by definition and authenticates with the " +
+    "host-only HttpOnly refresh cookie it rotates; the membership, identity and risk are " +
+    "re-derived server-side before any session is minted",
   // Issue #854 follow-up — finishing a sign-out the server could not confirm,
   // after the first answer already cleared the cookie.
   "auth/logout/retry":
@@ -566,6 +576,15 @@ const SELF_GUARDING_ROUTES: Record<string, string> = {
   "auth/trusted-devices":
     "lists and revokes only the caller's own trusted devices — the session's own sub is the " +
     "authorization, and no other member's trust is reachable",
+  // Issue #1585 — the persistent-login counterpart, and deliberately a separate
+  // endpoint from it: trust waives a routine factor, a remembered login renews
+  // a session, and revoking one must not silently change the other. Same
+  // ownership shape — both the list and every revocation are keyed on
+  // `session.sub` / `session.businessId`, never a request field — plus the
+  // shared recent-authentication rule for ending any device but the current one.
+  "auth/remembered-devices":
+    "lists and revokes only the caller's own remembered browsers — the session's own sub is " +
+    "the authorization, and no other member's authorization is reachable",
   // Phase E — a structured input request reaches tenant scope only through its
   // parent conversation (like ai_messages), and the route re-checks
   // ownsConversation before answering or cancelling, so ownership is the

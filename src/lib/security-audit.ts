@@ -123,6 +123,11 @@ const ALLOWED_FACT_KEYS: ReadonlySet<string> = new Set([
   // "the credential row" — an id or kind, never its secret.
   "credentialid",
   "credentialtype",
+  // "this session proved SMS only" (#1386) — a boolean about which factor was
+  // used, not a one-time code. Needed by #1585's remembered-login audit rows,
+  // which record the assurance a family carries so a reader can tell a
+  // password-verified family from an OTP-only one without seeing any credential.
+  "otponlyassurance",
   // "the session generation is now 7" — a revocation counter that invalidates
   // older cookies. It cannot sign or replay anything without the realm secret,
   // and it is what lets an operator line a password change up with the
@@ -327,6 +332,12 @@ export const SECURITY_AUDIT_ACTIONS = {
   trustedDeviceGranted: "auth.trusted_device_granted",
   trustedDeviceLogin: "auth.trusted_device_login",
   trustedDeviceRevoked: "auth.trusted_device_revoked",
+  // Issue #1585 — the persistent-login authority. Separate actions from the
+  // trusted-device family on purpose: the two are different kinds of thing, and
+  // an audit reader must be able to tell a waived factor from a renewed session.
+  rememberedLoginIssued: "auth.remembered_login_issued",
+  rememberedLoginRefreshed: "auth.remembered_login_refreshed",
+  rememberedLoginRevoked: "auth.remembered_login_revoked",
   /**
    * #1386 — a password was replaced after the account holder proved control of
    * their verified phone with a purpose-bound `password_recovery` code. Filed

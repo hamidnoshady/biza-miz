@@ -41,7 +41,11 @@ import {
   type PhoneOtpSendSpec,
 } from "@/components/auth/phone-otp-step";
 import { PhonePasswordRecovery } from "@/components/auth/phone-password-recovery";
-import { loginErrorMessage, TRUSTED_DEVICE_DAYS } from "@/lib/login-contract";
+import {
+  loginErrorMessage,
+  REMEMBERED_LOGIN_IDLE_DAYS,
+  TRUSTED_DEVICE_DAYS,
+} from "@/lib/login-contract";
 import { networkErrorMessage, useLoginRequest } from "@/components/auth/use-login-request";
 import { toPersianDigits } from "@/lib/digits";
 import { readDeviceToken } from "@/lib/device-token";
@@ -92,6 +96,13 @@ export function AccountLoginForm({
   /** Show the typed password. Local UI state only; hidden again whenever the password is cleared. */
   const [showPassword, setShowPassword] = useState(false);
   const [rememberDevice, setRememberDevice] = useState(trustDeviceDefault);
+  /**
+   * #1585 — «مرا در این دستگاه به خاطر بسپار». A different authority from the
+   * seven-day trust above and deliberately a separate, opt-in checkbox: trust
+   * waives a routine second factor, this keeps the browser signed in after it
+   * closes. Never defaulted on, and never inferred from a previous login.
+   */
+  const [rememberLogin, setRememberLogin] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const { busy, send } = useLoginRequest();
@@ -133,7 +144,10 @@ export function AccountLoginForm({
       fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ identifier, password, ...(businessId ? { businessId } : {}) }),
+        body: JSON.stringify({
+          identifier, password, ...(businessId ? { businessId } : {}),
+          ...(rememberLogin ? { remember: true } : {}),
+        }),
         signal,
       }),
     );
@@ -216,6 +230,7 @@ export function AccountLoginForm({
           initialToken={otpSent.token}
           initialMaskedPhone={otpSent.maskedPhone}
           deviceToken={readDeviceToken()}
+          remember={rememberLogin}
           onVerified={() => goNext()}
           onCancel={() => {
             setOtpSent(null);
@@ -331,6 +346,8 @@ export function AccountLoginForm({
         theme={TENANT_MFA_THEME}
         offerTrustDevice
         trustDeviceDefault={rememberDevice}
+        offerRememberLogin
+        rememberLoginDefault={rememberLogin}
         endpoints={{
           challenge: "/api/auth/mfa/challenge",
           verify: "/api/auth/mfa/verify",
@@ -443,6 +460,24 @@ export function AccountLoginForm({
           </button>
         </div>
       </div>
+      <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-input px-3 py-2.5 text-sm">
+        <input
+          type="checkbox"
+          checked={rememberLogin}
+          onChange={(e) => setRememberLogin(e.target.checked)}
+          className="mt-0.5 size-4 accent-primary"
+        />
+        <span>
+          مرا در این دستگاه به خاطر بسپار
+          <span className="mt-0.5 block text-xs text-muted-foreground">
+            با فعال بودن این گزینه، پس از بستن مرورگر هم وارد حساب خود می‌مانید. این
+            ورود تا حدود {toPersianDigits(String(REMEMBERED_LOGIN_IDLE_DAYS))} روز بدون
+            استفاده و حداکثر تا پایان دورهٔ مجاز امنیتی معتبر است، و در صورت تغییرات
+            مشکوک یا تغییرات امنیتی حساب، دوباره از شما تأیید هویت خواسته می‌شود. روی
+            رایانه‌های مشترک و صندوق فروش، این گزینه را فعال نکنید.
+          </span>
+        </span>
+      </label>
       <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-input px-3 py-2.5 text-sm">
         <input
           type="checkbox"

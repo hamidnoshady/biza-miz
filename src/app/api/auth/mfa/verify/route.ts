@@ -8,6 +8,12 @@ import { countRemainingRecoveryCodes } from "@/lib/mfa-recovery";
 import { query, withTenant, withoutTenantScope } from "@/lib/db";
 import { SESSION_COOKIE, sessionCookieOptions, signSession } from "@/lib/auth";
 import { boundedString } from "@/lib/login-contract";
+import { deviceContextFromUserAgent } from "@/lib/login-risk";
+import {
+  issueRememberedLogin,
+  rememberedLoginCookieOptions,
+  REMEMBERED_LOGIN_COOKIE,
+} from "@/lib/remembered-login";
 import {
   issueTrustedDevice,
   trustedDeviceCookieOptions,
@@ -60,6 +66,8 @@ export async function POST(request: NextRequest) {
     /** Issue #885 — «اعتماد به این دستگاه برای ۷ روز». */
     trustDevice?: unknown;
     deviceToken?: unknown;
+    /** #1585 — «مرا در این دستگاه به خاطر بسپار». Opt-in only. */
+    remember?: unknown;
   };
   try {
     body = await request.json();
@@ -345,6 +353,44 @@ export async function POST(request: NextRequest) {
           : undefined,
       ),
     );
+
+    /*
+     * #1585 — persistent login, now that every required factor has passed.
+     *
+     * The choice travels from the sign-in form through the MFA step, and it is
+     * honoured only on the tenant password realm: a Telegram Mini App session is
+     * a partitioned, embedded browser context where a long-lived host cookie is
+     * the wrong shape, and the platform console is a stricter realm of its own.
+     *
+     * This is authority C, not B and not A: it mints no session and replaces no
+     * factor. `mfaVerified` is recorded as true here because the factor really
+     * was proved on this request; a refresh later copies that value and never
+     * re-derives or upgrades it.
+     */
+    if (payload.authRealm === "tenant_password" && body.remember === true) {
+      const remembered = await issueRememberedLogin({
+        businessId: chosen.businessId,
+        userId: chosen.userId,
+        platformUserId: user.id,
+        platformTokenVersion: user.token_version,
+        loginMethod: payload.primaryAuth === "phone_otp" ? "phone_otp" : "password",
+        mfaVerified: true,
+        otpOnlyAssurance: false,
+        authenticatedAt: new Date(),
+        deviceLabel: request.headers.get("user-agent")?.slice(0, 120) ?? null,
+        device: deviceContextFromUserAgent(request.headers.get("user-agent")),
+      }).catch((err) => {
+        console.error("Remembered-login registration failed", err);
+        return null;
+      });
+      if (remembered) {
+        res.cookies.set(
+          REMEMBERED_LOGIN_COOKIE,
+          remembered.secret,
+          rememberedLoginCookieOptions(remembered.absoluteExpiresAt),
+        );
+      }
+    }
 
     // Issue #885 — every required factor has now been satisfied on this
     // request, which is the policy's precondition for granting the seven-day

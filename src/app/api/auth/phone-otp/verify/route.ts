@@ -41,6 +41,12 @@ import {
   markMfaGracePeriod,
   signMfaPendingToken,
 } from "@/lib/mfa-service";
+import { deviceContextFromUserAgent } from "@/lib/login-risk";
+import {
+  issueRememberedLogin,
+  rememberedLoginCookieOptions,
+  REMEMBERED_LOGIN_COOKIE,
+} from "@/lib/remembered-login";
 
 interface MemberRow extends Record<string, unknown> {
   id: string;
@@ -74,7 +80,14 @@ interface MemberRow extends Record<string, unknown> {
  * keeps `shouldChallengeMfaOnLogin` unchanged.
  */
 export async function POST(request: NextRequest) {
-  let body: { code?: string; deviceToken?: string; businessId?: string; trustDevice?: boolean };
+  let body: {
+    code?: string;
+    deviceToken?: string;
+    businessId?: string;
+    trustDevice?: boolean;
+    /** #1585 — «مرا در این دستگاه به خاطر بسپار». Opt-in only. */
+    remember?: boolean;
+  };
   try {
     body = await request.json();
   } catch {
@@ -171,6 +184,7 @@ export async function POST(request: NextRequest) {
         // The multi-business path spends an already-proven code, so the trust
         // choice travels with the request exactly as it does on the direct one.
         wantsTrust: body.trustDevice === true,
+        wantsRemember: body.remember === true,
         trustedDeviceToken: readTrustedDeviceToken(request),
       });
     });
@@ -333,6 +347,7 @@ export async function POST(request: NextRequest) {
       deviceToken: deviceToken ?? undefined,
       userAgent: request.headers.get("user-agent"),
       wantsTrust: body.trustDevice === true,
+      wantsRemember: body.remember === true,
       trustedDeviceToken: readTrustedDeviceToken(request),
     });
   });
@@ -384,6 +399,8 @@ async function completePhoneLogin(
     userAgent: string | null;
     /** The member ticked «اعتماد به این دستگاه برای ۷ روز» on this request. */
     wantsTrust?: boolean;
+    /** The member ticked «مرا در این دستگاه به خاطر بسپار» on this request (#1585). */
+    wantsRemember?: boolean;
     /** The trusted-device cookie the browser arrived with, if any. */
     trustedDeviceToken?: string | null;
   },
@@ -603,6 +620,36 @@ async function completePhoneLogin(
      *  - the `.catch`: the login itself is already complete and must not fail
      *    because a convenience row could not be written.
      */
+    /*
+     * #1585 — persistent login, only after every required factor passed and
+     * only when the member asked for it. Authority C: it mints nothing here
+     * (the session above is A) and waives nothing (trust is B).
+     */
+    if (options.wantsRemember) {
+      const remembered = await issueRememberedLogin({
+        businessId: member.business_id,
+        userId: member.id,
+        platformUserId: member.platform_user_id,
+        platformTokenVersion: member.token_version,
+        loginMethod: "phone_otp",
+        mfaVerified: false,
+        otpOnlyAssurance: true,
+        authenticatedAt: new Date(),
+        deviceLabel,
+        device: deviceContextFromUserAgent(options.userAgent ?? null),
+      }).catch((err) => {
+        console.error("Remembered-login registration failed", err);
+        return null;
+      });
+      if (remembered) {
+        res.cookies.set(
+          REMEMBERED_LOGIN_COOKIE,
+          remembered.secret,
+          rememberedLoginCookieOptions(remembered.absoluteExpiresAt),
+        );
+      }
+    }
+
     if (options.wantsTrust && !mfaWaivedByTrust) {
       const trust = await issueTrustedDevice({
         businessId: member.business_id,

@@ -137,6 +137,17 @@ export interface MfaStepProps {
   offerTrustDevice?: boolean;
   /** Initial state of that checkbox; false unless the member already ticked it on an earlier step. */
   trustDeviceDefault?: boolean;
+  /**
+   * #1585 — offer «مرا در این دستگاه به خاطر بسپار» here.
+   *
+   * Separate from `offerTrustDevice` because it is a different authority: trust
+   * waives this routine challenge for seven days, whereas remembering keeps the
+   * browser signed in. A member who wants neither, or only one, must be able to
+   * say so — so the two boxes are independent and both opt-in.
+   */
+  offerRememberLogin?: boolean;
+  /** Carried from the sign-in form so the choice survives the second factor. */
+  rememberLoginDefault?: boolean;
   /** Called after `verify` has minted the real session cookie. */
   onVerified: () => void;
   /** Back to the email/password form — the token is discarded. */
@@ -154,6 +165,8 @@ export function MfaStep({
   theme = TENANT_MFA_THEME,
   offerTrustDevice = false,
   trustDeviceDefault = false,
+  offerRememberLogin = false,
+  rememberLoginDefault = false,
   onVerified,
   onCancel,
 }: MfaStepProps) {
@@ -172,6 +185,7 @@ export function MfaStep({
   const [phone, setPhone] = useState("");
   const [recoveryMode, setRecoveryMode] = useState(false);
   const [trustDevice, setTrustDevice] = useState(trustDeviceDefault);
+  const [rememberLogin, setRememberLogin] = useState(rememberLoginDefault);
   const [enrolment, setEnrolment] = useState<EnrolResponse | null>(null);
   const [maskedPhone, setMaskedPhone] = useState<string | null>(null);
   const [issuedRecoveryCodes, setIssuedRecoveryCodes] = useState<string[]>([]);
@@ -288,6 +302,10 @@ export function MfaStep({
           // A recovery code never earns trust (the route refuses it too), so
           // the choice is not even sent with one.
           ...(offerTrustDevice && trustDevice && !recoveryMode ? { trustDevice: true } : {}),
+          // #1585 — the separate persistent-login consent. Kept across a recovery
+          // code too: it is a different authority from device trust, and the
+          // route still refuses to honour it unless the factor was accepted.
+          ...(offerRememberLogin && rememberLogin ? { remember: true } : {}),
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -566,6 +584,24 @@ export function MfaStep({
             <span className="mt-0.5 block text-xs text-muted-foreground">
               دفعهٔ بعد روی این دستگاه کد دومرحله‌ای پرسیده نمی‌شود؛ رمز عبور همچنان
               لازم است. از تنظیمات امنیتی قابل لغو است.
+            </span>
+          </span>
+        </label>
+      ) : null}
+
+      {offerRememberLogin ? (
+        <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-input px-3 py-2.5 text-sm">
+          <input
+            type="checkbox"
+            checked={rememberLogin}
+            onChange={(e) => setRememberLogin(e.target.checked)}
+            className="mt-0.5 size-4 accent-primary"
+          />
+          <span>
+            مرا در این دستگاه به خاطر بسپار
+            <span className="mt-0.5 block text-xs text-muted-foreground">
+              پس از بستن مرورگر هم وارد می‌مانید؛ با تغییرات امنیتی حساب، دوباره تأیید
+              هویت لازم می‌شود. روی رایانه‌های مشترک فعال نکنید.
             </span>
           </span>
         </label>
