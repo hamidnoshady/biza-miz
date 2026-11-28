@@ -27,8 +27,20 @@ interface ReturnableOrderItem {
   id: string;
   name_snapshot: string;
   quantity: number;
+  /** Effective sold quantity for returns (retail lines: the snapshot's real count). */
+  returnable_quantity?: string | null;
   status: string;
   unit_price: string | number;
+}
+
+/**
+ * Retail-invoice lines store `quantity = 1`; the order read resolves the real
+ * sold count into `returnable_quantity`. Fall back to `quantity` for any
+ * payload that predates the field.
+ */
+function soldQuantity(item: ReturnableOrderItem): number {
+  const effective = item.returnable_quantity == null ? NaN : Number(item.returnable_quantity);
+  return Number.isFinite(effective) && effective > 0 ? effective : item.quantity;
 }
 
 interface HistoryLine {
@@ -175,7 +187,7 @@ export function CustomerReturnPanel({
   const selectedLines = useMemo(() => eligibleItems.flatMap((item) => {
     const quantity = quantityNumber(quantityDraft[item.id] ?? "");
     const alreadyReturned = returnedByItem.get(item.id) ?? 0;
-    const remaining = Math.max(0, item.quantity - alreadyReturned);
+    const remaining = Math.max(0, soldQuantity(item) - alreadyReturned);
     if (!Number.isFinite(quantity) || quantity <= 0) return [];
     return [{
       orderItemId: item.id,
@@ -203,7 +215,7 @@ export function CustomerReturnPanel({
     const raw = quantityDraft[item.id]?.trim();
     if (!raw) return false;
     const quantity = quantityNumber(raw);
-    const remaining = Math.max(0, item.quantity - (returnedByItem.get(item.id) ?? 0));
+    const remaining = Math.max(0, soldQuantity(item) - (returnedByItem.get(item.id) ?? 0));
     return !Number.isFinite(quantity) || quantity <= 0 || quantity > remaining;
   });
   const canStartReturn = canRefund && order.status === "completed" && Boolean(history) &&
@@ -329,14 +341,14 @@ export function CustomerReturnPanel({
               <p className="rounded-xl bg-muted px-3 py-3 text-sm text-muted-foreground">قلم قابل‌برگشتی در سفارش وجود ندارد.</p>
             ) : eligibleItems.map((item) => {
               const alreadyReturned = returnedByItem.get(item.id) ?? 0;
-              const remaining = Math.max(0, item.quantity - alreadyReturned);
+              const remaining = Math.max(0, soldQuantity(item) - alreadyReturned);
               return (
                 <div key={item.id} className="rounded-xl border border-border/80 p-3">
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="font-semibold text-foreground">{item.name_snapshot}</p>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        فروخته‌شده: {toPersianDigits(item.quantity)} · برگشت قبلی: {toPersianDigits(alreadyReturned)} · مانده: {toPersianDigits(remaining)}
+                        فروخته‌شده: {toPersianDigits(soldQuantity(item))} · برگشت قبلی: {toPersianDigits(alreadyReturned)} · مانده: {toPersianDigits(remaining)}
                       </p>
                     </div>
                     <span className="shrink-0 text-xs font-semibold text-muted-foreground">{money.formatText(String(item.unit_price))} / واحد</span>

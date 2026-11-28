@@ -20,11 +20,13 @@ import { PersianNumberInput } from "@/components/ui/persian-number-input";
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useDeferredValue } from "react";
 import { PlusIcon, PrinterIcon, RefreshCwIcon, SplitIcon, Trash2Icon, XIcon } from "lucide-react";
-import { formatQuantity, toPersianDigits } from "@/lib/digits";
+import { formatQuantity, toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { useMoney } from "@/components/money/money-context";
 import { normalizePosSearchText } from "@/lib/pos-selection";
 import { computeGoldSalePrice, type MakingChargeType } from "@/lib/gold-pricing";
 import { computeAccessorySalePrice } from "@/lib/accessories";
+import { sizePackCartLine, type TillSizePack } from "./size-pack-cart";
+import { sizePackErrorMessage } from "@/lib/fashion-size-pack-messages";
 import { computeCosmeticSalePrice } from "@/lib/cosmetics";
 import { computeWatchSalePrice } from "@/lib/watch-pricing";
 import {
@@ -100,14 +102,19 @@ interface Variant {
   sellableQuantity?: string;
   tracking?: string;
   unitPrice: number | null;
+  /** GH #1567 6D/C5 — a fashion variant selling consigned (امانی) units for their owner. */
+  consigned?: true;
 }
+
+/** The till's label for a consigned variant: the cashier sees whose goods they are selling. */
+const CONSIGNED_VARIANT_TAG = "امانی";
 
 /** One line in the cart, before it is sent. Prices are previews of what the server will compute. */
 interface CartLine {
   key: string;
   label: string;
   /** Discriminates which payload shape goes to the API. */
-  payload: Record<string, unknown> & { kind: "gold" | "watch" | "accessory" | "cosmetic" | "stocked" | "service" };
+  payload: Record<string, unknown> & { kind: "gold" | "watch" | "accessory" | "cosmetic" | "stocked" | "service" | "size_pack" };
   net: number;
   vat: number;
   total: number;
@@ -139,6 +146,10 @@ function variantApiFor(industry: Industry): string | null {
       return "/api/tools-fittings";
     case "haberdashery":
       return "/api/haberdashery";
+    // Issue #1567 — fashion loads its variant board through the same shared
+    // trade-goods handlers; only the URL namespace differs.
+    case "fashion_apparel":
+      return "/api/fashion";
     default:
       return null;
   }
@@ -678,6 +689,7 @@ export function RetailInvoiceScreen({
           {isTradeGoodsIndustry(industry) ? (
             <AccessoryLineForm industry={industry} variants={variants} onAdd={addLine} kind="stocked" loading={loading} />
           ) : null}
+          {industry === "fashion_apparel" ? <SizePackLineForm onAdd={addLine} /> : null}
           {isServiceInvoiceIndustry(industry) ? <ServiceLineForm industry={industry} onAdd={addLine} /> : null}
 
         </div>
@@ -1034,6 +1046,23 @@ function BarcodeScanField({
     }
     const matches = data.matches ?? [];
     if (matches.length === 0) {
+      // GH #1567 6C — a fashion till also scans wholesale size packs.
+      if (industry === "fashion_apparel") {
+        const packRes = await api<{ pack?: TillSizePack | null }>(`/api/size-packs?view=lookup&code=${encodeURIComponent(needle)}`);
+        const pack = packRes.ok ? packRes.data.pack : null;
+        if (pack) {
+          if (pack.consignedComponents && pack.consignedComponents.length > 0) {
+            setScanError(sizePackErrorMessage("pack_contains_consigned", { items: pack.consignedComponents }));
+            return;
+          }
+          if (pack.available < 1) {
+            setScanError(`موجودی برای بستهٔ «${pack.name}» کافی نیست.`);
+            return;
+          }
+          onAdd(sizePackCartLine(pack, 1, defaultVatPercent, newKey()));
+          return;
+        }
+      }
       setScanError("بارکدی با این کد یافت نشد.");
       return;
     }
@@ -1560,7 +1589,7 @@ function AccessoryLineForm({
             { value: "", label: "انتخاب کنید" },
             ...sellable.map((v) => ({
               value: v.id,
-              label: `${v.parentName ? `${v.parentName} — ` : ""}${v.name} (موجودی ${formatQuantity(v.quantity)})`,
+              label: `${v.parentName ? `${v.parentName} — ` : ""}${v.name} (${v.consigned ? `${CONSIGNED_VARIANT_TAG} · ` : ""}موجودی ${formatQuantity(v.quantity)})`,
             })),
           ]}
         />
@@ -1603,7 +1632,7 @@ function AccessoryLineForm({
           if (!variant || !preview) return;
           onAdd({
             key: newKey(),
-            label: `${variant.name} × ${formatQuantity(quantity)}`,
+            label: `${variant.name}${variant.consigned ? ` · ${CONSIGNED_VARIANT_TAG}` : ""} × ${formatQuantity(quantity)}`,
             payload: {
               kind,
               itemId: variant.id,
@@ -1624,6 +1653,70 @@ function AccessoryLineForm({
       >
         <PlusIcon aria-hidden="true" className="size-4" />
         افزودن به فاکتور
+      </Button>
+    </Panel>
+  );
+}
+
+/**
+ * GH #1567 6C — sell wholesale size packs. Hidden until the shop has defined
+ * one, so a boutique that never sells packs never sees the panel.
+ */
+function SizePackLineForm({ onAdd }: { onAdd: (line: CartLine) => void }) {
+  const money = useMoney();
+  const defaultVatPercent = useContext(DefaultVatContext);
+  const [packs, setPacks] = useState<TillSizePack[] | null>(null);
+  const [packId, setPackId] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  useEffect(() => {
+    void api<{ packs?: TillSizePack[] }>("/api/size-packs?active=1").then((res) => setPacks(res.ok ? res.data.packs ?? [] : []));
+  }, []);
+  if (!packs || packs.length === 0) return null;
+  const pack = packs.find((p) => p.id === packId) ?? null;
+  const qty = Number(toLatinDigits(quantity));
+  // GH #1567 C5 — a pack holding a consigned variant is refused by name, not as a shortage.
+  const consignedBlock = pack && pack.consignedComponents && pack.consignedComponents.length > 0
+    ? sizePackErrorMessage("pack_contains_consigned", { items: pack.consignedComponents })
+    : null;
+  const valid = pack !== null && consignedBlock === null && Number.isInteger(qty) && qty >= 1 && qty <= pack.available;
+  const preview = valid ? sizePackCartLine(pack, qty, defaultVatPercent, "preview") : null;
+  return (
+    <Panel title="فروش بستهٔ سایزی" hint="هر بسته همان تنوع‌ها را از انبار کم می‌کند؛ قیمت، قیمت عمدهٔ ثبت‌شدهٔ بسته است.">
+      <Field label="بسته">
+        <SearchableSelect
+          value={packId}
+          onChange={setPackId}
+          ariaLabel="انتخاب بسته"
+          options={packs.map((p) => ({
+            value: p.id,
+            label: `${p.name} — ${money.format(p.priceRial)} (قابل فروش ${toPersianDigits(String(p.available))})`,
+          }))}
+        />
+      </Field>
+      <Field label="تعداد بسته">
+        <PersianNumberInput inputMode="numeric" className={inputClass} dir="ltr" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+      </Field>
+      {pack && !valid ? (
+        <p role="alert" className="mb-3 text-xs text-rose-700 dark:text-rose-300">
+          {consignedBlock ?? (pack.available < 1 ? `موجودی برای بستهٔ «${pack.name}» کافی نیست.` : `حداکثر ${toPersianDigits(String(pack.available))} بسته قابل فروش است.`)}
+        </p>
+      ) : null}
+      {preview ? (
+        <p className="mb-3 text-xs leading-6 text-muted-foreground">
+          خالص {money.format(preview.net)} · مالیات {money.format(preview.vat)} — <b className="text-foreground">{money.format(preview.total)}</b>
+        </p>
+      ) : null}
+      <Button
+        disabled={!preview}
+        onClick={() => {
+          if (!pack || !valid) return;
+          onAdd(sizePackCartLine(pack, qty, defaultVatPercent, newKey()));
+          setPackId("");
+          setQuantity("1");
+        }}
+      >
+        <PlusIcon aria-hidden="true" className="size-4" />
+        افزودن بسته به فاکتور
       </Button>
     </Panel>
   );

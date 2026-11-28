@@ -37,6 +37,7 @@ import {
   vehicleSalesReport,
 } from "./automotive-reports-service";
 import { listLayaways, listLayawaysPage } from "./jewelry-flagship-service";
+import { fashionMerchandisingAdvice } from "./fashion-merchandising-advice-service";
 import { deadStockReport, lowStockReport, deadStockReportPage, lowStockReportPage } from "./retail-stock-service";
 import type { DateRangeFilters } from "./reports-service";
 
@@ -52,6 +53,10 @@ const SALE_EVENT_PREFIX: Partial<Record<Industry, string>> = {
   wholesale: "wholesale",
   tools_fittings: "tools",
   haberdashery: "haberdashery",
+  // Issue #1567 — fashion's events carry the trade key as their prefix
+  // (`fashion_apparel.sale_revenue`), exactly as the shared trade-goods sell
+  // path emits them.
+  fashion_apparel: "fashion_apparel",
 };
 
 /** How many days without a sale makes stock "dead" — the warehouse module's own default. */
@@ -157,6 +162,12 @@ export async function runTradeReport(
       const today = context.todayIso ?? new Date().toISOString().slice(0, 10);
       const rows = await deadStockReport(locationId, DEAD_STOCK_DAYS, today);
       return { rows, totalCount: rows.length, totalValueRial: rows.reduce((sum, r) => sum + r.valueRial, 0) };
+    }
+
+    // GH #1567 6E — advisory merchandising suggestions (read-only).
+    case "fashion_merchandising_advice": {
+      if (!locationId || industry !== "fashion_apparel") return { advisory: true, rows: [], totalCount: 0 };
+      return fashionMerchandisingAdvice(businessId, locationId, { from, to, todayIso: context.todayIso }) as unknown as Record<string, unknown>;
     }
 
     default:

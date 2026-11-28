@@ -69,3 +69,14 @@ describe("ESH-145 — Accounting menu projection", () => {
     expect(menuProjectionKey({ ...base.product, imageMediaId: null }, base.desired)).not.toBe(key);
   });
 });
+
+describe("GH #1567 F5 — no inline image bytes leave through the website projection", () => {
+  it("drops a data: image link and an image-carrying description from the projection, leaving the row itself alone", () => {
+    const legacy = { ...item, imageMediaId: null, imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", description: '<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">' };
+    const projected = projectMenuItem({ ...input, item: legacy })!;
+    expect(projected.product.imageUrl).toBeNull();
+    expect(projected.product.description).toBeNull();
+    expect(legacy.imageUrl.startsWith("data:")).toBe(true);
+    expect(projectMenuItem({ ...input, item: { ...item, imageMediaId: null } })!.product.imageUrl).toBe("https://images.example.test/old.jpg");
+  });
+});

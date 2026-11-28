@@ -23,14 +23,16 @@ import {
   type ItemStock,
   type VariantSummary,
 } from "./accessories-service";
+import { readSaleMerchSnapshot, type SaleMerchSnapshot } from "./sale-return-facts";
 import { emitDomainEvent } from "./posting-engine";
 import type { RialText } from "./inventory-exact";
 import type { SettlementMethod } from "./ledger";
 import { resolveLineTenders, type RetailTenderQueueEntry } from "./retail-tenders";
+import { planFungibleRestore, relieveFungibleStock } from "./item-stock-valuation";
+import Decimal from "decimal.js";
+import { roundRial } from "./inventory-exact";
 import {
   computeTradeGoodsSalePrice,
-  nextTradeGoodsAverageUnitCost,
-  tradeGoodsCogs,
   validateTradeGoodsReceipt,
   isTradeGoodsIndustry,
   type TradeGoodsIndustry,
@@ -71,6 +73,8 @@ export interface SellTradeGoodsResult {
   };
   revenueEntryId: string | null;
   cogsEntryId: string | null;
+  /** GH #1567 F4 — the sale-time merchandising snapshot (also in the event payload). */
+  merch: SaleMerchSnapshot;
   /** The COGS this sale posted, Rial — the same number the commission margin basis uses. */
   cost: RialText;
 }
@@ -130,7 +134,13 @@ export async function sellTradeGoodsUnits(
     throw new Error("موجودی کافی نیست.");
   }
 
-  const cost = tradeGoodsCogs(input.quantity, stock.unitCost);
+  // F1 (GH #1567): COGS is the exact carrying value relieved, with quantity
+  // and value leaving in one locked write (see item-stock-valuation.ts).
+  const { value: cost } = await relieveFungibleStock(client, {
+    itemId: input.itemId,
+    quantity: input.quantity,
+    markSold: true,
+  });
 
   // See the identical comment in accessories-service.ts's sellAccessoryUnits:
   // `uq_journal_business_source_posting` is unique on (business_id,
@@ -143,6 +153,9 @@ export async function sellTradeGoodsUnits(
   const postingSourceId = randomUUID();
   const lineTenders = resolveLineTenders(input, breakdown.total);
 
+  // GH #1567 F4 — the merchandising tags this sale is reported under,
+  // frozen now so re-tagging the style later never moves it.
+  const merch = await readSaleMerchSnapshot(client, input.itemId);
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -157,6 +170,7 @@ export async function sellTradeGoodsUnits(
       vat: breakdown.vat,
       total: breakdown.total,
       tenders: lineTenders,
+      merch,
     },
     sourceType: `${input.trade}_sale`,
     sourceId: input.itemId,
@@ -175,11 +189,6 @@ export async function sellTradeGoodsUnits(
     createdBy: input.createdBy ?? null,
   });
 
-  await client.query(
-    `UPDATE item_stock SET quantity = quantity - $2, last_sold_at = now(), updated_at = now() WHERE item_id = $1`,
-    [input.itemId, input.quantity],
-  );
-
   return {
     breakdown: {
       gross: breakdown.gross,
@@ -190,6 +199,7 @@ export async function sellTradeGoodsUnits(
     },
     revenueEntryId,
     cogsEntryId,
+    merch,
     cost,
   };
 }
@@ -217,28 +227,28 @@ export async function receiveTradeGoodsStock(
     client ? client.query<T>(text, params as never) : query<T>(text, params);
 
   const { rows: existingRows } = await run<{
-    item_id: string;
     quantity: string;
     unit_cost: string | null;
-    unit_price: string | null;
+    total_value_rial: string | null;
   }>(
-    client ? `SELECT * FROM item_stock WHERE item_id = $1 FOR UPDATE` : `SELECT * FROM item_stock WHERE item_id = $1`,
+    client
+      ? `SELECT quantity::text, unit_cost::text, total_value_rial::text FROM item_stock WHERE item_id = $1 FOR UPDATE`
+      : `SELECT quantity::text, unit_cost::text, total_value_rial::text FROM item_stock WHERE item_id = $1`,
     [itemId],
   );
-  const existing: ItemStock | null = existingRows[0]
-    ? {
-        itemId: existingRows[0].item_id,
-        quantity: existingRows[0].quantity,
-        unitCost: existingRows[0].unit_cost == null ? null : Number(existingRows[0].unit_cost),
-        unitPrice: existingRows[0].unit_price == null ? null : Number(existingRows[0].unit_price),
-      }
-    : null;
-
-  const newCost = nextTradeGoodsAverageUnitCost(
-    existing?.quantity ?? "0",
-    existing?.unitCost ?? null,
+  const existing = existingRows[0];
+  // F1 (GH #1567): a receipt adds its exact value to the carrying value and
+  // re-derives the moving average from it. This path used to write
+  // `unit_cost` only, so every later movement read a stale
+  // `total_value_rial`.
+  const plan = planFungibleRestore(
+    {
+      quantity: existing?.quantity ?? "0",
+      unitCost: existing?.unit_cost ?? null,
+      totalValue: existing ? existing.total_value_rial : "0",
+    },
     input.quantity,
-    input.unitCost,
+    roundRial(new Decimal(input.quantity).times(input.unitCost)),
   );
 
   const { rows } = await run<{
@@ -247,13 +257,14 @@ export async function receiveTradeGoodsStock(
     unit_cost: string | null;
     unit_price: string | null;
   }>(
-    `INSERT INTO item_stock (item_id, quantity, unit_cost) VALUES ($1, $2, $3)
+    `INSERT INTO item_stock (item_id, quantity, unit_cost, total_value_rial) VALUES ($1, $2, $3, $4)
      ON CONFLICT (item_id) DO UPDATE
        SET quantity = item_stock.quantity + EXCLUDED.quantity,
            unit_cost = EXCLUDED.unit_cost,
+           total_value_rial = EXCLUDED.total_value_rial,
            updated_at = now()
      RETURNING *`,
-    [itemId, input.quantity, newCost],
+    [itemId, input.quantity, plan.nextUnitCost, plan.nextTotal],
   );
   return {
     itemId: rows[0].item_id,

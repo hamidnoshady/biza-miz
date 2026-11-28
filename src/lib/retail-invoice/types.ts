@@ -14,6 +14,7 @@
  */
 import type { RialText } from "../inventory-exact";
 import type { Purity } from "../gold";
+import type { SaleMerchSnapshot } from "../sale-return-facts";
 
 /** Money as the API/DB hands it back — an integer-Rial string, per repo convention (see inventory-exact.ts). */
 export type Money = RialText | string;
@@ -55,6 +56,8 @@ interface RetailInvoiceLineSnapshotBase {
    * such a line automatically rather than leave it unreversed.
    */
   ledgerEntryIds?: string[];
+  /** GH #1567 F4 — collection/season/category/brand frozen at sale time; absent on pre-0328 lines (reported as unknown). */
+  merch?: SaleMerchSnapshot;
 }
 
 export interface GoldLineSnapshot extends RetailInvoiceLineSnapshotBase {
@@ -130,6 +133,20 @@ export interface AccessoryLineSnapshot extends RetailInvoiceLineSnapshotBase {
 
 export interface StockedLineSnapshot extends RetailInvoiceLineSnapshotBase {
   kind: "stocked";
+  /**
+   * GH #1567 6D — present when the units sold were consigned (امانی): the
+   * line posted owner share → 2110 and commission → 4700 instead of revenue
+   * and COGS, and its returns/void move the consignment ledger, not item_stock.
+   */
+  consignment?: {
+    contractId: string;
+    lineId: string;
+    terms: "owner_price" | "commission";
+    quantity: number;
+    net: string;
+    ownerShare: string;
+    commission: string;
+  };
 }
 
 /**

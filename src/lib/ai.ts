@@ -425,10 +425,11 @@ export type ActionType =
   | "accessories.item.create"
   | "accessories.item.sell"
   | "accessories.stock.update"
-  // Batch AO — the three trade-goods verticals (wholesale / tools_fittings /
-  // haberdashery). One shared route implementation in trade-goods-routes.ts,
-  // one shared executor family: item.create/stock.update ride inventoryAdjust,
-  // item.sell rides ordersCreate — exactly the route guards.
+  // Batch AO — the trade-goods verticals (wholesale / tools_fittings /
+  // haberdashery, plus fashion since issue #1567). One shared route
+  // implementation in trade-goods-routes.ts, one shared executor family:
+  // item.create/stock.update ride inventoryAdjust, item.sell rides
+  // ordersCreate — exactly the route guards.
   | "wholesale.item.create"
   | "wholesale.item.sell"
   | "wholesale.stock.update"
@@ -438,6 +439,9 @@ export type ActionType =
   | "haberdashery.item.create"
   | "haberdashery.item.sell"
   | "haberdashery.stock.update"
+  | "fashion_apparel.item.create"
+  | "fashion_apparel.item.sell"
+  | "fashion_apparel.stock.update"
   // Batch AP — data-transfer config. Schedules and templates are plain
   // config records (mode/low, template deletes included per the standing
   // rule). data.import.run queues a mass write of tenant rows from a prior
@@ -681,6 +685,9 @@ export type AutopilotExecutorKey =
   | "haberdasheryItemCreate"
   | "haberdasheryItemSell"
   | "haberdasheryStockUpdate"
+  | "fashionApparelItemCreate"
+  | "fashionApparelItemSell"
+  | "fashionApparelStockUpdate"
   | "dataScheduleCreate"
   | "dataScheduleUpdate"
   | "dataScheduleRun"
@@ -2032,6 +2039,32 @@ export const ACTION_CATALOG: Record<ActionType, ActionMeta> = {
     label: "ورود موجودی و/یا قیمت قفسهٔ قلم خرازی — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
     payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
     executor: "haberdasheryStockUpdate",
+  },
+  // Issue #1567 — the fashion trade's lanes, bound to the same shared
+  // trade-goods routes under the /api/fashion namespace.
+  "fashion_apparel.item.create": {
+    type: "fashion_apparel.item.create",
+    endpoint: "/api/fashion/items",
+    method: "POST",
+    label: "ایجاد خانواده/تنوع پوشاک (سایز × رنگ) — برد فروشگاه پوشاک",
+    payloadHint: '{ name: string, sku?: string|null, parentItemId?: string|null, attributes?: [{name,value}] }',
+    executor: "fashionApparelItemCreate",
+  },
+  "fashion_apparel.item.sell": {
+    type: "fashion_apparel.item.sell",
+    endpoint: "/api/fashion/items/{id}/sell",
+    method: "POST",
+    label: "فروش واحدهای یک تنوع پوشاک — درآمد + بهای تمام‌شده + کاهش موجودی در یک تراکنش",
+    payloadHint: '{ id: string, quantity?: string="1", unitPrice?: int, discount?: int=0, vatPercent?: number=0, paymentMethod: "cash"|"bank"|"credit" }',
+    executor: "fashionApparelItemSell",
+  },
+  "fashion_apparel.stock.update": {
+    type: "fashion_apparel.stock.update",
+    endpoint: "/api/fashion/items/{id}/stock",
+    method: "POST",
+    label: "ورود موجودی و/یا قیمت قفسهٔ قلم پوشاک — قیمت خرید بدون تعداد فقط تا وقتی موجودی صفر است",
+    payloadHint: '{ id: string, quantity?: string, unitCost?: int, unitPrice?: int }',
+    executor: "fashionApparelStockUpdate",
   },
   "data.schedule.create": {
     type: "data.schedule.create",
@@ -5513,13 +5546,13 @@ export function toolDefinitions(mode: AgentMode, opts: ToolDefinitionsOptions = 
         function: {
           name: "list_trade_goods_items",
           description:
-            "برد کالای عمده/ابزار/خرازی شعبهٔ جاری — industry یکی از wholesale|tools_fittings|haberdashery.",
+            "برد کالای عمده/ابزار/خرازی/پوشاک شعبهٔ جاری — industry یکی از wholesale|tools_fittings|haberdashery|fashion_apparel.",
           parameters: {
             type: "object",
             properties: {
               industry: {
                 type: "string",
-                enum: ["wholesale", "tools_fittings", "haberdashery"],
+                enum: ["wholesale", "tools_fittings", "haberdashery", "fashion_apparel"],
                 description: "صنعت موردنظر — فقط برای همان صنعت فعال است",
               },
             },

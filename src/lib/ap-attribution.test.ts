@@ -13,6 +13,7 @@ describe("A/P source attribution contract", () => {
       "ap_payment_reversal",
       "cheque",
       "installment_interest",
+      "item_production_subcontract",
       "manual",
       "manual_adjustment",
       "opening",
@@ -53,6 +54,6 @@ it("generates broad and indexed named reads from exactly the registered attribut
     expect(named.includes(marker), type).toBe(contract.mode !== "intentional_unknown");
     expect(AP_SUPPLIER_ATTRIBUTION_SQL.includes(marker), type).toBe(contract.mode !== "intentional_unknown");
   }
-  expect(named.match(/ = \$3::uuid/g)).toHaveLength(9);
+  expect(named.match(/ = \$3::uuid/g)).toHaveLength(10);
   expect(AP_SUPPLIER_ATTRIBUTION_SQL).not.toContain("$3");
 });

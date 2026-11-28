@@ -57,6 +57,15 @@ export const RETAIL_ACCOUNT_CODES: Record<Exclude<Industry, "food_service">, Ret
     cogs: WELL_KNOWN_CODES.haberdasheryCogs,
     inventory: WELL_KNOWN_CODES.haberdasheryInventory,
   },
+  // Issue #1567 — a fashion shop's website sells the same stocked variants
+  // the counter sells, so an online order lands in the trade's own revenue
+  // account and relieves its merchandise inventory at posted COGS. Every code
+  // exists in the trade's chart (coa-template.ts).
+  fashion_apparel: {
+    revenue: WELL_KNOWN_CODES.fashionSalesRevenue,
+    cogs: WELL_KNOWN_CODES.fashionCogs,
+    inventory: WELL_KNOWN_CODES.fashionInventory,
+  },
   // Issue #799 — an AEC business's website sells services, not stock: an online
   // order lands in the design/engineering revenue account, its direct cost in
   // project cost, and any material it consumes against the generic inventory

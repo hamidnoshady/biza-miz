@@ -37,6 +37,8 @@ export type ReportShape =
   | "near_expiry"
   | "low_stock"
   | "dead_stock"
+  // GH #1567 6E — fashion advisory merchandising suggestions.
+  | "fashion_advice"
   // Issue #839 §14 — the dealership's own report payloads.
   | "vehicle_inventory"
   | "vehicle_sales"
@@ -139,6 +141,7 @@ export const DOCUMENT_SHAPES = new Set<ReportShape>([
   "near_expiry",
   "low_stock",
   "dead_stock",
+  "fashion_advice",
   // Issue #839 §14 — the dealership's three reports. Each is its own document
   // shape rather than a row dump, because a car row means nothing without its
   // capitalised costs next to its asking price.

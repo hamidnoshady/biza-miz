@@ -28,8 +28,15 @@ import {
 } from "./accessories";
 import { roundRial, type RialText } from "./inventory-exact";
 
-/** The three trade-goods industries, kept in one place so services, routes and tests agree. */
-export const TRADE_GOODS_INDUSTRIES = ["wholesale", "tools_fittings", "haberdashery"] as const;
+/**
+ * The trade-goods industries, kept in one place so services, routes and tests
+ * agree. Phase 38 opened this set with wholesale / tools & fittings /
+ * haberdashery; issue #1567 adds `fashion_apparel` for the same reason — a
+ * garment, shoe or bag is a countable finished good sold as a variant child
+ * (style × size × colour) over `items`/`item_stock`, with the same receipts,
+ * weighted-average cost and sale events, differing only in the accounts.
+ */
+export const TRADE_GOODS_INDUSTRIES = ["wholesale", "tools_fittings", "haberdashery", "fashion_apparel"] as const;
 export type TradeGoodsIndustry = (typeof TRADE_GOODS_INDUSTRIES)[number];
 
 export function isTradeGoodsIndustry(value: Industry | string | null): value is TradeGoodsIndustry {
@@ -59,6 +66,12 @@ export const TRADE_GOODS_ACCOUNTS: Record<TradeGoodsIndustry, TradeGoodsAccounts
     inventory: WELL_KNOWN_CODES.haberdasheryInventory,
     sales: WELL_KNOWN_CODES.haberdasherySalesRevenue,
     cogs: WELL_KNOWN_CODES.haberdasheryCogs,
+  },
+  // Issue #1567 — the fashion trade's own finished-goods triple (1374/4584/5184).
+  fashion_apparel: {
+    inventory: WELL_KNOWN_CODES.fashionInventory,
+    sales: WELL_KNOWN_CODES.fashionSalesRevenue,
+    cogs: WELL_KNOWN_CODES.fashionCogs,
   },
 };
 

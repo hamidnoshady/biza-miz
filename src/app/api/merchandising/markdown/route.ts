@@ -16,6 +16,8 @@ const INVENTORY_ACCOUNT_CODE: Record<string, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  // Issue #1567 — markdowns relieve the trade's own merchandise inventory.
+  fashion_apparel: WELL_KNOWN_CODES.fashionInventory,
 };
 
 function inventoryCodeFor(industry: string | null): string | null {
@@ -40,7 +42,11 @@ export const GET = withTenantScope(async () => {
   return NextResponse.json({ candidates });
 });
 
-/** Applies an accepted markdown: new price on the sell screen + a ledger write-down. */
+/**
+ * Applies an accepted markdown: a new price on the sell screen, nothing else
+ * (GH #1567 F3). The result flags `belowCost` when the price signals NRV below
+ * cost; the write-down itself is `/api/inventory/item-write-downs` (reviewed).
+ */
 export const POST = withTenantScope(async (request: NextRequest) => {
   const { session, error } = await requirePermission(PERMISSIONS.inventoryAdjust);
   if (error) return error;

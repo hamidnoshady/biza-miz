@@ -102,6 +102,8 @@ export interface FieldRelation {
 export interface FieldValidation {
   min?: number;
   max?: number;
+  /** GH #1567 F5 — the cell is an image link: absolute http(s), bounded, never `data:`/`blob:`/`javascript:`. */
+  mediaUrl?: boolean;
   /**
    * Money only: the file's value must land on a whole Rial. The codec's Toman
    * conversion rounds (`۱۵/۷۵` → 1508), which is right for a price list and

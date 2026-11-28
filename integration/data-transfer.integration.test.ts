@@ -1962,3 +1962,27 @@ describe("multi-tenant isolation", () => {
     expect(await partyCount(other.id)).toBe(0);
   });
 });
+
+describe("GH #1567 F5 — imported text never carries inline media", () => {
+  it("refuses rows whose cells inline an image (plain, encoded) or whose image link is not http(s); imports only the clean row", async () => {
+    const csv = [
+      "نام,دسته,قیمت,توضیحات,لینک تصویر",
+      'لاته,F5,8500,"<img src=""data:image/png;base64,iVBORw0KGgo="">",',
+      "موکا,F5,8500,%64ata%3Aimage%2Fpng%3Bbase64%2CAAAA,",
+      "کاپوچینو,F5,8500,متن,javascript:alert(1)",
+      "اسپرسو,F5,8500,دم‌کرده,https://cdn.example.com/espresso.jpg",
+    ].join("\n") + "\n";
+    const { job } = await uploadCsv("pos.products", csv, { relationStrategy: { categoryName: "create" }, validOnly: true });
+    expect(job.errorRows).toBe(3);
+    const result = await asBusiness(biz.id, () =>
+      importService.runImportJob(biz.id, job.id, { locationId: biz.locationId, actorUserId: null, actorName: actor.actorName }),
+    );
+    expect(result.created).toBe(1);
+    const { rows } = await db.query<{ name: string; description: string | null; image_url: string | null }>(
+      `SELECT i.name, i.description, i.image_url FROM menu_items i JOIN menu_categories c ON c.id = i.category_id
+        WHERE c.location_id = $1 AND c.name = 'F5'`,
+      [biz.locationId],
+    );
+    expect(rows).toEqual([{ name: "اسپرسو", description: "دم‌کرده", image_url: "https://cdn.example.com/espresso.jpg" }]);
+  });
+});

@@ -65,6 +65,8 @@ export const PERMISSION_DEPENDENCIES: Partial<Record<Permission, readonly Permis
   "crm.export": ["crm.view"],
   "crm.configure": ["crm.view"],
   "crm.delete": ["crm.view"],
+  "tailoring.manage": ["crm.view"],
+  "tailoring.measurements": ["tailoring.manage"],
 
   // Workspace
   "workspace.manage": ["workspace.view"],

@@ -1,0 +1,17 @@
+-- GH #1567 C4 — bind a held coworker proposal to its payload at proposal time.
+--
+-- Migration 0327 stamped `ai_action_audit.proposal_payload_hash` when a chat or
+-- MCP proposal is created, so an approval can prove the row it spends is the
+-- row that was proposed. Coworker (scheduled job) proposals live in
+-- `ai_coworker_run_actions` until the owner decides in the hub, and the hash
+-- the hub showed was computed from the row *at read time* — a payload edited
+-- in the database between proposal and display would have been shown, hashed
+-- and approved as if the job had proposed it.
+--
+-- The stamp is written when the run records the action. At decision time the
+-- service refuses (`approval_payload_mismatch`, nothing runs) when the stored
+-- payload no longer hashes to its stamp. Rows from before this column exist
+-- keep NULL: they are bound to their stored payload at decision (exactly the
+-- legacy rule 0327 applies to `ai_action_audit`), and the NULL itself is the
+-- audit trail that the binding was computed late. No existing row is rewritten.
+ALTER TABLE ai_coworker_run_actions ADD COLUMN IF NOT EXISTS proposal_payload_hash text NULL;

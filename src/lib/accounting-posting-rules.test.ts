@@ -39,6 +39,9 @@ const POSTING_ENGINE_INVENTORY_CODES: Record<Industry, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  // Issue #1567 — the trade's own merchandise account (1374), kept in step
+  // with both production mappings.
+  fashion_apparel: WELL_KNOWN_CODES.fashionInventory,
   automotive: WELL_KNOWN_CODES.vehicleInventory,
   // Issue #1128 — the generic 1300, as for the two other work-selling trades:
   // an agency's only material is print/production stock and it has no warehouse

@@ -40,6 +40,8 @@ import {
   parseAttributeDefinitionInput,
 } from "@/lib/product-attributes";
 import type { AttributeDefinition } from "@/lib/product-attributes-service";
+import type { Industry } from "@/lib/industries";
+import { attributeTemplatesFor, type AttributeTemplate } from "@/lib/product-attribute-templates";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { cardClass, EmptyState, SectionCardSkeleton } from "../page-chrome";
 
@@ -53,9 +55,11 @@ type AttributeResponse = {
   error?: string;
   current?: AttributeDefinition;
   usageCount?: number;
+  created?: number;
+  skipped?: number;
 };
 
-export function AttributesSection({ canEdit }: { canEdit: boolean }) {
+export function AttributesSection({ canEdit, industry }: { canEdit: boolean; industry?: Industry }) {
   const [definitions, setDefinitions] = useState<AttributeDefinition[] | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [loadError, setLoadError] = useState("");
@@ -69,6 +73,10 @@ export function AttributesSection({ canEdit }: { canEdit: boolean }) {
   const loadSequence = useRef(0);
   const loadAbort = useRef<AbortController | null>(null);
   const mutationLock = useRef(false);
+  // Per-category presets for this industry (#1567); none offered when the
+  // caller does not say which industry the branch is — the button simply
+  // does not render rather than offering a bundle that may not fit.
+  const templates = industry ? attributeTemplatesFor(industry) : [];
 
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
@@ -136,6 +144,38 @@ export function AttributesSection({ canEdit }: { canEdit: boolean }) {
     await load();
   }
 
+  async function applyTemplate(template: AttributeTemplate) {
+    if (mutationLock.current) return;
+    mutationLock.current = true;
+    setMutating(true);
+    setError("");
+    setNotice("");
+    const result = await api<AttributeResponse>("/api/products/attributes/apply-template", {
+      method: "POST",
+      body: JSON.stringify({ templateKey: template.key }),
+    });
+    mutationLock.current = false;
+    setMutating(false);
+    if (!result.ok) {
+      setError(
+        result.data.error === "network_error"
+          ? "ارتباط قطع شد؛ وضعیت اعمال قالب مشخص نیست. فهرست را تازه‌سازی کنید و دوباره بررسی کنید."
+          : result.data.error === "unknown_template"
+            ? "این قالب برای نوع کسب‌وکار شما در دسترس نیست."
+            : "قالب اعمال نشد؛ فهرست را تازه‌سازی کنید و دوباره تلاش کنید.",
+      );
+      return;
+    }
+    const created = Number(result.data.created ?? 0);
+    const skipped = Number(result.data.skipped ?? 0);
+    setNotice(
+      created === 0
+        ? `قالب «${template.label}» اعمال شد؛ همهٔ ویژگی‌های آن از قبل در این شعبه وجود داشتند.`
+        : `قالب «${template.label}» اعمال شد؛ ${toPersianDigits(created)} ویژگی اضافه شد${skipped > 0 ? ` و ${toPersianDigits(skipped)} مورد از قبل موجود بود` : ""}.`,
+    );
+    await load();
+  }
+
   if (view.mode === "form") {
     return (
       <AttributeForm
@@ -190,9 +230,27 @@ export function AttributesSection({ canEdit }: { canEdit: boolean }) {
                 </select>
               </Field>
             </div>
-            <p className="shrink-0 text-xs text-muted-foreground">
-              {toPersianDigits(visibleDefinitions.length)} ویژگی
-            </p>
+            <div className="flex shrink-0 items-center gap-3">
+              {canEdit && templates.length > 0 ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button type="button" variant="outline" size="sm" disabled={mutating} data-tour-id="attributes.apply-template">
+                      افزودن از قالب
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    {templates.map((template) => (
+                      <DropdownMenuItem key={template.key} disabled={mutating} onClick={() => void applyTemplate(template)}>
+                      {template.label}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+              <p className="text-xs text-muted-foreground">
+                {toPersianDigits(visibleDefinitions.length)} ویژگی
+              </p>
+            </div>
           </div>
 
           {visibleDefinitions.length === 0 ? (

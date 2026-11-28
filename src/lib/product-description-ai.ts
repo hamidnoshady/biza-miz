@@ -14,6 +14,7 @@
  *    to show; the owner edits it and saves it through the ordinary product
  *    write path. «مدل نمی‌فرستد، مدل ذخیره نمی‌کند.»
  */
+import { findEmbeddedMedia, findEmbeddedMediaDeep } from "./embedded-media-guard";
 import {
   PRODUCT_LONG_DESCRIPTION_MAX,
   PRODUCT_SHORT_DESCRIPTION_MAX,
@@ -99,8 +100,15 @@ export function parseProductDescriptionReply(text: string): ProductDescriptionDr
   const parsed = extractJsonObject(text);
   if (!parsed || typeof parsed !== "object") return null;
   const record = parsed as Record<string, unknown>;
+  // GH #1567 F5 — check the model's raw text BEFORE `clean()`: stripping tags
+  // would otherwise silently drop an `<img src="data:…">` (and clipping could
+  // shorten a base64 run under the detector's threshold), turning a reply that
+  // inlines a file into an innocent-looking draft instead of a refusal.
+  if (findEmbeddedMediaDeep([record.short, record.shortDescription, record.long, record.longDescription])) return null;
   const shortDescription = clean(record.short ?? record.shortDescription, PRODUCT_SHORT_DESCRIPTION_MAX);
   const longDescription = clean(record.long ?? record.longDescription, PRODUCT_LONG_DESCRIPTION_MAX);
   if (!shortDescription && !longDescription) return null;
+  // GH #1567 F5 — a model reply that inlines an image is not a draft.
+  if (findEmbeddedMedia(shortDescription) || findEmbeddedMedia(longDescription)) return null;
   return { shortDescription, longDescription };
 }

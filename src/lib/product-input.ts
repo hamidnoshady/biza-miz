@@ -5,6 +5,7 @@
  * request so it can move the person to the tab that needs attention, and the
  * API runs the same rules again because request JSON is never trusted.
  */
+import { EMBEDDED_MEDIA_MESSAGE } from "./embedded-media-guard";
 import Decimal from "decimal.js";
 import { barcodeEntryError, normalizeBarcode } from "./barcode";
 import { attributeComparisonKey, isAttributeDefinitionId, normalizeAttributeText } from "./product-attributes";
@@ -181,7 +182,9 @@ function descriptionValue(
     result.reason,
     result.reason === "text_too_long"
       ? `این متن نباید بیشتر از ${toPersianDigits(max)} نویسه باشد.`
-      : "مقدار متنی واردشده معتبر نیست.",
+      : result.reason === "embedded_media"
+        ? EMBEDDED_MEDIA_MESSAGE
+        : "مقدار متنی واردشده معتبر نیست.",
   );
   return null;
 }

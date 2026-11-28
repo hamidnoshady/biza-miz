@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import ExcelJS from "exceljs";
 import { describe, expect, it } from "vitest";
-import { readCatalogueWorksheet, parseCatalogueRows, suggestCatalogueMapping, validateCatalogueMapping } from "./catalogue-profile";
+import { readCatalogueCsv, readCatalogueWorksheet, parseCatalogueRows, suggestCatalogueMapping, validateCatalogueMapping } from "./catalogue-profile";
 
 async function makeSheet(rows: unknown[][]) {
   const workbook = new ExcelJS.Workbook();
@@ -25,6 +25,7 @@ describe("catalogue XLSX profile", () => {
       rows: 2,
       distinctSkus: 1,
       repeated: 1,
+      repeatedBarcodes: 0,
       blankBrandRows: 0,
       excelBrandRows: 0,
       fallbackBrandRows: 2,
@@ -123,5 +124,35 @@ describe("catalogue XLSX profile", () => {
     expect(result.totals).toMatchObject({ rows: 433, distinctSkus: 408, repeated: 25 });
     expect(result.rows.every(row => row.issues.some(issue => issue.field === "price" && ["formula", "error"].includes(issue.code)))).toBe(true);
     expect(result.rows.filter(row => row.duplicateRows.length > 0).every(row => row.duplicateRows.every(n => n > 1))).toBe(true);
+  });
+});
+
+describe("GH #1567 F6 — CSV catalogue and multi-axis columns", () => {
+  const csv = (text: string) => new TextEncoder().encode(text).buffer as ArrayBuffer;
+
+  it("reads a Persian CSV (BOM, quotes) into the worksheet shape and suggests both option columns", () => {
+    const sheet = readCatalogueCsv(csv("\uFEFFشناسه کالا,نام کالا,شناسه والد,نام والد,گزینه تنوع,گزینه تنوع ۲,بارکد\n" +
+      "MNT-S-0,\"مانتو، S\",MNT,مانتو,S,مشکی,111\nMNT-S-1,مانتو S,MNT,مانتو,S,سفید,=1+1\n"), 100);
+    expect(sheet.columns).toHaveLength(7);
+    expect(sheet.rows.map(row => row.number)).toEqual([2, 3]);
+    expect(sheet.rows[0].cells[1].text).toBe("مانتو، S");
+    // A leading "=" is a spreadsheet formula, refused like an XLSX formula.
+    expect(sheet.rows[1].cells[6]).toMatchObject({ issue: "formula" });
+    expect(suggestCatalogueMapping(sheet.columns)).toMatchObject({ sku: 0, title: 1, parent_sku: 2, parent_title: 3, option: 4, option_2: 5, barcode: 6 });
+  });
+
+  it("refuses an over-limit or non-UTF-8 CSV instead of reading part of it", () => {
+    expect(() => readCatalogueCsv(csv("sku,title\n" + "a,b\n".repeat(11)), 10)).toThrow("catalogue_sheet_limit");
+    expect(() => readCatalogueCsv(new Uint8Array([0xff, 0xfe, 0x00]).buffer as ArrayBuffer, 10)).toThrow("catalogue_file_invalid");
+    expect(() => readCatalogueCsv(csv("sku,title\n"), 10)).toThrow("catalogue_empty");
+  });
+
+  it("flags a barcode shared by two different SKUs on both rows, not on a same-SKU duplicate", () => {
+    const sheet = readCatalogueCsv(csv("sku,title,بارکد\nA,a,999\nB,b,۹۹۹\nC,c,555\nC,c,555\nD,d,6260000000102\n"), 100);
+    const result = parseCatalogueRows(sheet, suggestCatalogueMapping(sheet.columns), { fallbackBrand: "X" });
+    expect(result.rows.map(row => row.issues.some(issue => issue.code === "duplicate_barcode"))).toEqual([true, true, false, false, false]);
+    expect(result.totals.repeatedBarcodes).toBe(2);
+    // A wrong EAN-13 check digit is shown in the preview, not discovered at apply.
+    expect(result.rows[4].issues).toContainEqual({ field: "barcode", code: "invalid_barcode" });
   });
 });

@@ -165,6 +165,14 @@ export const ACCOUNTING_WORKSPACE_HREFS = {
   inventory: "/accounting/inventory",
   products: "/accounting/products",
   cosmetics: "/accounting/cosmetics",
+  // GH #1567 6A — the fashion trade's alteration / made-to-measure desk.
+  tailoring: "/accounting/tailoring",
+  // GH #1567 6B — the fashion trade's production orders (cut → sew → pack).
+  productionOrders: "/accounting/production-orders",
+  // GH #1567 6C — wholesale size packs (variant compositions, no own stock).
+  sizePacks: "/accounting/size-packs",
+  // GH #1567 6D — consignment by contract (کالای امانی).
+  consignment: "/accounting/consignment",
   reports: "/accounting/reports",
   floor: "/accounting/floor",
   kitchen: "/accounting/kitchen",

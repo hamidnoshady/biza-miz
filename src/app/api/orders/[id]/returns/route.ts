@@ -49,6 +49,8 @@ function errorStatus(code: string): number {
     "duplicate_return_line_conflict",
     "refund_payment_source_required",
     "payment_routing_peer_unsupported",
+    "retail_item_missing",
+    "mixed_cogs_accounts",
   ].includes(code)) return 409;
   return 0;
 }

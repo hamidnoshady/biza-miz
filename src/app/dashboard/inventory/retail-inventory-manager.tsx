@@ -20,6 +20,7 @@ import {
   Undo2Icon,
   LineChartIcon,
   WarehouseIcon,
+  PackageOpenIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -41,6 +42,7 @@ import { StockLevelsSection } from "../stock/stock-levels-section";
 import { PurchasesSection } from "../stock/purchases-section";
 import { ReturnsSection } from "../stock/returns-section";
 import { ReportsSection } from "../stock/reports-section";
+import { OpeningStockSection } from "../stock/opening-stock-section";
 
 const TABS = [
   { key: "warehouse-new", label: "افزودن انبار", icon: PlusIcon },
@@ -49,6 +51,8 @@ const TABS = [
   { key: "documents", label: "رسید و حواله‌های انبار", icon: FileTextIcon },
   { key: "stock-levels", label: "موجودی انبار", icon: BoxesIcon },
   { key: "counts", label: "انبارگردانی", icon: ClipboardCheckIcon },
+  // GH #1567 F2 — reviewed opening stock (drafts from the product form/imports).
+  { key: "opening-stock", label: "موجودی افتتاحیه", icon: PackageOpenIcon },
   { key: "purchases", label: "خرید", icon: ShoppingCartIcon },
   { key: "returns", label: "حواله بازگشت", icon: Undo2Icon },
   { key: "reports", label: "گزارش", icon: LineChartIcon },
@@ -63,6 +67,7 @@ const GROUPS = [
     keys: [
       "stock-levels",
       "counts",
+      "opening-stock",
       "purchases",
       "returns",
       "reports",
@@ -200,6 +205,7 @@ export function RetailInventoryManager({
           )
         ) : null}
         {tab === "purchases" ? <PurchasesSection role={role} permissions={permissions} /> : null}
+        {tab === "opening-stock" ? <OpeningStockSection /> : null}
         {tab === "returns" ? <ReturnsSection /> : null}
         {tab === "reports" ? <ReportsSection /> : null}
       </SectionNav>

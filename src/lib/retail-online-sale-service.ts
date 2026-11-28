@@ -24,9 +24,12 @@
  * («سود موقت»), and what a refund restores against. The rules themselves are
  * pure and live in `online-sale-policy.ts`.
  */
+import { readSaleMerchSnapshot, type SaleMerchSnapshot } from "./sale-return-facts";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
-import { rialText, type RialText } from "./inventory-exact";
+import { ConsignmentBlockedError } from "./fashion-consignment";
+import { rialText, roundRial, type RialText } from "./inventory-exact";
+import { relieveFungibleStock, relieveFungibleValueOnly } from "./item-stock-valuation";
 import {
   decideOnlineLineCost,
   decideOnlineStockRelief,
@@ -107,6 +110,20 @@ export async function sellOnlineRetailLine(
   if (!rows[0]) throw new Error("item_not_found");
   const tracking = rows[0].tracking;
 
+  // GH #1567 C5 — a variant holding consigned (امانی) units belongs to its
+  // owner: an online order would relieve owned item_stock (it has none),
+  // record a "short" and book the whole price as the shop's revenue with no
+  // owner share. Refuse it by name; the order is recorded from the till.
+  const { rows: consigned } = await client.query(
+    `SELECT 1 FROM fashion_consignment_lines l
+       JOIN fashion_consignment_contracts c ON c.id = l.contract_id
+      WHERE l.item_id = $1 AND l.is_open AND c.location_id = $2
+        AND l.received_qty - l.sold_qty + l.customer_returned_qty + l.voided_qty - l.returned_to_owner_qty > 0
+      FOR SHARE OF l`,
+    [input.itemId, input.locationId],
+  );
+  if (consigned.length > 0) throw new ConsignmentBlockedError("consigned_online_sale_unsupported", { itemId: input.itemId });
+
   if (tracking === "batch") {
     const allocations = await allocateBatchStock(client, {
       itemId: input.itemId,
@@ -175,11 +192,36 @@ export async function sellOnlineRetailLine(
   });
 
   if (stock) {
-    await client.query(
-      `UPDATE item_stock SET quantity = quantity - $2::numeric, last_sold_at = now(), updated_at = now()
-        WHERE item_id = $1`,
-      [input.itemId, relief.relieve],
-    );
+    // F1 (GH #1567): the units relieved here leave with their exact carrying
+    // value, and that value is the COGS. Units a remote stock snapshot had
+    // already taken off the shelf (`already_reflected`) left with no value
+    // then, so their cost is relieved from the carrying value now — the GL
+    // credits inventory for them either way.
+    let relievedValue = 0n;
+    if (new Decimal(relief.relieve).gt(0)) {
+      relievedValue = BigInt(
+        (await relieveFungibleStock(client, {
+          itemId: input.itemId,
+          quantity: relief.relieve,
+          markSold: true,
+          allowMissingCost: true,
+        })).value,
+      );
+    } else {
+      await client.query(`UPDATE item_stock SET last_sold_at = now(), updated_at = now() WHERE item_id = $1`, [
+        input.itemId,
+      ]);
+    }
+    if (cost.costStatus === "known" || cost.costStatus === "partial") {
+      const costed = new Decimal(input.quantity).minus(relief.short);
+      const unrelieved = costed.minus(relief.relieve);
+      let extraValue = 0n;
+      if (unrelieved.gt(0) && stock.unit_cost != null) {
+        extraValue = BigInt(roundRial(unrelieved.times(stock.unit_cost)));
+        await relieveFungibleValueOnly(client, { itemId: input.itemId, value: extraValue.toString() });
+      }
+      cost.cogsRial = (relievedValue + extraValue).toString();
+    }
   }
   await recordOnlineSaleLine(client, {
     ...input,
@@ -236,15 +278,18 @@ async function recordOnlineSaleLine(
   },
 ): Promise<void> {
   if (new Decimal(fact.quantity).lte(0)) return;
+  // GH #1567 F4 — freeze the merchandising tags the website sale is reported
+  // under, exactly as the counter does in its sale event.
+  const merch = fact.itemId ? await readSaleMerchSnapshot(client, fact.itemId) : null;
   await client.query(
     `INSERT INTO online_sale_lines
        (order_item_id, order_id, location_id, item_id, source_type, quantity, net_rial,
-        cost_status, cogs_rial, stock_outcome, relieved_quantity, short_quantity, occurred_at)
-     VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $11::numeric, $12::numeric, $13)`,
+        cost_status, cogs_rial, stock_outcome, relieved_quantity, short_quantity, occurred_at, merch)
+     VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $10, $11::numeric, $12::numeric, $13, $14::jsonb)`,
     [
       fact.orderItemId, fact.orderId, fact.locationId, fact.itemId, fact.sourceType, fact.quantity,
       fact.netRial, fact.costStatus, fact.cogsRial, fact.stockOutcome, fact.relievedQuantity,
-      fact.shortQuantity, fact.occurredAt,
+      fact.shortQuantity, fact.occurredAt, merch ? JSON.stringify(merch) : null,
     ],
   );
 }

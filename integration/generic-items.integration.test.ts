@@ -389,10 +389,23 @@ describe("products workspace: atomic creation", () => {
       [created.variants[0].id],
     );
     expect(row.rows[0]).toEqual({ unit: "عدد", tax_sale_percent: "10.00" });
+    // GH #1567 F2 — the opening quantity is proposed, not received: the
+    // shelf stays empty (no stock without its journal entry) and a draft
+    // opening-stock document holds 2 @ 500,000 for review and posting.
     expect(await accessories.getStock(created.variants[0].id)).toMatchObject({
-      quantity: "2.000000000",
+      quantity: "0.000000000",
       unitCost: 500_000,
     });
+    expect(created.openingStockDocumentId).toBeTruthy();
+    const draft = await db.query<{ status: string; source: string; item_id: string; quantity: string; unit_cost: string }>(
+      `SELECT d.status, d.source, l.item_id::text, l.quantity::text, l.unit_cost::text
+         FROM item_opening_stock_documents d JOIN item_opening_stock_lines l ON l.document_id = d.id
+        WHERE d.id = $1`,
+      [created.openingStockDocumentId],
+    );
+    expect(draft.rows).toEqual([
+      { status: "draft", source: "product_form", item_id: created.variants[0].id, quantity: "2.000000000", unit_cost: "500000" },
+    ]);
   });
 });
 

@@ -15,6 +15,8 @@
  * `businessId`, so ownership holds even though RLS itself only draws the
  * business boundary.
  */
+import { aiApprovalClass } from "./ai-approval-policy";
+import { aiApprovalPayloadHash } from "./ai-approval-hash";
 import { query } from "./db";
 import type { AgentMode, ProposedAction } from "./ai";
 
@@ -50,6 +52,8 @@ export interface AiConversationMessage {
   inputRequest?: { id: string; spec: unknown; status: string | null } | null;
   /** Durable proposal/audit link. The UI must render terminal status from here. */
   auditId?: string | null;
+  /** GH #1567 F7 — the hash a human approval of this (gated) proposal must present. */
+  payloadHash?: string | null;
   proposalStatus?: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
 }
 
@@ -278,6 +282,9 @@ export async function getConversationMessages(
     tool_calls: unknown;
     proposal: ProposedAction | null;
     proposal_audit_id: string | null;
+    audit_action_type: string | null;
+    audit_payload: Record<string, unknown> | null;
+    audit_payload_hash: string | null;
     proposal_status: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
     created_at: string;
     input_request_id: string | null;
@@ -289,6 +296,8 @@ export async function getConversationMessages(
     // already-answered one). At most one request per message by construction.
     `SELECT m.id, m.role, m.content, m.tool_calls, m.proposal,
             m.proposal_audit_id, a.status AS proposal_status, m.created_at,
+            a.action_type AS audit_action_type, a.proposal_payload AS audit_payload,
+            a.proposal_payload_hash AS audit_payload_hash,
             r.id AS input_request_id, r.spec AS input_request_spec, r.status AS input_request_status
        FROM ai_messages m
        LEFT JOIN ai_action_audit a ON a.id = m.proposal_audit_id
@@ -312,9 +321,15 @@ export async function getConversationMessages(
       role: row.role,
       content: row.content,
       toolCalls: row.tool_calls,
-      proposal: row.proposal,
+      // GH #1567 F7 — a reloaded card shows the payload its audit row will
+      // run and carries the hash an approval of it must present.
+      proposal: row.proposal && row.audit_payload ? { ...row.proposal, payload: row.audit_payload } : row.proposal,
       createdAt: row.created_at,
       auditId: row.proposal_audit_id,
+      payloadHash: row.audit_payload_hash
+        ?? (row.audit_action_type && aiApprovalClass(row.audit_action_type)
+          ? aiApprovalPayloadHash(row.audit_action_type, row.audit_payload ?? {})
+          : null),
       proposalStatus: row.proposal_status,
       inputRequest: row.input_request_id
         ? {

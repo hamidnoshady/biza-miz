@@ -43,6 +43,8 @@ import {
 import { attributeComparisonKey } from "@/lib/product-attributes";
 import { MediaGalleryField, MediaImageField } from "../media/media-picker";
 import { ProductContentFields } from "./product-content-fields";
+import { VariantMatrixBuilder } from "./variant-matrix-builder";
+import type { MatrixDraftSeed } from "@/lib/variant-matrix-draft";
 import { isProductPublishStatus, type ProductPublishStatus } from "@/lib/product-content";
 import { api, ErrorBox, Field, inputClass } from "../ui";
 import { PercentInput, PriceInput } from "../number-fields";
@@ -561,6 +563,42 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     if (movedBarcode) setNotice("بارکد محصول به تنوع اول منتقل شد؛ هر تنوع باید بارکد خودش را داشته باشد.");
   }
 
+  /**
+   * Appends the size × colour grid (#1567 P0 2.5). Same first-row barcode
+   * hand-off as `addVariantRow`: when the product was still simple, its
+   * barcode moves to the first generated row, never to all of them.
+   */
+  function generateMatrixRows(seeds: MatrixDraftSeed[], meta: { duplicates: number; truncated: number }) {
+    if (seeds.length === 0) return;
+    const wasSimple = form.variants.length === 0;
+    const movedBarcode = wasSimple ? form.barcode : "";
+    setForm((current) => ({
+      ...current,
+      barcode: wasSimple ? "" : current.barcode,
+      autoBarcode: wasSimple ? false : current.autoBarcode,
+      variants: [
+        ...current.variants,
+        ...seeds.map((seed, index) => ({
+          id: uniqueId("variant"),
+          values: { ...seed.values },
+          unresolvedValues: {},
+          sku: "",
+          barcode: wasSimple && index === 0 ? movedBarcode : "",
+          autoBarcode: wasSimple && index === 0 ? current.autoBarcode : false,
+          imageMediaId: null,
+          sellPrice: "",
+          purchasePrice: "",
+          quantity: "",
+        })),
+      ],
+    }));
+    clearFeedback();
+    const parts = [`${toPersianDigits(seeds.length)} تنوع ساخته شد`];
+    if (meta.duplicates > 0) parts.push(`${toPersianDigits(meta.duplicates)} تکراری رد شد`);
+    if (meta.truncated > 0) parts.push(`${toPersianDigits(meta.truncated)} مورد به خاطر سقف ۱۰۰ ردیف ساخته نشد`);
+    setNotice(`${parts.join("؛ ")}.`);
+  }
+
   function acknowledgeDefinitionChanges() {
     setForm((current) => ({
       ...current,
@@ -722,6 +760,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     setIssues([]);
     const result = await api<{
       item?: { id: string };
+      openingStockDocumentId?: string | null;
       error?: string;
       message?: string;
       issues?: ProductValidationIssue[];
@@ -761,7 +800,13 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
     if (activeDraftId !== null) {
       persistDrafts(drafts.filter((draft) => draft.id !== activeDraftId));
     }
-    resetForm("محصول با موفقیت ذخیره شد. می‌توانید محصول بعدی را ثبت کنید.");
+    // GH #1567 F2 — an opening quantity is a draft opening-stock document,
+    // not stock: it reaches the shelf (and the ledger) only once reviewed.
+    resetForm(
+      result.data.openingStockDocumentId
+        ? "محصول ذخیره شد. موجودی اولیه به‌صورت پیش‌نویس سند موجودی افتتاحیه ثبت شد و پس از بازبینی و تأیید مدیر مالی به انبار و دفاتر وارد می‌شود."
+        : "محصول با موفقیت ذخیره شد. می‌توانید محصول بعدی را ثبت کنید.",
+    );
     setCreatedProductId(result.data.item?.id ?? null);
   }
 
@@ -1027,7 +1072,7 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                     />
                     <InlineError message={fieldErrors.get("purchasePrice")} />
                   </Field>
-                  <Field label="موجودی اولیه" hint="برای کالای شمارشی، مقدار اعشاری هم پذیرفته می‌شود.">
+                  <Field label="موجودی اولیه" hint="به‌صورت پیش‌نویس سند موجودی افتتاحیه ثبت می‌شود و پس از بازبینی به انبار و دفاتر می‌رسد. مقدار اعشاری هم پذیرفته می‌شود.">
                     <PersianNumberInput
                       className={inputClass}
                       value={form.quantity}
@@ -1223,6 +1268,15 @@ export function ProductAddSection({ draftScope }: { draftScope: string }) {
                         <Link href={accountingProductsHref("attributes")} className="font-semibold underline underline-offset-4">مدیریت ویژگی‌ها</Link>{" "}
                         بروید و سپس این فرم را تازه‌سازی کنید.
                       </div>
+                    ) : null}
+                    {activeDefinitions.length > 0 ? (
+                      <VariantMatrixBuilder
+                        definitions={activeDefinitions}
+                        existing={form.variants.map((variant) => ({ values: variant.values }))}
+                        maxTotal={100}
+                        disabled={busy}
+                        onGenerate={generateMatrixRows}
+                      />
                     ) : null}
                     {form.variants.length === 0 ? (
                       <div className="rounded-xl border border-dashed border-border px-4 py-6 text-center">

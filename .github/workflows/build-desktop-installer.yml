@@ -646,7 +646,15 @@ jobs:
           # and the same working headroom. This is a ceiling on a runaway detector, not a
           # re-baseline: the installer's 175 MiB release gate above is unchanged, and a payload
           # that accidentally ships node_modules or a build cache still fails by hundreds of MiB.
-          if ($unpacked -gt 725MB) { throw "Installed payload $installedMiB MiB exceeds 725 MiB budget" }
+          #
+          # 2026-11-26 — the staged-runtime gate moves 316 -> 322 MiB for GH #1567 / PR #1575
+          # (see verify-shippables.yml for the byte evidence), and this payload gate moves with it
+          # by the same amount plus 1 MiB: packaged Windows run for e804cd427 measured 725.8 MiB
+          # installed payload against 720.5 MiB on main 39b49545a (+5.3 MiB, the same new route and
+          # page surface; installer 175.2 vs 174.5 MiB, still under the unchanged 176 MiB release
+          # baseline). APPROVED by the owner 2026-11-27 as a one-time exception (issue #1567,
+          # comment 7216762779); installer baseline stays 176 MiB; no further increases.
+          if ($unpacked -gt 732MB) { throw "Installed payload $installedMiB MiB exceeds 732 MiB budget" }
 
       # Runs after the budgets even when they fail. The packaged payload and the
       # staged runtime are both recorded, with exact bytes, categories, traced

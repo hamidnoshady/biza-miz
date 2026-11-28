@@ -18,16 +18,16 @@ import { randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
 import { query, type PoolClient } from "./db";
 import { roundRial } from "./inventory-exact";
+import { planFungibleRestore, relieveFungibleStock } from "./item-stock-valuation";
 import { ITEM_SOURCE_SQL, type ItemSource } from "./item-source";
 import type { ProductPublishStatus } from "./product-content";
 import {
-  accessoryCogs,
   computeAccessorySalePrice,
-  nextAverageUnitCost,
   validateStockReceipt,
   type AccessorySalePriceBreakdown,
 } from "./accessories";
 import { getItem } from "./items-service";
+import { readSaleMerchSnapshot, type SaleMerchSnapshot } from "./sale-return-facts";
 import { emitDomainEvent } from "./posting-engine";
 import type { RialText } from "./inventory-exact";
 import type { SettlementMethod } from "./ledger";
@@ -138,7 +138,17 @@ export async function setInitialUnitCost(
  */
 export async function receiveStock(
   itemId: string,
-  input: { quantity: string; unitCost: number | string },
+  input: {
+    quantity: string;
+    unitCost: number | string;
+    /**
+     * Exact value of the incoming units when it is not a whole multiple of
+     * the unit cost — a transfer receipt or cancellation re-enters the line
+     * value that left the source (F1, GH #1567), not quantity × a rounded
+     * unit cost.
+     */
+    totalValue?: string;
+  },
   client?: PoolClient,
 ): Promise<ItemStock> {
   const errors = validateStockReceipt(input);
@@ -152,24 +162,20 @@ export async function receiveStock(
     client ? `SELECT * FROM item_stock WHERE item_id = $1 FOR UPDATE` : `SELECT * FROM item_stock WHERE item_id = $1`,
     [itemId],
   );
-  const existing = existingRows[0] ? mapStock(existingRows[0]) : null;
-
-  const newCost = nextAverageUnitCost(
-    existing?.quantity ?? "0",
-    // The raw column text, not the mapped number — a stored cost past 2^53
-    // must flow into the next average exactly (issue #915).
-    existingRows[0]?.unit_cost ?? null,
+  const existing = existingRows[0];
+  // One costing rule for receipts and restores: the exact incoming value is
+  // added to the carrying value and the moving average is re-derived from it
+  // (see item-stock-valuation.ts — legacy drift is carried, never rewritten).
+  const incomingValue = input.totalValue ?? roundRial(new Decimal(input.quantity).times(input.unitCost));
+  const plan = planFungibleRestore(
+    {
+      quantity: existing ? String(existing.quantity) : "0",
+      unitCost: existing?.unit_cost == null ? null : String(existing.unit_cost),
+      totalValue: existing?.total_value_rial == null ? (existing ? null : "0") : String(existing.total_value_rial),
+    },
     input.quantity,
-    input.unitCost,
+    incomingValue,
   );
-
-  const existingVal = existingRows[0]?.total_value_rial != null
-    ? new Decimal(existingRows[0].total_value_rial)
-    : existing?.unitCost != null && existing?.quantity
-      ? new Decimal(existing.quantity).times(existing.unitCost)
-      : new Decimal(0);
-  const incomingVal = new Decimal(input.quantity).times(input.unitCost);
-  const newTotal = roundRial(existingVal.plus(incomingVal));
 
   const { rows } = await run<StockRow>(
     `INSERT INTO item_stock (item_id, quantity, unit_cost, total_value_rial) VALUES ($1, $2, $3, $4)
@@ -179,7 +185,7 @@ export async function receiveStock(
            total_value_rial = EXCLUDED.total_value_rial,
            updated_at = now()
      RETURNING *`,
-    [itemId, input.quantity, newCost, newTotal],
+    [itemId, input.quantity, plan.nextUnitCost, plan.nextTotal],
   );
   return mapStock(rows[0]);
 }
@@ -206,6 +212,8 @@ export interface SellAccessoryResult {
   cogsEntryId: string | null;
   /** The COGS this sale posted, Rial — the same number the commission margin basis uses. */
   cost: RialText;
+  /** GH #1567 F4 — merchandising tags frozen at sale time. */
+  merch: SaleMerchSnapshot;
 }
 
 /**
@@ -250,7 +258,15 @@ export async function sellAccessoryUnits(
     throw new Error("موجودی کافی نیست.");
   }
 
-  const cost = accessoryCogs(input.quantity, stock.unitCost);
+  // F1 (GH #1567): COGS is the exact carrying value this sale relieves, and
+  // quantity + value leave the shelf in one locked write — never a separate
+  // `qty × unit_cost` beside a quantity-only decrement that left
+  // `total_value_rial` stale.
+  const { value: cost } = await relieveFungibleStock(client, {
+    itemId: input.itemId,
+    quantity: input.quantity,
+    markSold: true,
+  });
 
   // `journal_entries` enforces at most one posting per
   // (business_id, source_type, source_id, posting_kind) via
@@ -266,6 +282,9 @@ export async function sellAccessoryUnits(
   const postingSourceId = randomUUID();
   const lineTenders = resolveLineTenders(input, breakdown.total);
 
+  // GH #1567 F4 — the merchandising tags this sale is reported under,
+  // frozen now so re-tagging the style later never moves it.
+  const merch = await readSaleMerchSnapshot(client, input.itemId);
   const { entryId: revenueEntryId } = await emitDomainEvent(client, {
     businessId: input.businessId,
     locationId: input.locationId,
@@ -280,6 +299,7 @@ export async function sellAccessoryUnits(
       vat: breakdown.vat,
       total: breakdown.total,
       tenders: lineTenders,
+      merch,
     },
     sourceType: "accessory_sale",
     sourceId: input.itemId,
@@ -298,12 +318,7 @@ export async function sellAccessoryUnits(
     createdBy: input.createdBy ?? null,
   });
 
-  await client.query(
-    `UPDATE item_stock SET quantity = quantity - $2, last_sold_at = now(), updated_at = now() WHERE item_id = $1`,
-    [input.itemId, input.quantity],
-  );
-
-  return { breakdown, revenueEntryId, cogsEntryId, cost };
+  return { breakdown, revenueEntryId, cogsEntryId, cost, merch };
 }
 
 export interface VariantSummary {

@@ -1,7 +1,8 @@
 import { Readable } from "node:stream";
 import { xlsxCellToString } from "./codecs";
-import { normaliseHeader, westernDigits } from "./csv";
+import { normaliseHeader, parseCsv, westernDigits } from "./csv";
 import { normalizeSkuKey } from "../import-reconciliation/normalize";
+import { barcodeEntryError, normalizeBarcode } from "../barcode";
 import type { WatchMovement } from "../watch-attributes-service";
 import {
   parseCatalogueMoney,
@@ -59,6 +60,34 @@ export async function readCatalogueWorksheet(buffer: ArrayBuffer, maxRows: numbe
   return { name: sheet.name, columns, rows };
 }
 
+/**
+ * GH #1567 F6: the same reviewed catalogue, from a CSV file. The view has the
+ * worksheet's shape so every later step (mapping, preview, staging) is shared.
+ * A cell beginning with `=` is a spreadsheet formula, not a value, and gets the
+ * same `formula` issue an XLSX formula does. CSV row numbers count non-blank
+ * records (the first data record is row 2, as in the worksheet).
+ */
+export function readCatalogueCsv(buffer: ArrayBuffer, maxRows: number): CatalogueSheet {
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(buffer); }
+  catch { throw new Error("catalogue_file_invalid"); }
+  const records = parseCsv(text);
+  if (records.length < 2) throw new Error("catalogue_empty");
+  const width = Math.max(...records.map(record => record.length));
+  if (records.length > maxRows + 1 || width > 100) throw new Error("catalogue_sheet_limit");
+  const [header, ...body] = records;
+  const columns = Array.from({ length: width }, (_, i) => (header[i] ?? "").trim());
+  const rows = body.map((record, index) => ({
+    number: index + 2,
+    cells: Array.from({ length: width }, (_, i) => {
+      const text = record[i] ?? "";
+      if (text.length > 2_000) throw new Error("catalogue_cell_limit");
+      return text.trimStart().startsWith("=") ? { text: text.slice(0, 500), issue: "formula" as const } : { text };
+    }),
+  }));
+  return { name: "CSV", columns, rows };
+}
+
 export const CATALOGUE_MAX_ROWS = 1_000;
 export const CATALOGUE_MAX_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -82,12 +111,23 @@ export const CATALOGUE_FIELDS = {
   quantity: ["موجودی", "stock", "qty"],
   parent_sku: ["شناسه والد", "group_sku"],
   parent_title: ["نام والد"],
-  option: ["گزینه تنوع"],
+  option: ["گزینه تنوع", "option_1", "گزینه تنوع ۱"],
+  // GH #1567 F6: up to three explicit variant axes (e.g. size × colour × fit).
+  option_2: ["گزینه تنوع ۲", "option2"],
+  option_3: ["گزینه تنوع ۳", "option3"],
 } as const;
+
+/** The mapped field that carries each variant axis's value, in axis order. */
+export const CATALOGUE_OPTION_FIELDS = ["option", "option_2", "option_3"] as const;
+export const CATALOGUE_MAX_AXES = CATALOGUE_OPTION_FIELDS.length;
 
 export type CatalogueField = keyof typeof CATALOGUE_FIELDS;
 export type CatalogueMapping = Partial<Record<CatalogueField, number>>;
-export type CatalogueSheet = Awaited<ReturnType<typeof readCatalogueWorksheet>>;
+export type CatalogueSheet = {
+  name: string;
+  columns: string[];
+  rows: { number: number; cells: { text: string; issue?: "formula" | "error" | "unsafe_number" }[] }[];
+};
 export type CatalogueTarget = "retail" | "watch";
 
 const keys = Object.keys(CATALOGUE_FIELDS) as CatalogueField[];
@@ -263,6 +303,11 @@ export function parseCatalogueRows(
     const title = values.title ?? "";
     if (!sku || sku.length > 100) issues.push({ field: "sku", code: "invalid_identity" });
     if (!title || title.length > 200) issues.push({ field: "title", code: "invalid_identity" });
+    // GH #1567 F6: the product form rejects a bad check digit at apply, which
+    // would fail a whole size × colour family late; show it on the row now.
+    if (values.barcode && barcodeEntryError(normalizeBarcode(values.barcode))) {
+      issues.push({ field: "barcode", code: "invalid_barcode" });
+    }
     const movement = values.drive ? normalizeMovement(values.drive) : null;
     if (values.drive && !movement) issues.push({ field: "drive", code: "movement_review" });
     const dimensions = values.case_dimension ? dimensionsMm(values.case_dimension) : null;
@@ -288,6 +333,23 @@ export function parseCatalogueRows(
     groups.set(row.sku, occurrences);
   }
   const duplicates = [...groups].filter(([, rows]) => rows.length > 1);
+  // GH #1567 F6: a barcode identifies one sellable unit. Two different SKUs in
+  // one file carrying the same barcode is a data error both rows must show;
+  // rows that are duplicates of each other (same SKU) are already in review.
+  const barcodeSkus = new Map<string, Set<string>>();
+  for (const row of parsed) {
+    const code = row.values.barcode ? normalizeBarcode(row.values.barcode) : "";
+    if (!code || !row.sku) continue;
+    barcodeSkus.set(code, (barcodeSkus.get(code) ?? new Set()).add(row.sku));
+  }
+  let repeatedBarcodes = 0;
+  for (const row of parsed) {
+    const code = row.values.barcode ? normalizeBarcode(row.values.barcode) : "";
+    if (code && (barcodeSkus.get(code)?.size ?? 0) > 1) {
+      row.issues.push({ field: "barcode", code: "duplicate_barcode" });
+      repeatedBarcodes += 1;
+    }
+  }
   return {
     rows: parsed.map((row) => ({ ...row, duplicateRows: row.sku ? (groups.get(row.sku) ?? []).filter(n => n !== row.number) : [] })),
     valueTotals,
@@ -295,6 +357,7 @@ export function parseCatalogueRows(
       rows: parsed.length,
       distinctSkus: groups.size,
       repeated: duplicates.reduce((total, [, rows]) => total + rows.length - 1, 0),
+      repeatedBarcodes,
       blankBrandRows,
       excelBrandRows,
       fallbackBrandRows,

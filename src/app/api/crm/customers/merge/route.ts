@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import {withTenantScope, requirePermission } from "@/lib/auth";
 import { PERMISSIONS } from "@/lib/permissions";
-import { mergeCustomers, previewMerge } from "@/lib/crm-service";
+import { mergeCustomers, PartyMergeRefusedError, previewMerge } from "@/lib/crm-service";
 
 /**
  * Merge two customer records (Phase 36).
@@ -53,13 +53,22 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   if (!winnerId || !loserId) return NextResponse.json({ error: "bad_request" }, { status: 400 });
   if (winnerId === loserId) return NextResponse.json({ error: "merge_same_customer" }, { status: 400 });
 
-  const result = await mergeCustomers(session.businessId, winnerId, loserId, {
-    mergedBy: session.fullName,
-    // The stable membership id alongside the display name: a name can be
-    // corrected later, and an audit row for an irreversible operation has to
-    // stay resolvable to the person who performed it.
-    mergedByUserId: session.sub,
-  });
+  let result: Awaited<ReturnType<typeof mergeCustomers>>;
+  try {
+    result = await mergeCustomers(session.businessId, winnerId, loserId, {
+      mergedBy: session.fullName,
+      // The stable membership id alongside the display name: a name can be
+      // corrected later, and an audit row for an irreversible operation has to
+      // stay resolvable to the person who performed it.
+      mergedByUserId: session.sub,
+    });
+  } catch (err) {
+    // GH #1567 C2: e.g. live tailoring measurements on the losing record — refused, nothing moved.
+    if (err instanceof PartyMergeRefusedError) {
+      return NextResponse.json({ error: err.code, blockers: err.blockers }, { status: 409 });
+    }
+    throw err;
+  }
   if (!result) return NextResponse.json({ error: "customer_not_found" }, { status: 404 });
   return NextResponse.json({ merge: result });
 });

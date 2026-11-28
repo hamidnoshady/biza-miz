@@ -89,6 +89,8 @@ export interface AiChatMessage {
   /** Phase E — a structured input request the assistant raised this turn. */
   inputRequest?: AiInputRequestState | null;
   auditId?: string | null;
+  /** GH #1567 F7 — the approval hash of the payload this card shows (gated actions only). */
+  payloadHash?: string | null;
   proposalStatus?: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
   applied?: boolean;
   /** Actual Rial charged for this turn, shown quietly once it finishes. */
@@ -172,6 +174,8 @@ interface ConversationMessagePayload {
   proposal: ProposedAction | null;
   inputRequest?: { id: string; spec: InputRequestSpec; status: string } | null;
   auditId?: string | null;
+  /** GH #1567 F7 — the approval hash of the payload this card shows (gated actions only). */
+  payloadHash?: string | null;
   proposalStatus?: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted" | null;
 }
 
@@ -432,6 +436,7 @@ export function useAiChat({
           status: (message.role === "assistant" ? "complete" : undefined) as AiMessageStatus | undefined,
           proposal: canPropose ? message.proposal : null,
           auditId: message.auditId ?? null,
+          payloadHash: message.payloadHash ?? null,
           proposalStatus: message.proposalStatus ?? (message.proposal ? "proposed" : null),
           applied: message.proposalStatus === "applied",
           inputRequest: parseInputRequestPayload(message.inputRequest),
@@ -581,6 +586,7 @@ export function useAiChat({
           // Re-validated here: the browser draws only what the allowlist parse keeps.
           genUi: mode === "dashboard" ? parseGenUiBlocks(payload.genUi) : [],
           auditId: typeof payload.auditId === "string" ? payload.auditId : null,
+          payloadHash: typeof payload.payloadHash === "string" ? payload.payloadHash : null,
           proposalStatus: payload.proposedAction ? "proposed" : null,
           costRial: typeof payload.costRial === "number" ? payload.costRial : null,
           // §19 — the terminal event, so this reply is genuinely finished.
@@ -600,6 +606,7 @@ export function useAiChat({
               void applyProposal({
                 id: replyId, role: "assistant", content: typeof payload.content === "string" ? payload.content : "",
                 proposal: proposed, auditId, proposalStatus: "proposed", status: "complete",
+                payloadHash: typeof payload.payloadHash === "string" ? payload.payloadHash : null,
               }, "session");
             }).catch(() => {});
         }
@@ -823,7 +830,7 @@ export function useAiChat({
     if (!meta) return;
     setApplyingId(message.id);
     try {
-      const outcome = await applyProposalRequest(proposal, message.auditId, approval);
+      const outcome = await applyProposalRequest(proposal, message.auditId, approval, message.payloadHash);
       if (!outcome.ok) {
         if (outcome.error === "missing_param") {
           toast.error(outcome.detail);

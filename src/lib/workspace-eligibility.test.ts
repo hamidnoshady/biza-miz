@@ -46,6 +46,7 @@ describe("workspace industry eligibility", () => {
       "tools_fittings",
       "haberdashery",
       "automotive",
+      "fashion_apparel",
     ];
     for (const industry of hidden) {
       expect(resolveWorkspaceIndustryEligibility(industry), industry).toMatchObject({

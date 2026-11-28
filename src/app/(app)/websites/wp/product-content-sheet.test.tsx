@@ -11,6 +11,7 @@
 //   * a paused connection is readable but not writable;
 //   * images are shown with the store's alt text and editing is not pretended.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EMBEDDED_MEDIA_DESCRIPTION_MESSAGE } from "@/lib/embedded-media-guard";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type React from "react";
@@ -207,5 +208,38 @@ describe("ProductContentSheet — the store's text, edited on purpose", () => {
     const alert = await screen.findByRole("alert");
     expect(within(alert).getByText(/نگاشت نشده/)).toBeTruthy();
     expect(screen.queryByLabelText("توضیح کوتاه فروشگاه")).toBeNull();
+  });
+
+  it("never clears store text the mirror held back (GH #1567 F5), and refuses an image-carrying draft", async () => {
+    const user = userEvent.setup();
+    mockRead({ description: null, held: { description: "embedded_media", shortDescription: null, image: null } });
+    renderSheet();
+    expect(await screen.findByText(/تصویر جاسازی‌شده/)).toBeTruthy();
+    const short = await screen.findByLabelText("توضیح کوتاه فروشگاه");
+    await user.clear(short);
+    await user.type(short, "کوتاه تازه");
+    await user.click(screen.getByRole("button", { name: "اعمال در فروشگاه (صف ارسال)" }));
+    await waitFor(() => expect(call).toHaveBeenCalledTimes(1));
+    const [, , body] = vi.mocked(call).mock.calls[0] as unknown as [string, string, Record<string, unknown>];
+    // The held long description is not sent as "" — that would delete it.
+    expect(body).toEqual({ remoteId: REMOTE_ID, fields: { short_description: "کوتاه تازه" } });
+
+    vi.mocked(call).mockClear();
+    await user.clear(short);
+    await user.type(short, "data:image/png;base64,AAAA");
+    await user.click(screen.getByRole("button", { name: "اعمال در فروشگاه (صف ارسال)" }));
+    const alert = await screen.findByRole("alert");
+    // GH #1567 A2 — the owner-approved sentence, never the raw code.
+    expect(within(alert).getByText(EMBEDDED_MEDIA_DESCRIPTION_MESSAGE)).toBeTruthy();
+    expect(screen.queryByText(/embedded_media/)).toBeNull();
+    expect(call).not.toHaveBeenCalled();
+
+    // A plain description is still accepted after the refusal.
+    await user.clear(short);
+    await user.type(short, "متن معتبر بدون تصویر");
+    await user.click(screen.getByRole("button", { name: "اعمال در فروشگاه (صف ارسال)" }));
+    await waitFor(() => expect(call).toHaveBeenCalledTimes(1));
+    const [, , retryBody] = vi.mocked(call).mock.calls[0] as unknown as [string, string, Record<string, unknown>];
+    expect(retryBody).toEqual({ remoteId: REMOTE_ID, fields: { short_description: "متن معتبر بدون تصویر" } });
   });
 });

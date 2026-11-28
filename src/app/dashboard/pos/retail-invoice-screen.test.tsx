@@ -700,6 +700,109 @@ describe("RetailInvoiceScreen — industry-specific line forms", () => {
   });
 });
 
+describe("RetailInvoiceScreen — fashion size packs (GH #1567 6C)", () => {
+  const PACK = {
+    id: "pack-1", name: "عمده مشکی", priceRial: 410_000, pieces: 5, available: 2,
+    components: [{ quantity: 1, unitPriceRial: 80_000 }, { quantity: 2, unitPriceRial: 80_000 }, { quantity: 2, unitPriceRial: 85_000 }],
+  };
+
+  function postedLines(fetchMock: ReturnType<typeof fetchMockWith>) {
+    const postCall = fetchMock.mock.calls.find(
+      (call: unknown[]) => call[0] === "/api/sales/invoices" && (call[1] as RequestInit | undefined)?.method === "POST",
+    ) as [string, RequestInit] | undefined;
+    return postCall ? JSON.parse(postCall[1].body as string).lines : null;
+  }
+
+  async function submit() {
+    press(submitButton());
+    advance(2000);
+    release(submitButton());
+    await flush();
+    await flush();
+  }
+
+  it("a scanned pack barcode that matches no item adds the pack as one size_pack line", async () => {
+    const fetchMock = fetchMockWith([
+      { pattern: /\/api\/barcodes\/lookup/, body: { matches: [] } },
+      { pattern: /\/api\/size-packs\?view=lookup&code=PACK-1$/, body: { pack: PACK } },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RetailInvoiceScreen industry="fashion_apparel" />);
+    await flush();
+    await scanAndFlush("PACK-1");
+    await flush();
+    expect(screen.getByText(/بستهٔ عمده مشکی × ۱ \(۵ قطعه\)/)).toBeTruthy();
+    await submit();
+    expect(postedLines(fetchMock)).toEqual([{ kind: "size_pack", packId: "pack-1", quantity: 1, vatPercent: 0 }]);
+  });
+
+  it("a scanned pack with a consigned component is refused by name, not as a shortage (GH #1567 C5)", async () => {
+    const fetchMock = fetchMockWith([
+      { pattern: /\/api\/barcodes\/lookup/, body: { matches: [] } },
+      { pattern: /\/api\/size-packs\?view=lookup&code=PACK-1$/, body: { pack: { ...PACK, available: 0, consignedComponents: ["پیراهن (M)"] } } },
+    ]);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RetailInvoiceScreen industry="fashion_apparel" />);
+    await flush();
+    await scanAndFlush("PACK-1");
+    await flush();
+    expect(screen.getByText(/کالای امانی است.*پیراهن \(M\)/)).toBeTruthy();
+    expect(screen.queryByText(/کافی نیست/)).toBeNull();
+    expect(screen.queryByText(/بستهٔ عمده مشکی × ۱/)).toBeNull();
+  });
+
+  it("a non-fashion till never asks the size-pack lookup", async () => {
+    const fetchMock = fetchMockWith([{ pattern: /\/api\/barcodes\/lookup/, body: { matches: [] } }]);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RetailInvoiceScreen industry="accessories" />);
+    await flush();
+    await scanAndFlush("PACK-1");
+    expect(screen.getByText("بارکدی با این کد یافت نشد.")).toBeTruthy();
+    expect(fetchMock.mock.calls.some((call: unknown[]) => String(call[0]).includes("/api/size-packs"))).toBe(false);
+  });
+
+  it("the pack picker sells a chosen quantity, capped at what stock can make", async () => {
+    const fetchMock = fetchMockWith([{ pattern: /\/api\/size-packs\?active=1$/, body: { packs: [PACK] } }]);
+    vi.stubGlobal("fetch", fetchMock);
+    render(<RetailInvoiceScreen industry="fashion_apparel" />);
+    await flush();
+    await flush();
+    expect(screen.getByText("فروش بستهٔ سایزی")).toBeTruthy();
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "انتخاب بسته" }));
+    });
+    await flushUntil(() => screen.getByRole("option", { name: /عمده مشکی/ }));
+    act(() => {
+      fireEvent.click(screen.getByRole("option", { name: /عمده مشکی/ }));
+    });
+    await flush();
+    const quantity = screen.getByLabelText("تعداد بسته");
+    act(() => {
+      fireEvent.change(quantity, { target: { value: "3" } });
+    });
+    expect(screen.getByText("حداکثر ۲ بسته قابل فروش است.")).toBeTruthy();
+    const add = screen.getByRole("button", { name: /افزودن بسته به فاکتور/ }) as HTMLButtonElement;
+    expect(add.disabled).toBe(true);
+    act(() => {
+      fireEvent.change(quantity, { target: { value: "2" } });
+    });
+    act(() => {
+      fireEvent.click(add);
+    });
+    await flush();
+    await submit();
+    expect(postedLines(fetchMock)).toEqual([{ kind: "size_pack", packId: "pack-1", quantity: 2, vatPercent: 0 }]);
+  });
+
+  it("a fashion shop with no packs sees no pack panel", async () => {
+    vi.stubGlobal("fetch", fetchMockWith([{ pattern: /\/api\/size-packs\?active=1$/, body: { packs: [] } }]));
+    render(<RetailInvoiceScreen industry="fashion_apparel" />);
+    await flush();
+    await flush();
+    expect(screen.queryByText("فروش بستهٔ سایزی")).toBeNull();
+  });
+});
+
 describe("RetailInvoiceScreen — printer missing and printer retry", () => {
   it("printer missing: the explicit «چاپ رسید» reprint tells the cashier why nothing printed, with a link to printer settings", async () => {
     printSaleReceipt.mockImplementationOnce(async () => ({ ok: true, supportsDrawer: false, printerId: undefined }) as const);

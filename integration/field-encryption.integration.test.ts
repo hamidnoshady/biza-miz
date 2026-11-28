@@ -203,6 +203,21 @@ describe("the encrypted-column registry matches the live schema", () => {
     }
   });
 
+  it("a sealed column has no plaintext twin and no other column on its table looks like a copy (GH #1567 C1)", async () => {
+    const { SEALED_COLUMNS } = await import("../src/lib/encrypted-columns");
+    for (const sealed of SEALED_COLUMNS) {
+      const { rows } = await raw.query<{ column_name: string; data_type: string }>(
+        `SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
+        [sealed.table],
+      );
+      expect(rows.find((r) => r.column_name === sealed.encColumn)?.data_type).toBe("bytea");
+      const plaintextCopies = rows
+        .map((r) => r.column_name)
+        .filter((c) => c !== sealed.encColumn && sealed.plaintextPattern.test(c));
+      expect(plaintextCopies, `plaintext-shaped column(s) beside ${sealed.table}.${sealed.encColumn}`).toEqual([]);
+    }
+  });
+
   it("business_encryption_keys is RLS-protected, honours the bypass, and is keyed per business", async () => {
     const { rows: policies } = await raw.query<{
       relrowsecurity: boolean;

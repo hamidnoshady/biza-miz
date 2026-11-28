@@ -65,6 +65,11 @@ const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  // Issue #1567 — fashion merchandise is this trade's stock on the balance
+  // sheet, in its own account (1374 موجودی پوشاک و کالای مد) rather than the
+  // generic 1300: a fashion retailer's inventory is its largest asset and is
+  // reported on its own exactly like the other trade-goods trades'.
+  fashion_apparel: WELL_KNOWN_CODES.fashionInventory,
   // Issue #839 — vehicles are this trade's stock on the balance sheet, and its
   // own account (1370) rather than the generic 1300: a dealership's inventory
   // is its largest asset, is financed per unit, and is reported on its own in
@@ -141,6 +146,10 @@ function revenueLine(industry: Industry): PostingRuleLine {
     wholesale: { code: WELL_KNOWN_CODES.wholesaleSalesRevenue, label: "فروش عمده" },
     tools_fittings: { code: WELL_KNOWN_CODES.toolsSalesRevenue, label: "فروش ابزار و یراق" },
     haberdashery: { code: WELL_KNOWN_CODES.haberdasherySalesRevenue, label: "فروش لوازم خرازی" },
+    // Issue #1567 — one revenue account for fashion sales (4584); a shop that
+    // wants to split clothing from footwear reads that from the reports'
+    // category/attribute dimensions rather than from two charts.
+    fashion_apparel: { code: WELL_KNOWN_CODES.fashionSalesRevenue, label: "فروش پوشاک، کیف و کفش" },
     // Issue #839 — one revenue account for vehicle sales. A dealership that
     // wants to split new from used reads that from the reports' condition
     // dimension rather than from two charts, because "new or used" is a

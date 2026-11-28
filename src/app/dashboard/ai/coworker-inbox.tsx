@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { useFeatureLocked } from "@/components/feature-lock";
 import { ACCOUNTING_REVIEW_SEVERITY_LABELS, type AccountingFinding } from "@/lib/accounting-review";
 import { COWORKER_RUN_STATUS_LABELS, type CoworkerRunStatus } from "@/lib/ai-coworker";
+import { AI_APPROVAL_TTL_HOURS } from "@/lib/ai-approval-policy";
 import { EmptyState, SectionCard, StatusBadge } from "../page-chrome";
 import { SEVERITY_TONE, type CoworkerRunView } from "./coworker-types";
 import { formatDateTime } from "./format";
@@ -55,6 +56,15 @@ const ACTION_LABEL: Record<CoworkerRunActionStatus, string> = {
 };
 
 type CoworkerRunActionStatus = CoworkerRunView["actions"][number]["status"];
+
+/** GH #1567 F7 — a held run must be decided within the approval window. */
+function approvalDeadline(run: CoworkerRunView): string {
+  return new Date(new Date(run.createdAt).getTime() + AI_APPROVAL_TTL_HOURS * 3_600_000).toISOString();
+}
+
+function approvalExpired(run: CoworkerRunView): boolean {
+  return Date.now() > new Date(approvalDeadline(run)).getTime();
+}
 
 function FindingList({ findings }: { findings: AccountingFinding[] }) {
   return (
@@ -102,13 +112,22 @@ export function CoworkerInbox({ onChange }: { onChange?: () => void }) {
     void load();
   }, [load, locked]);
 
-  async function decide(runId: string, decision: "approve" | "reject") {
+  async function decide(run: CoworkerRunView, decision: "approve" | "reject") {
+    const runId = run.id;
     setBusyId(runId);
     try {
+      // GH #1567 F7 — the approval is bound to exactly what this card shows:
+      // one hash per pending financial/stock action. The server refuses a
+      // missing or different hash and runs nothing.
+      const approvals = Object.fromEntries(
+        run.actions
+          .filter((action) => action.status === "pending" && action.approvalHash)
+          .map((action) => [action.id, action.approvalHash as string]),
+      );
       const response = await fetch(`/api/ai/coworker/runs/${runId}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify(decision === "approve" ? { decision, approvals } : { decision }),
       });
       const body = (await response.json().catch(() => ({}))) as { message?: string; error?: string };
       if (!response.ok) throw new Error(body.message ?? body.error ?? "ثبت تصمیم ممکن نشد.");
@@ -137,17 +156,24 @@ export function CoworkerInbox({ onChange }: { onChange?: () => void }) {
             </div>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">{run.summary}</p>
             <p className="mt-1 text-xs text-muted-foreground">{formatDateTime(run.createdAt)}</p>
+            {actionable ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {approvalExpired(run)
+                  ? "مهلت تأیید این اجرا گذشته است؛ فقط رد کردن ممکن است."
+                  : `مهلت تأیید تا ${formatDateTime(approvalDeadline(run))}`}
+              </p>
+            ) : null}
           </div>
           {actionable ? (
             <div className="flex shrink-0 items-center gap-2">
-              <Button size="sm" onClick={() => void decide(run.id, "approve")} disabled={busyId === run.id}>
+              <Button size="sm" onClick={() => void decide(run, "approve")} disabled={busyId === run.id || approvalExpired(run)}>
                 <CheckIcon className="size-4" aria-hidden="true" />
                 {busyId === run.id ? "در حال ثبت…" : "تأیید و ثبت"}
               </Button>
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => void decide(run.id, "reject")}
+                onClick={() => void decide(run, "reject")}
                 disabled={busyId === run.id}
               >
                 <XIcon className="size-4" />
@@ -163,7 +189,12 @@ export function CoworkerInbox({ onChange }: { onChange?: () => void }) {
               <li key={action.id} className="rounded-xl border border-border/80 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-sm font-medium text-foreground">{action.title}</span>
-                  <StatusBadge tone={ACTION_TONE[action.status]}>{ACTION_LABEL[action.status]}</StatusBadge>
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    {action.status === "pending" && action.approvalHash ? (
+                      <StatusBadge tone="neutral">نیازمند تأیید انسانی</StatusBadge>
+                    ) : null}
+                    <StatusBadge tone={ACTION_TONE[action.status]}>{ACTION_LABEL[action.status]}</StatusBadge>
+                  </span>
                 </div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">{action.summary}</p>
                 {/* Why it is waiting, always — a silent hold is what makes an

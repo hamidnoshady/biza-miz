@@ -660,7 +660,7 @@ const POS_PRODUCTS: EntityDefinition = {
       label: "لینک تصویر",
       type: "text",
       aliases: ["تصویر", "عکس", "image", "img"],
-      validation: { maxLength: 2000 },
+      validation: { maxLength: 2000, mediaUrl: true },
       exportDefault: true,
     },
     {

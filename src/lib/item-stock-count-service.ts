@@ -50,6 +50,7 @@
  * DB-touching, so not unit-tested directly (repo convention); behaviour is
  * covered by integration/item-stock-counts.integration.test.ts.
  */
+import { planFungibleRelief, relieveFungibleStock, restoreFungibleStock } from "./item-stock-valuation";
 import Decimal from "decimal.js";
 import type { PoolClient } from "pg";
 import type { Role } from "./auth-edge";
@@ -704,26 +705,46 @@ export async function createItemStockCount(
       await recomputeItemStockRollup(client, itemId);
     } else {
       // -------- tracking='none': simple fungible quantity --------
-      const { rows: stockRows } = await client.query<{ quantity: string; unit_cost: string | null }>(
-        `SELECT quantity::text, unit_cost::text FROM item_stock WHERE item_id = $1 FOR UPDATE`,
+      const { rows: stockRows } = await client.query<{ quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
+        `SELECT quantity::text, unit_cost::text, total_value_rial::text FROM item_stock WHERE item_id = $1 FOR UPDATE`,
         [itemId],
       );
       const systemQty = stockRows[0]?.quantity ?? "0";
       const unitCost = stockRows[0]?.unit_cost ?? null;
 
       const variance = new Decimal(countedQty).minus(systemQty);
-      const varianceValue = unitCost === null ? new Decimal(0) : variance.times(new Decimal(unitCost)).toDecimalPlaces(0);
+      // F1 (GH #1567): a shortage relieves the exact carrying value of the
+      // missing units (the canonical relief), a surplus enters at the current
+      // average; either way quantity and value move together.
+      let varianceValue = new Decimal(0);
+      if (unitCost !== null && variance.isNegative()) {
+        varianceValue = new Decimal(
+          planFungibleRelief(
+            { quantity: systemQty, unitCost, totalValue: stockRows[0]?.total_value_rial ?? null },
+            variance.abs().toFixed(),
+          ).value,
+        ).negated();
+      } else if (unitCost !== null) {
+        varianceValue = variance.times(new Decimal(unitCost)).toDecimalPlaces(0);
+      }
       if (varianceValue.abs().greaterThan(MAX_RIAL)) throw new Error("rial_out_of_range");
 
       if (varianceValue.isNegative()) shortage = shortage.plus(varianceValue.abs());
       else surplus = surplus.plus(varianceValue);
       if (unitCost == null && !variance.isZero()) warnings.push(`missing_cost_basis:${itemId}`);
 
-      await client.query(
-        `INSERT INTO item_stock (item_id, quantity) VALUES ($1, $2)
-         ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [itemId, countedQty],
-      );
+      if (unitCost !== null && variance.isNegative()) {
+        await relieveFungibleStock(client, { itemId, quantity: variance.abs().toFixed(), forcedValue: varianceValue.abs().toFixed() });
+      } else if (unitCost !== null && variance.isPositive()) {
+        await restoreFungibleStock(client, { itemId, quantity: variance.toFixed(), value: varianceValue.toFixed() });
+      } else {
+        // No cost basis: quantity only — a count must not invent a valuation.
+        await client.query(
+          `INSERT INTO item_stock (item_id, quantity) VALUES ($1, $2)
+           ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
+          [itemId, countedQty],
+        );
+      }
       await client.query(
         `INSERT INTO item_stock_count_lines
            (stock_count_id, item_id, system_qty, counted_qty, variance, unit_cost, variance_value, baseline_qty, baseline_unit_cost)
@@ -981,11 +1002,20 @@ export async function reverseItemStockCount(
       const restored = current.minus(variance);
       if (restored.isNegative()) throw new Error("count_stock_consumed");
 
-      await client.query(
-        `INSERT INTO item_stock (item_id, quantity) VALUES ($1, $2)
-         ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [line.item_id, restored.toFixed(9)],
-      );
+      // F1 (GH #1567): the reversal moves back the exact value the count
+      // posted — a shortage's relieved value returns with its units, a
+      // surplus's entered value leaves with them.
+      if (value.isZero()) {
+        await client.query(
+          `INSERT INTO item_stock (item_id, quantity) VALUES ($1, $2)
+           ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
+          [line.item_id, restored.toFixed(9)],
+        );
+      } else if (variance.isNegative()) {
+        await restoreFungibleStock(client, { itemId: line.item_id, quantity: variance.abs().toFixed(), value: value.abs().toFixed() });
+      } else {
+        await relieveFungibleStock(client, { itemId: line.item_id, quantity: variance.toFixed(), forcedValue: value.toFixed() });
+      }
     }
   }
 

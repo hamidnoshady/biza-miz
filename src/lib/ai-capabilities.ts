@@ -262,7 +262,14 @@ export const AI_TOOL_PERMISSION_MAP: Readonly<Record<string, Permission>> = {
 /** Explicit context for trusted tenant-scoped background/MCP reads. The
  * caller has already passed its own job/connection scope; this set is never
  * exposed to browser turns, which always use effective member permissions. */
-export const SYSTEM_AI_READ_PERMISSIONS: ReadonlySet<Permission> = new Set(ALL_PERMISSIONS);
+/**
+ * GH #1567 6A: a customer's body measurements are never an AI input. No tool,
+ * action or MCP verb maps to them, and the system AI read set excludes the key
+ * so a future tool gated on it is denied by construction.
+ */
+export const AI_EXCLUDED_PERMISSIONS: ReadonlySet<Permission> = new Set([PERMISSIONS.tailoringMeasurements]);
+export const SYSTEM_AI_READ_PERMISSIONS: ReadonlySet<Permission> =
+  new Set(ALL_PERMISSIONS.filter(permission => !AI_EXCLUDED_PERMISSIONS.has(permission)));
 
 export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permission>>> = {
   "setup.business": PERMISSIONS.settingsManage,
@@ -344,6 +351,11 @@ export const AI_ACTION_PERMISSION_MAP: Readonly<Partial<Record<ActionType, Permi
   "haberdashery.item.create": PERMISSIONS.inventoryAdjust,
   "haberdashery.stock.update": PERMISSIONS.inventoryAdjust,
   "haberdashery.item.sell": PERMISSIONS.ordersCreate,
+  // Issue #1567 — fashion's lanes are the same shared trade-goods routes,
+  // so they carry the same guards.
+  "fashion_apparel.item.create": PERMISSIONS.inventoryAdjust,
+  "fashion_apparel.stock.update": PERMISSIONS.inventoryAdjust,
+  "fashion_apparel.item.sell": PERMISSIONS.ordersCreate,
   // Batch AP — data-transfer writes. The engine key is copied from the
   // routes' dataOwner(); the executor additionally re-enforces the route's
   // second key (the entity's own permission + the mapping kind's engine).

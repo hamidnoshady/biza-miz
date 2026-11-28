@@ -55,6 +55,13 @@ export const WORKSPACE_INDUSTRY_DEFAULTS: Record<Industry, boolean> = {
   tools_fittings: false,
   haberdashery: false,
   automotive: false,
+  // Issue #1567 — a fashion shop's work lives at the counter, the stockroom
+  // and the products workspace, exactly like the other retail trades; My
+  // Workspace (projects, briefs, approvals) is not an affordance it needs, so
+  // the industry default is false. Any future tailoring/custom-order wave
+  // must go through this same explicit, reviewed decision rather than being
+  // inferred from a module list.
+  fashion_apparel: false,
 };
 
 /**

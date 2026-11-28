@@ -91,6 +91,13 @@ export const APPS: AppDef[] = [
       "dashboard", "orders", "pos", "tables", "waiter", "kitchen", "reservations",
       "delivery", "inventory", "menu", "jewelry", "watch", "accessories",
       "cosmetics", "wholesale", "tools_fittings", "haberdashery", "stock",
+      // Issue #1567 — the fashion trade's route namespace is a work area
+      // inside Accounting for the same reason the other trade-goods trades'
+      // are: it is the counter and the stockroom over shared `items`/
+      // `item_stock` primitives, never a fifth app. The catalogue *page* is
+      // the products workspace (the `stock` module above). The key equals
+      // the industry key, as every product-workspace trade's does.
+      "fashion_apparel",
       // Issue #839 — the automotive trade's manager is a work area inside
       // Accounting, exactly like the jewel/jewellery and watch managers above
       // it: a dealership's vehicle stock, holds and sales are the counter, not

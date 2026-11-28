@@ -36,6 +36,12 @@ const INVENTORY_CODE_BY_INDUSTRY: Record<Industry, string> = {
   wholesale: WELL_KNOWN_CODES.wholesaleInventory,
   tools_fittings: WELL_KNOWN_CODES.toolsInventory,
   haberdashery: WELL_KNOWN_CODES.haberdasheryInventory,
+  // Issue #1567 — kept in step with accounting-posting-rules.ts, whose copy of
+  // this mapping the settings panel reads (the pairing is asserted in
+  // accounting-posting-rules.test.ts). The purchase receipt, the count and the
+  // transfer rules all relieve «موجودی پوشاک و کالای مد» (1374) like any other
+  // trade's finished goods.
+  fashion_apparel: WELL_KNOWN_CODES.fashionInventory,
   // Issue #839 — a vehicle is this trade's stock; the purchase receipt, the
   // count and the transfer rules all relieve «موجودی خودرو» (1370) like any
   // other trade's finished goods.

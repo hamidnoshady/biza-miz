@@ -36,7 +36,7 @@ import {
   evaluateUnattendedAction,
   type AutopilotCategory,
 } from "./ai-autopilot";
-import { AUTOPILOT_EXECUTORS } from "./ai-autopilot-executors";
+import { runAiExecutor } from "./ai-human-approval";
 import { autopilotAmountContext } from "./ai-amount-context";
 import { getAutopilotSettings } from "./ai-autopilot-service";
 import { createAiActionAudit } from "./ai-action-audit";
@@ -537,8 +537,7 @@ async function executeAutomationRun(input: {
     }
 
     // auto_apply — through the same role-guarded executor a chat apply uses.
-    const executor = meta?.executor ? AUTOPILOT_EXECUTORS[meta.executor] : null;
-    if (!executor) {
+    if (!meta?.executor) {
       await query(
         `UPDATE ai_action_audit SET status = 'failed', result = $3::jsonb
           WHERE id = $1 AND business_id = $2 AND status = 'proposed'`,
@@ -571,10 +570,12 @@ async function executeAutomationRun(input: {
       return "pending_approval";
     }
 
-    const result = await executor({
+    const result = await runAiExecutor({
+      actionType: automation.actionType as ActionType,
       businessId,
       authorizedByUserId: automation.authorizedBy,
       payload: proposal.payload,
+      auditId,
     });
     await query(
       `UPDATE ai_action_audit

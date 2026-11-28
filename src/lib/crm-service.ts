@@ -56,6 +56,7 @@ import { customerHealth as healthOf, type CustomerHealth } from "./crm-health";
 import { resolveOwner } from "./crm-ownership";
 import type { LifecycleStage } from "./crm-scoring";
 import {
+  blockedPartyReferences,
   movedPartyReferences,
   partyReferenceKey,
   partyReferenceLabels,
@@ -79,6 +80,37 @@ class PartyMergeBlockedError extends Error {
     super(`party_merge_blocked:${references.join(",")}`);
     this.name = "PartyMergeBlockedError";
   }
+}
+
+/**
+ * GH #1567 C2 — the losing record still holds rows a merge must not move or
+ * strand (live tailoring measurements, a shareholder relationship, a mapped
+ * platform billing customer). The merge refuses as a whole; nothing moves.
+ */
+export interface PartyMergeBlocker { table: string; label: string; count: number }
+
+export class PartyMergeRefusedError extends Error {
+  readonly code = "party_merge_blocked";
+  constructor(readonly blockers: readonly PartyMergeBlocker[]) {
+    super(`party_merge_blocked:${blockers.map((b) => b.table).join(",")}`);
+    this.name = "PartyMergeRefusedError";
+  }
+}
+
+async function countMergeBlockers(businessId: string, partyId: string): Promise<PartyMergeBlocker[]> {
+  const blockers: PartyMergeBlocker[] = [];
+  for (const reference of blockedPartyReferences()) {
+    try {
+      const { rows } = await query<{ count: string }>(countPartyReferenceSql(reference), [businessId, partyId]);
+      const count = Number(rows[0]?.count ?? 0);
+      if (count > 0) blockers.push({ table: reference.table, label: reference.previewLabel ?? reference.table, count });
+    } catch (error) {
+      // An industry table this install has not got cannot block anything.
+      if ((error as { code?: string }).code === "42P01") continue;
+      throw error;
+    }
+  }
+  return blockers;
 }
 
 // ---------------------------------------------------------------------------
@@ -765,6 +797,8 @@ export interface MergePreview {
   /** The consent the merged record will end up with, and why. */
   resultingConsent: { smsConsent: boolean; marketingConsent: boolean };
   resultingTags: string[];
+  /** GH #1567 C2 — non-empty means the merge will be refused; shown before confirming. */
+  blockers: PartyMergeBlocker[];
 }
 
 /**
@@ -942,6 +976,7 @@ export async function previewMerge(
       marketingConsent: mergeConsent(winner.marketing_consent, loser.marketing_consent),
     },
     resultingTags: mergeTags(winner.tags, loser.tags),
+    blockers: await countMergeBlockers(businessId, loserId),
   };
 }
 
@@ -1034,6 +1069,10 @@ export async function mergeCustomers(
     if (!winner || !loser || loser.merged_into_id || winner.merged_into_id) return null;
     winnerName = winner.name;
     loserName = loser.name;
+
+    // GH #1567 C2: refuse before anything moves (rows are locked above).
+    const blockers = await countMergeBlockers(businessId, loserId);
+    if (blockers.length > 0) throw new PartyMergeRefusedError(blockers);
 
     const moved = await countReferences(businessId, loserId);
 

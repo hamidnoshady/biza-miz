@@ -5,6 +5,7 @@ import { requireProductWorkspaceForApi } from "@/lib/industry-guard";
 import { resolveActiveLocation } from "@/lib/setup-state";
 import { getItem, updateItemMeta } from "@/lib/items-service";
 import { PERMISSIONS } from "@/lib/permissions";
+import { EMBEDDED_MEDIA_MESSAGE } from "@/lib/embedded-media-guard";
 import { PATCH } from "./route";
 
 vi.mock("@/lib/auth", () => ({ withTenantScope: (handler: unknown) => handler, requirePermission: vi.fn() }));
@@ -47,4 +48,14 @@ describe("product metadata mutation permissions", () => {
     expect(getItem).not.toHaveBeenCalled();
     expect(updateItemMeta).not.toHaveBeenCalled();
   });
+  it("refuses an embedded file with the guard's own message, so the editor never shows the generic fallback (GH #1567 F5)", async () => {
+    const tiny = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+    for (const body of [{ name: tiny }, { longDescription: `<p>متن</p><img src="${tiny}">` }]) {
+      const response = await PATCH(new NextRequest("http://localhost/api/products/items/item/meta", { method: "PATCH", body: JSON.stringify(body) }), context);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "embedded_media", field: Object.keys(body)[0], message: EMBEDDED_MEDIA_MESSAGE });
+    }
+    expect(updateItemMeta).not.toHaveBeenCalled();
+  });
 });
+

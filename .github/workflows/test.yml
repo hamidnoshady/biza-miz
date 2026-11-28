@@ -690,6 +690,32 @@ jobs:
             tail -n 5 cheque-e2e.log
             exit 1
           fi
+      - name: Fashion & apparel acceptance E2E (6A–6E, desktop/tablet/phone, axe)
+        # GH #1567. Provisions its own fashion business through the services
+        # (DATABASE_URL, the seeding connection), then drives the pages on the
+        # production server above as that owner. Failures are annotated for the
+        # same reason as the cheque step: the plain log is not always reachable.
+        env:
+          E2E_SCREENSHOT_DIR: .cache/fashion-e2e
+        run: |
+          set -o pipefail
+          if npm run test:e2e:fashion 2>&1 | tee fashion-e2e.log; then
+            printf '::notice::fashion E2E: %s checks passed\n' "$(grep -ac '✓' fashion-e2e.log)"
+            exit 0
+          else
+            printf '::error::fashion E2E: %s passed, %s failed\n' "$(grep -ac '✓' fashion-e2e.log)" "$(grep -ac '✗' fashion-e2e.log)"
+            grep -aE '✗|\[e2e-fashion\] Error:' fashion-e2e.log | tail -n 8 | while IFS= read -r line; do
+              printf '::error::%s\n' "${line//%/%25}"
+            done
+            tail -n 5 fashion-e2e.log
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fashion-e2e-screenshots
+          path: .cache/fashion-e2e/
+          if-no-files-found: warn
       - name: Commission multi-user lifecycle E2E (Rial)
         env:
           COMMISSION_E2E_SEED: '1'

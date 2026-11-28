@@ -104,11 +104,15 @@ export const TOUR_ANCHORS = {
   productNewTabs: "product-new.tabs",
   productNewDrafts: "product-new.drafts",
   productNewSave: "product-new.save",
+  // The fashion variant matrix builder (#1567) inside the new-product page.
+  productNewMatrix: "product-new.matrix",
   pricesToolbar: "prices.toolbar",
   pricesMatrix: "prices.matrix",
   attributesFilters: "attributes.filters",
   attributesCards: "attributes.cards",
   attributesAdd: "attributes.add",
+  // «افزودن از الگو» — apply a per-category attribute template (#1567).
+  attributesApplyTemplate: "attributes.apply-template",
   productReportsRows: "product-reports.rows",
   barcodePreview: "barcode-templates.preview",
   barcodeTemplates: "barcode-templates.list",

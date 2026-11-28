@@ -17,6 +17,7 @@ import { validateVariantAttributes, type VariantAttributeInput } from "./items";
 import { recordItemEvent } from "./item-audit-service";
 import { setInitialUnitCost } from "./accessories-service";
 import { resolveActiveLocation } from "./setup-state";
+import { withConsignedStock } from "./fashion-consignment-service";
 import { requireIndustryForApi } from "./industry-guard";
 import { MissingLedgerAccountError } from "./ledger-service";
 import { variantSalesAnalysis } from "./industry-reports-service";
@@ -44,7 +45,9 @@ export function tradeGoodsItemsGet(industry: TradeGoodsIndustry, roleGuard: Role
     const location = await resolveActiveLocation(session);
     if (!location) return NextResponse.json({ items: [] });
 
-    const items = await listVariantBoard(location.id);
+    const board = await listVariantBoard(location.id);
+    // GH #1567 6D — consigned (امانی) variants sell from their contract's on-hand.
+    const items = industry === "fashion_apparel" ? await withConsignedStock(session.businessId, location.id, board) : board;
     return NextResponse.json({ items });
   });
 }

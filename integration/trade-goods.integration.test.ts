@@ -1,7 +1,10 @@
 /**
  * Phase 38 — trade-goods industries (wholesale / tools & fittings /
- * haberdashery): variant catalogue, stock at a rolling average cost, and a
- * retail-invoice sale that posts to the trade's own revenue/COGS accounts.
+ * haberdashery / fashion apparel): variant catalogue, stock at a rolling
+ * average cost, and a retail-invoice sale that posts to the trade's own
+ * revenue/COGS accounts. The loop walks `TRADE_GOODS_INDUSTRIES`, so adding
+ * a trade (#1567's fashion_apparel) extends this suite automatically — its
+ * account codes belong in `TRADE_ACCOUNT_CODES` below.
  */
 import { randomUUID } from "node:crypto";
 import { Client, type PoolClient } from "pg";
@@ -29,6 +32,7 @@ const TRADE_ACCOUNT_CODES: Record<TradeGoodsIndustry, { revenue: string; cogs: s
   wholesale: { revenue: "4581", cogs: "5181", inventory: "1371" },
   tools_fittings: { revenue: "4582", cogs: "5182", inventory: "1372" },
   haberdashery: { revenue: "4583", cogs: "5183", inventory: "1373" },
+  fashion_apparel: { revenue: "4584", cogs: "5184", inventory: "1374" },
 };
 
 function urlFor(database: string): string {

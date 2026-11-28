@@ -6,15 +6,14 @@
  *     transaction with one audit event per item;
  *   - a markdown planner that classifies stock as fast/slow/dead (and, for
  *     batch-tracked cosmetics, near-expiry) and applies an accepted markdown
- *     as a ledger write-down plus a price change;
+ *     as a price change only (GH #1567 F3 — a write-down is the separate,
+ *     reviewed NRV act in item-nrv-write-down-service.ts);
  *   - sell-through by season/collection off the same sale events the sales
  *     report reads.
  */
-import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import Decimal from "decimal.js";
 import { getPool, query } from "./db";
-import { emitDomainEvent } from "./posting-engine";
 import { recordItemEvent } from "./item-audit-service";
 import {
   expiryBucket,
@@ -22,8 +21,10 @@ import {
   type StockVelocityClass,
 } from "./industry-reports";
 import { rialText } from "./inventory-exact";
+import { createItemStockCount } from "./item-stock-count-service";
 
-// Side-effect import: registers item.markdown_write_down with the engine.
+// Side-effect import: keeps the legacy item.markdown_write_down rule
+// registered so events posted before F3 still replay; nothing emits it now.
 import "./merchandising-posting-rules";
 
 export interface MatrixVariantUpdate {
@@ -49,6 +50,11 @@ export async function bulkUpdateVariantMatrix(
   },
 ): Promise<void> {
   if (input.updates.length === 0) return;
+  // F2 (GH #1567): a new on-hand figure typed into the grid is a stock count,
+  // not a silent overwrite — it goes through the canonical count, so the
+  // shortage/surplus posts to the ledger at the carrying value and the count
+  // is reversible. A variant with no cost basis is refused below.
+  const countLines: Array<{ itemId: string; countedQty: string }> = [];
 
   for (const update of input.updates) {
     const { rows } = await client.query<{ id: string }>(
@@ -72,11 +78,14 @@ export async function bulkUpdateVariantMatrix(
       if (!Number.isFinite(update.quantity) || update.quantity < 0) {
         throw new Error("موجودی نمی‌تواند منفی باشد.");
       }
-      await client.query(
-        `INSERT INTO item_stock (item_id, quantity) VALUES ($1, $2)
-         ON CONFLICT (item_id) DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = now()`,
-        [update.itemId, update.quantity],
+      const current = await client.query<{ quantity: string }>(
+        `SELECT quantity::text FROM item_stock WHERE item_id = $1`,
+        [update.itemId],
       );
+      // An unchanged cell is not a count line (no empty count documents).
+      if (!new Decimal(current.rows[0]?.quantity ?? 0).eq(update.quantity)) {
+        countLines.push({ itemId: update.itemId, countedQty: String(update.quantity) });
+      }
     }
 
     await recordItemEvent(
@@ -93,6 +102,23 @@ export async function bulkUpdateVariantMatrix(
       },
       client,
     );
+  }
+
+  if (countLines.length > 0) {
+    const counted = await createItemStockCount(client, {
+      businessId: input.businessId,
+      locationId: input.locationId,
+      note: "ویرایش گروهی موجودی از جدول تنوع‌ها",
+      lines: countLines,
+      createdBy: input.createdBy ?? null,
+    });
+    // A variant with no cost basis would gain or lose units at an unknown
+    // value — exactly the silent stock change F2 removes. Refuse the grid
+    // (the caller's transaction rolls every cell back); its first stock
+    // belongs on an opening-stock document or a purchase.
+    if (counted.warnings.some((warning) => warning.startsWith("missing_cost_basis"))) {
+      throw new Error("برای تنوعی که قیمت تمام‌شده ندارد، موجودی را با سند موجودی افتتاحیه یا خرید ثبت کنید.");
+    }
   }
 }
 
@@ -191,14 +217,32 @@ export interface AppliedMarkdown {
   oldPrice: number;
   newPrice: number;
   quantity: string;
+  /**
+   * Always 0 since GH #1567 F3: a markdown is a price decision and posts
+   * nothing. Kept so existing callers keep their shape.
+   */
   writeDownRial: number;
   entryId: string | null;
+  /** The carrying value per unit the new price is compared against (null = no cost basis). */
+  carryingUnitValue: string | null;
+  /**
+   * True when the new shelf price is below the carrying value per unit — a
+   * sign NRV may be below cost. Nothing is posted: the write-down is a
+   * separate, reviewed act (`item-nrv-write-down-service`).
+   */
+  belowCost: boolean;
+  /** carrying value − quantity × new price, floored at 0 (an upper bound before selling costs). */
+  nrvShortfallRial: string;
 }
 
 /**
  * Applies an accepted markdown: sets the new shelf price (the sell screen
- * reads it next), posts Debit expense / Credit inventory for the carrying
- * value given up, and records the audit event.
+ * reads it next) and records the audit event. A selling-price reduction is
+ * **not** an inventory write-down (GH #1567 F3) — before F3 this posted
+ * quantity × (old − new) *retail* price against inventory, which wrote off
+ * value the stock still had (cost 50,000, price 100,000 → 70,000 on 5 units
+ * wrote off 150,000). The stock keeps its cost; when the new price signals
+ * NRV below cost the result says so and the reviewed NRV write-down decides.
  */
 export async function applyMarkdown(
   client: PoolClient,
@@ -207,8 +251,8 @@ export async function applyMarkdown(
     locationId: string;
     itemId: string;
     newPrice: number;
-    /** The trade's inventory account code (1340 accessories / 1350 cosmetics). */
-    inventoryAccountCode: string;
+    /** The trade's inventory account code (kept for callers; nothing is posted). */
+    inventoryAccountCode?: string;
     createdBy?: string | null;
   },
 ): Promise<AppliedMarkdown> {
@@ -216,41 +260,32 @@ export async function applyMarkdown(
     throw new Error("قیمت جدید باید یک عدد صحیح مثبت (ریال) باشد.");
   }
 
-  const { rows } = await client.query<{ unit_price: string | null; quantity: string }>(
-    `SELECT unit_price::text, quantity::text FROM item_stock WHERE item_id = $1 FOR UPDATE`,
-    [input.itemId],
+  const { rows } = await client.query<{ unit_price: string | null; quantity: string; total_value_rial: string | null; unit_cost: string | null }>(
+    `SELECT s.unit_price::text, s.quantity::text, s.total_value_rial::text, s.unit_cost::text
+       FROM item_stock s JOIN items i ON i.id = s.item_id
+      WHERE s.item_id = $1 AND i.location_id = $2
+      FOR UPDATE OF s`,
+    [input.itemId, input.locationId],
   );
   if (!rows[0] || rows[0].unit_price == null) throw new Error("این کالا قیمت فروش ندارد.");
   const oldPrice = Number(rows[0].unit_price);
   const quantity = new Decimal(rows[0].quantity);
   if (input.newPrice >= oldPrice) throw new Error("قیمت جدید باید کمتر از قیمت فعلی باشد.");
 
-  const writeDown = Math.round(quantity.times(oldPrice - input.newPrice).toNumber());
-
   await client.query(
     `UPDATE item_stock SET unit_price = $2, updated_at = now() WHERE item_id = $1`,
     [input.itemId, input.newPrice],
   );
 
-  // Same defect class as the retail sell-services: `postingKind` for this
-  // rule is the fixed string "markdown_write_down", and slow-moving stock is
-  // routinely marked down more than once over its shelf life. Keying the
-  // posting identity on `input.itemId`, as this used to, meant only the
-  // *first* markdown of any item could ever post; a second markdown of the
-  // same item threw a raw unique-constraint violation. `itemAuditTrail`
-  // matches on `payload->>'itemId'` (kept, unchanged) as well as
-  // `domain_events.source_id`, so it is unaffected; `postingSourceId` is the
-  // separate identity only the ledger posting itself uses, fresh per call.
-  const { entryId } = await emitDomainEvent(client, {
-    businessId: input.businessId,
-    locationId: input.locationId,
-    eventType: "item.markdown_write_down",
-    payload: { itemId: input.itemId, inventoryAccountCode: input.inventoryAccountCode, amount: rialText(String(writeDown)) },
-    sourceType: "item",
-    sourceId: input.itemId,
-    postingSourceId: randomUUID(),
-    createdBy: input.createdBy ?? null,
-  });
+  const carrying = rows[0].total_value_rial ?? (rows[0].unit_cost == null ? null : rialText(quantity.times(rows[0].unit_cost).toFixed(0)));
+  let carryingUnitValue: string | null = null;
+  let shortfall = 0n;
+  if (carrying != null && quantity.gt(0)) {
+    carryingUnitValue = new Decimal(carrying).div(quantity).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0);
+    const atNewPrice = BigInt(quantity.times(input.newPrice).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).toFixed(0));
+    shortfall = BigInt(carrying) - atNewPrice;
+    if (shortfall < 0n) shortfall = 0n;
+  }
 
   await recordItemEvent(
     {
@@ -258,26 +293,51 @@ export async function applyMarkdown(
       locationId: input.locationId,
       itemId: input.itemId,
       eventType: "item.markdown_applied",
-      payload: { oldPrice, newPrice: input.newPrice, writeDownRial: writeDown },
+      payload: { oldPrice, newPrice: input.newPrice, writeDownRial: 0, belowCost: shortfall > 0n, nrvShortfallRial: shortfall.toString() },
       createdBy: input.createdBy ?? null,
     },
     client,
   );
 
-  return { itemId: input.itemId, oldPrice, newPrice: input.newPrice, quantity: quantity.toString(), writeDownRial: writeDown, entryId };
+  return {
+    itemId: input.itemId,
+    oldPrice,
+    newPrice: input.newPrice,
+    quantity: quantity.toString(),
+    writeDownRial: 0,
+    entryId: null,
+    carryingUnitValue,
+    belowCost: shortfall > 0n,
+    nrvShortfallRial: shortfall.toString(),
+  };
 }
 
 export interface CollectionSellThroughRow {
   collection: string | null;
   season: string | null;
+  /** GH #1567 F4 — the «دسته‌بندی» the sale was tagged with, frozen at sale time. */
+  category: string | null;
+  /**
+   * False for sales (and returns) recorded before sale-time snapshots existed
+   * (migration 0328): their tags were never captured, so the row is
+   * "unknown" — never today's tags passed off as then's.
+   */
+  snapshotKnown: boolean;
   quantitySold: string;
   netRevenue: number;
+  /** GH #1567 C6 — returned units with an unknown revenue share (pre-0328); not "0" ⇒ revenue incomplete. */
+  unknownReturnQuantity: string;
+  revenueComplete: boolean;
 }
 
 /**
- * Sell-through by collection/season, off the same `accessory.sale_revenue` /
- * `cosmetic.sale_revenue` events the sales report reads — so the two always
- * agree for the same period. Untagged items group under null.
+ * Sell-through by collection / season / category — net of returns, over both
+ * channels, grouped by the tags each sale carried WHEN IT HAPPENED (GH #1567
+ * F4). Re-tagging a style moves only its future sales. The counter's tags are
+ * in its `<trade>.sale_revenue` event (`payload.merch`), a website sale's in
+ * `online_sale_lines.merch`, and a return carries its sale's tags in
+ * `sale_return_facts.merch`; quantities and revenue are exactly the ones the
+ * variant report (SALE_FACTS_CTE) nets, so the two always agree.
  */
 export async function sellThroughByCollection(
   businessId: string,
@@ -286,29 +346,61 @@ export async function sellThroughByCollection(
 ): Promise<CollectionSellThroughRow[]> {
   const prefix = options.eventPrefix ?? "accessory";
   const { rows } = await query<{
+    snapshot_known: boolean;
     collection: string | null;
     season: string | null;
+    category: string | null;
     quantity_sold: string;
     net_revenue: string;
+    unknown_return_qty: string;
   }>(
-    `SELECT i.collection, i.season,
-            SUM((e.payload->>'quantity')::numeric)::text AS quantity_sold,
-            SUM((e.payload->>'net')::numeric)::text AS net_revenue
-       FROM domain_events e
-       JOIN items i ON i.id = e.source_id
-      WHERE e.business_id = $1 AND e.location_id = $2
-        AND e.event_type = $5 || '.sale_revenue'
-        AND ($3::date IS NULL OR e.created_at >= $3::date)
-        AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
-      GROUP BY i.collection, i.season
-      ORDER BY net_revenue DESC`,
+    `WITH facts AS (
+        SELECT e.payload -> 'merch' AS merch,
+               (e.payload->>'quantity')::numeric AS quantity,
+               (e.payload->>'net')::numeric AS net,
+               0::numeric AS unknown_return_qty
+          FROM domain_events e
+         WHERE e.business_id = $1 AND e.location_id = $2
+           AND e.event_type = $5 || '.sale_revenue'
+           AND ($3::date IS NULL OR e.created_at >= $3::date)
+           AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
+        UNION ALL
+        SELECT f.merch, f.quantity, f.net_rial::numeric, 0::numeric
+          FROM online_sale_lines f
+          JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
+         WHERE f.location_id = $2 AND f.item_id IS NOT NULL
+           AND ($3::date IS NULL OR f.occurred_at >= $3::date)
+           AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
+        UNION ALL
+        SELECT rf.merch, -trim_scale(rf.quantity), -rf.net_rial::numeric,
+               CASE WHEN rf.amounts_known THEN 0 ELSE trim_scale(rf.quantity) END
+          FROM sale_return_facts rf
+          JOIN order_items oi ON oi.id = rf.order_item_id AND oi.status <> 'voided'
+         WHERE rf.business_id = $1 AND rf.location_id = $2
+           AND ($3::date IS NULL OR rf.occurred_at >= $3::date)
+           AND ($4::date IS NULL OR rf.occurred_at < ($4::date + 1))
+      )
+      SELECT jsonb_typeof(merch) = 'object' AS snapshot_known,
+             NULLIF(merch->>'collection', '') AS collection,
+             NULLIF(merch->>'season', '') AS season,
+             NULLIF(merch->>'category', '') AS category,
+             SUM(quantity)::text AS quantity_sold,
+             SUM(net)::text AS net_revenue,
+             SUM(unknown_return_qty)::text AS unknown_return_qty
+        FROM facts
+       GROUP BY 1, 2, 3, 4
+       ORDER BY SUM(net) DESC, 2 NULLS LAST, 3 NULLS LAST, 4 NULLS LAST`,
     [businessId, locationId, options.from ?? null, options.to ?? null, prefix],
   );
   return rows.map((r) => ({
     collection: r.collection,
     season: r.season,
+    category: r.category,
+    snapshotKnown: r.snapshot_known === true,
     quantitySold: r.quantity_sold,
     netRevenue: Number(r.net_revenue),
+    unknownReturnQuantity: r.unknown_return_qty && Number(r.unknown_return_qty) !== 0 ? r.unknown_return_qty : "0",
+    revenueComplete: !r.unknown_return_qty || Number(r.unknown_return_qty) === 0,
   }));
 }
 

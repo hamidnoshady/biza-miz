@@ -166,6 +166,34 @@ export interface PartyReference {
  * CRM's own objects, then integrations, then the audit rows.
  */
 export const PARTY_REFERENCES: readonly PartyReference[] = [
+  // GH #1567 6A — tailoring.
+  {
+    table: "tailoring_jobs",
+    column: "party_id",
+    scope: "business",
+    disposition: "move",
+    reason: "An alteration/made-to-measure job belongs to the person; after a merge it must open from the surviving customer. Money stays on the linked order, which moves by its own rule.",
+    preview: true,
+    previewLabel: "سفارش خیاطی",
+  },
+  {
+    table: "tailoring_measurement_profiles",
+    column: "party_id",
+    scope: "business",
+    disposition: "blocked",
+    reason: "Encrypted body measurements are versioned per person. Re-pointing them would interleave two people's version histories (and collide on version numbers); erase or keep the records separate instead of merging.",
+    // GH #1567 C2: only live (unerased) measurements block — an erased row holds no
+    // body data, so a person whose measurements were erased can still be merged.
+    filterSql: "{t}.erased_at IS NULL",
+    previewLabel: "اندازه‌های بدن (خیاطی)",
+  },
+  {
+    table: "tailoring_measurement_access_log",
+    column: "party_id",
+    scope: "business",
+    disposition: "historical",
+    reason: "The append-only access log records whose measurements were opened, by whom and why; a merge must not rewrite that audit fact (the trigger refuses updates anyway).",
+  },
   {
     table: "marketing_targets",
     column: "party_id",
@@ -1244,6 +1272,16 @@ export function movedPartyReferences(): PartyReference[] {
 }
 
 /** The references deliberately left pointing at the archived record. */
+/**
+ * GH #1567 C2 — references that make a merge refuse while the losing record
+ * still has rows in them. Before this, `blocked` only meant "not moved": the
+ * rows stayed on the archived loser and silently dropped out of the surviving
+ * customer's file (a tailoring customer's measurements simply vanished).
+ */
+export function blockedPartyReferences(): PartyReference[] {
+  return PARTY_REFERENCES.filter((reference) => reference.disposition === "blocked");
+}
+
 export function historicalPartyReferences(): PartyReference[] {
   return PARTY_REFERENCES.filter((reference) => reference.disposition === "historical");
 }

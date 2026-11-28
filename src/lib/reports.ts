@@ -945,6 +945,8 @@ export type ReportShape =
   | "near_expiry"
   | "low_stock"
   | "dead_stock"
+  // GH #1567 6E — fashion advisory merchandising suggestions (read-only).
+  | "fashion_advice"
   // Issue #839 §14 — the dealership's three read-only reports, each with its
   // own payload shape because a car is not a stocked row: stock/valuation,
   // sales/profit, and the holds with the money they hold.
@@ -1584,6 +1586,18 @@ export const STANDARD_REPORTS: StandardReportDef[] = [
     group: "sales",
     requires: { modules: ["automotive"] },
     shape: "vehicle_reservations",
+    view: null,
+    defaultChart: null,
+  },
+  {
+    // GH #1567 6E — advisory only: the report suggests, it never buys, posts,
+    // reprices or messages. The assistant reads it through run_report (read).
+    key: "fashion_merchandising_advice",
+    label: "پیشنهادهای خرید و چیدمان (مشورتی)",
+    description: "چه بخرید، کدام سری سایز را کامل کنید، چه چیزی مازاد است و کجا تخفیف را بررسی کنید — با عدد و قاعدهٔ پشت هر پیشنهاد.",
+    group: "inventory",
+    requires: { modules: ["fashion_apparel"] },
+    shape: "fashion_advice",
     view: null,
     defaultChart: null,
   },

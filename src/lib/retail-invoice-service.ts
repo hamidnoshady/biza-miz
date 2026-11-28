@@ -59,6 +59,12 @@ import type { SettlementMethod } from "./ledger";
 import type { Industry } from "./industries";
 import type { RetailInvoiceLineSnapshotStored } from "./retail-invoice/types";
 import {
+  lockConsignedLineForSale,
+  recordConsignedSaleMovement,
+  sellConsignedUnits,
+  type ConsignmentSaleSnapshot,
+} from "./fashion-consignment-service";
+import {
   assertTendersExhausted,
   buildTenderQueue,
   resolveLineTenders,
@@ -138,6 +144,12 @@ export type RetailInvoiceLineInput =
       unitPrice?: number;
       discount?: number;
       vatPercent: number;
+      /**
+       * GH #1567 6C — set only by the size-pack expansion
+       * (`fashion-size-pack-service.ts`): this line is one component of a sold
+       * pack at its negotiated wholesale price, so automatic promotions skip it.
+       */
+      sizePackId?: string;
     }
   | {
       /**
@@ -395,6 +407,13 @@ const LINE_KINDS_BY_INDUSTRY: Record<Industry, readonly RetailInvoiceLineInput["
   wholesale: ["stocked"],
   tools_fittings: ["stocked"],
   haberdashery: ["stocked"],
+  // Issue #1567 — a fashion shop sells its stocked variants (one style's
+  // size/colour children) through the ordinary retail line, exactly like the
+  // other trade-goods trades: the line names the variant, decrements its
+  // `item_stock` quantity and posts through the trade's own registered
+  // `fashion_apparel.sale_revenue`/`sale_cogs` rules. No bespoke line kind —
+  // a garment has no serial number and no weight dimension.
+  fashion_apparel: ["stocked"],
 };
 
 export class RetailInvoiceError extends Error {}
@@ -626,6 +645,20 @@ export async function createRetailInvoice(
       ],
     );
 
+    // GH #1567 6D — a consigned line's movement row is keyed by the order
+    // line, so it can only be written once that row exists.
+    if (settled.snapshot.kind === "stocked" && settled.snapshot.consignment) {
+      await recordConsignedSaleMovement(client, {
+        businessId: input.businessId,
+        locationId: input.locationId,
+        orderId,
+        orderItemId: itemRows[0].id,
+        createdBy: input.createdBy ?? null,
+        snapshot: settled.snapshot.consignment as ConsignmentSaleSnapshot,
+        entryId: settled.consignmentEntryId ?? null,
+      });
+    }
+
     // Batch-tracked cosmetics: the exact allocation this line consumed is
     // persisted against the line, in the same transaction, so a later
     // return/refund/void can restore the SAME lots instead of guessing from
@@ -813,6 +846,8 @@ interface SettledLine {
   /** The COGS this line's sale posted, Rial — the commission margin basis. */
   cost?: RialText;
   brandId?: string | null;
+  /** GH #1567 6D — the consigned sale's journal entry (for its movement row). */
+  consignmentEntryId?: string | null;
   metalValue?: RialText;
   makingCharge?: RialText;
   profit?: RialText;
@@ -857,6 +892,8 @@ async function retailPromotionDiscounts(
   for (let i = 0; i < input.lines.length; i++) {
     const line = input.lines[i];
     if (line.kind !== "accessory" && line.kind !== "cosmetic" && line.kind !== "stocked") continue;
+    // A size-pack component is already at its negotiated wholesale price.
+    if (line.kind === "stocked" && line.sizePackId) continue;
     itemIds.push(line.itemId);
     indexes.push(i);
   }
@@ -1244,6 +1281,54 @@ async function settleLine(
     if (!isTradeGoodsIndustry(input.industry)) {
       throw new RetailInvoiceError("این نوع کالا در این کسب‌وکار قابل فروش نیست.");
     }
+    // GH #1567 6D — a fashion variant holding consigned (امانی) units sells
+    // them for their owner: owner share → 2110, commission → 4700, no COGS
+    // and no item_stock movement (the shop never owned them).
+    if (input.industry === "fashion_apparel") {
+      const consigned = await lockConsignedLineForSale(client, input.businessId, input.locationId, line.itemId);
+      if (consigned) {
+        const sale = await sellConsignedUnits(client, consigned, {
+          businessId: input.businessId,
+          locationId: input.locationId,
+          itemId: line.itemId,
+          quantity: line.quantity,
+          unitPrice: line.unitPrice,
+          discount: combinedDiscount,
+          vatPercent: line.vatPercent,
+          tenders: tenderQueue,
+          createdBy: input.createdBy ?? null,
+        });
+        return {
+          itemId: line.itemId,
+          name: item.name,
+          quantity: line.quantity,
+          gross: sale.breakdown.gross,
+          discount: sale.breakdown.discount,
+          net: sale.breakdown.net,
+          vat: sale.breakdown.vat,
+          total: sale.breakdown.total,
+          // The shop's margin on someone else's goods is its commission, so the
+          // staff-commission margin basis treats the owner's share as the cost.
+          cost: sale.snapshot.ownerShare,
+          brandId: item.brandId,
+          consignmentEntryId: sale.entryId,
+          snapshot: {
+            kind: "stocked",
+            quantity: line.quantity,
+            unitPrice: line.unitPrice != null ? rialText(String(Math.round(line.unitPrice))) : null,
+            gross: sale.breakdown.gross,
+            manualDiscount: rialText(String(Math.max(0, Math.round(manualDiscount)))),
+            promotionDiscount: rialText(String(Math.max(0, Math.round(promotionDiscount)))),
+            discount: sale.breakdown.discount,
+            vat: sale.breakdown.vat,
+            net: sale.breakdown.net,
+            total: sale.breakdown.total,
+            ledgerEntryIds: sale.entryId ? [sale.entryId] : [],
+            consignment: sale.snapshot,
+          },
+        };
+      }
+    }
     const tradeSale = await sellTradeGoodsUnits(client, {
       trade: input.industry,
       businessId: input.businessId,
@@ -1278,6 +1363,7 @@ async function settleLine(
         vat: tradeSale.breakdown.vat,
         net: tradeSale.breakdown.net,
         total: tradeSale.breakdown.total,
+        merch: tradeSale.merch,
         ledgerEntryIds: [tradeSale.revenueEntryId, tradeSale.cogsEntryId].filter(
           (id): id is string => id != null,
         ),
@@ -1298,7 +1384,7 @@ async function settleLine(
           tenders: tenderQueue,
           createdBy: input.createdBy ?? null,
         });
-  const { breakdown, cost, revenueEntryId, cogsEntryId } = sale;
+  const { breakdown, cost, revenueEntryId, cogsEntryId, merch } = sale;
   const baseSnapshot = {
     quantity: line.quantity,
     unitPrice: line.unitPrice != null ? rialText(String(Math.round(line.unitPrice))) : null,
@@ -1309,6 +1395,8 @@ async function settleLine(
     vat: breakdown.vat,
     net: breakdown.net,
     total: breakdown.total,
+    // GH #1567 F4 — the frozen merchandising snapshot a return copies.
+    merch,
     ledgerEntryIds: [revenueEntryId, cogsEntryId].filter((id): id is string => id != null),
   } as const;
   return {

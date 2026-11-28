@@ -6,6 +6,11 @@
  */
 import { query } from "./db";
 import type { ProposedAction } from "./ai";
+import {
+  AI_APPROVAL_TTL_HOURS,
+  aiApprovalClass,
+} from "./ai-approval-policy";
+import { aiApprovalPayloadHash } from "./ai-approval-hash";
 
 export type AiActionAuditStatus =
   | "proposed"
@@ -32,6 +37,8 @@ export interface AiActionAuditEntry extends Record<string, unknown> {
   createdAt: string;
   appliedAt: string | null;
   conversationId?: string | null;
+  /** GH #1567 F7 — the hash a human approval of this (gated) row must present; null when ungated. */
+  payloadHash?: string | null;
 }
 
 function compactAuditValue(value: unknown, depth = 0): unknown {
@@ -53,6 +60,24 @@ function jsonValue(value: unknown): string {
   return JSON.stringify(compactAuditValue(value));
 }
 
+/**
+ * GH #1567 F7 — a proposal exactly as its audit row stores it (the compacted
+ * payload the apply path will run) and, for a gated financial/stock action,
+ * the hash a human approval must present. Every surface that shows a gated
+ * proposal for approval shows THIS payload and sends back THIS hash, so what
+ * the person saw, what they approved and what runs are one byte string.
+ */
+export function boundProposal(proposal: Pick<ProposedAction, "type" | "payload">): {
+  payload: Record<string, unknown>;
+  payloadHash: string | null;
+} {
+  const payload = JSON.parse(jsonValue(proposal.payload ?? {})) as Record<string, unknown>;
+  return {
+    payload,
+    payloadHash: aiApprovalClass(proposal.type) ? aiApprovalPayloadHash(proposal.type, payload) : null,
+  };
+}
+
 export async function createAiActionAudit(input: {
   businessId: string;
   actorUserId: string;
@@ -61,10 +86,19 @@ export async function createAiActionAudit(input: {
   proposal: ProposedAction;
   conversationId?: string | null;
 }): Promise<string> {
+  // GH #1567 F7 — a financial/stock proposal is stamped with its approval
+  // class, the hash of the payload exactly as stored (what an approval will
+  // run) and the deadline for a human decision.
+  const bound = boundProposal(input.proposal);
+  const storedPayload = JSON.stringify(bound.payload);
+  const approvalClass = aiApprovalClass(input.proposal.type);
+  const payloadHash = bound.payloadHash;
   const { rows } = await query<{ id: string }>(
     `INSERT INTO ai_action_audit
-       (business_id, actor_user_id, actor_name, prompt_excerpt, action_type, action_title, action_summary, proposal_payload, conversation_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+       (business_id, actor_user_id, actor_name, prompt_excerpt, action_type, action_title, action_summary, proposal_payload, conversation_id,
+        approval_class, proposal_payload_hash, approval_expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
+             CASE WHEN $10::text IS NULL THEN NULL ELSE now() + make_interval(hours => $12::int) END)
      RETURNING id`,
     [
       input.businessId,
@@ -74,8 +108,11 @@ export async function createAiActionAudit(input: {
       input.proposal.type,
       input.proposal.title.trim().slice(0, 500),
       input.proposal.summary.trim().slice(0, 2_000),
-      jsonValue(input.proposal.payload),
+      storedPayload,
       input.conversationId ?? null,
+      approvalClass,
+      payloadHash,
+      AI_APPROVAL_TTL_HOURS,
     ],
   );
   if (!rows[0]) throw new Error("ai_action_audit_create_failed");
@@ -102,7 +139,8 @@ export async function listAiActionAudit(
             result,
             created_at AS "createdAt",
             applied_at AS "appliedAt",
-            conversation_id AS "conversationId"
+            conversation_id AS "conversationId",
+            proposal_payload_hash AS "payloadHash"
        FROM ai_action_audit
       WHERE business_id = $1
         AND ($2::text IS NULL OR actor_user_id = $2::text)
@@ -110,7 +148,13 @@ export async function listAiActionAudit(
       LIMIT $3`,
     [businessId, actorUserId ?? null, safeLimit],
   );
-  return rows;
+  // A gated row from before the stamp existed is bound to its stored payload
+  // (ai-human-approval.ts), so its approval hash is that payload's hash.
+  return rows.map((row) => ({
+    ...row,
+    payloadHash: row.payloadHash
+      ?? (aiApprovalClass(row.actionType) ? aiApprovalPayloadHash(row.actionType, row.payload ?? {}) : null),
+  }));
 }
 
 export async function finishAiActionAudit(input: {
@@ -211,4 +255,16 @@ export async function getAiActionAuditStatus(
     [id, businessId, actorUserId ?? null, canManage],
   );
   return rows[0]?.status ?? null;
+}
+
+/**
+ * GH #1567 F7 — return a claimed row to the queue untouched (the approval
+ * screen was stale); the CAS only moves a row this caller still holds.
+ */
+export async function releaseAiActionAudit(businessId: string, id: string): Promise<void> {
+  await query(
+    `UPDATE ai_action_audit SET status = 'proposed', processing_started_at = NULL
+      WHERE id = $1 AND business_id = $2 AND status = 'processing'`,
+    [id, businessId],
+  );
 }

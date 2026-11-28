@@ -195,6 +195,11 @@ export const PERMISSIONS = {
   crmConfigure: "crm.configure",
   /** Destroying a customer record together with its history. */
   crmDelete: "crm.delete",
+  // GH #1567 Phase 6A — tailoring. Jobs (intake → pickup) and the customer's
+  // body measurements are separate capabilities: measurements are sensitive
+  // personal data, granted per member (owner/admin hold it), never to AI.
+  tailoringManage: "tailoring.manage",
+  tailoringMeasurements: "tailoring.measurements",
 
   /**
    * My Workspace — «میز کار من» (Phase G).
@@ -679,6 +684,7 @@ const {
   vehiclesOverrideMinPrice, vehiclesTransfer, vehiclesExpenseRecord, vehiclesArchive,
   partiesView, partiesManage,
   crmView, crmManage, crmMerge, crmConsentManage, crmExport, crmConfigure, crmDelete,
+  tailoringManage, tailoringMeasurements,
   workspaceView, workspaceManage, workspaceContractsManage, workspaceApprove, workspaceDocumentsIssue,
   workspaceAdmin,
   ledgerView, ledgerPost, ledgerApprove, ledgerClosePeriod, accountsEdit, ledgerPropose,
@@ -741,6 +747,9 @@ const ROLE_PRESETS: Record<Exclude<Role, "owner">, Permission[]> = {
     // improvement. A business that wants a narrower manager revokes
     // individual capabilities per member.
     crmView, crmManage, crmMerge, crmConsentManage, crmExport, crmConfigure, crmDelete,
+    // GH #1567 6A: the manager runs the alteration desk; measurement values
+    // are granted per member, not by preset.
+    tailoringManage,
     // Phase G, same rule as the CRM block: before these keys existed the
     // project pages gated on requireMember, so every manager could already
     // open them and do everything on them. Introducing a permission must not

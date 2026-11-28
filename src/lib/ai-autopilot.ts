@@ -6,6 +6,7 @@
  */
 
 import { ACTION_CATALOG, type ActionMeta, type ActionType } from "./ai";
+import { requiresHumanApproval } from "./ai-approval-policy";
 
 export const AUTOPILOT_CATEGORIES = ["inventory", "pricing", "money", "customer", "waste", "website", "messaging"] as const;
 export type AutopilotCategory = (typeof AUTOPILOT_CATEGORIES)[number];
@@ -133,6 +134,9 @@ export interface AutopilotAmountContext {
 }
 
 const REASONS: Record<string, string> = {
+  // GH #1567 F7 — financial/stock writes always wait for a human.
+  human_approval_required:
+    "عملیات مالی/انباری پیشنهادی هوش مصنوعی بدون تأیید انسانی اجرا نمی‌شود؛ پیشنهاد برای تأیید شما نگه داشته شد.",
   action_not_eligible: "این اقدام هرگز به‌صورت خودکار اجرا نمی‌شود و همیشه به تأیید شما نیاز دارد.",
   unknown_action: "این اقدام شناخته نشد.",
   approval_requested: "شما برای این کار «قبل از ثبت بپرس» را انتخاب کرده‌اید.",
@@ -181,6 +185,8 @@ export function evaluateAutopilotProposal(input: {
 }): AutopilotDecision {
   const { meta, payload, setting, appliedTodayInCategory, context } = input;
 
+  // GH #1567 F7 — before any cap: no unattended financial/stock write.
+  if (requiresHumanApproval(meta.type)) return defer("human_approval_required");
   if (!meta.autopilotCategory || !meta.executor) return defer("action_not_eligible");
   if (!setting.enabled) return defer("category_disabled");
   if (appliedTodayInCategory >= setting.dailyActionLimit) return defer("daily_limit_reached");
@@ -375,6 +381,8 @@ export function evaluateUnattendedAction(input: UnattendedActionInput): Autopilo
   // that simply has no executor, which `evaluateAutopilotProposal` reports as
   // `action_not_eligible` below.
   if (!meta) return defer("unknown_action");
+  // 1b — GH #1567 F7: a financial/stock write never runs unattended.
+  if (requiresHumanApproval(meta.type)) return defer("human_approval_required");
   // 2 — the owner opted this piece of work into unattended writes at all.
   if (input.approvalMode !== "auto") return defer("approval_requested");
   // 3 — an unattended write is never anonymous.

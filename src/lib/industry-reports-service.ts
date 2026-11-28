@@ -277,26 +277,51 @@ export const repairReportPage = (locationId: string, options: { from?: string; t
  * by a posting rule. Neither path writes the other, so the union below counts
  * every sale exactly once. A voided online line (a reversed order) drops out,
  * and an online line is dated by its own `occurred_at`, not the import's.
+ *
+ * GH #1567 F4 — returns come off both sides: every counter return and website
+ * refund writes `sale_return_facts` (migration 0328) with the quantity, the
+ * contra-revenue share and the COGS it actually reversed, dated by the return
+ * — so the report nets exactly as the ledger does (a damaged return reduces
+ * quantity and revenue but reverses no COGS; an exchange returns quantity
+ * with no revenue). A return of a later-reversed (voided) line drops out with
+ * its sale. An online line therefore contributes its full `cogs_rial`; what
+ * a refund restored is in its return fact (legacy refunds were backfilled).
+ *
+ * GH #1567 C6 — a backfilled pre-0328 return (`amounts_known = false`) nets
+ * its quantity but not its revenue share, which was never recorded per line.
+ * `unknown_return_qty` carries how many returned units that is, so a row (and
+ * any total over it) is reported as incomplete — its revenue and margin are an
+ * upper bound — instead of being presented as exact.
  * `$1` business, `$2` branch, `$3`/`$4` from/to dates, `$5` trade prefix.
  */
 const SALE_FACTS_CTE = `revenue AS (
-        SELECT item_id, SUM(quantity_sold) AS quantity_sold, SUM(net_revenue) AS net_revenue
+        SELECT item_id, SUM(quantity_sold) AS quantity_sold, SUM(net_revenue) AS net_revenue,
+               SUM(unknown_return_qty) AS unknown_return_qty
           FROM (
             SELECT e.source_id AS item_id,
                    (e.payload->>'quantity')::numeric AS quantity_sold,
-                   (e.payload->>'net')::numeric      AS net_revenue
+                   (e.payload->>'net')::numeric      AS net_revenue,
+                   0::numeric                         AS unknown_return_qty
               FROM domain_events e
              WHERE e.business_id = $1 AND e.location_id = $2
                AND e.event_type = $5 || '.sale_revenue'
                AND ($3::date IS NULL OR e.created_at >= $3::date)
                AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
             UNION ALL
-            SELECT f.item_id, f.quantity, f.net_rial::numeric
+            SELECT f.item_id, f.quantity, f.net_rial::numeric, 0::numeric
               FROM online_sale_lines f
               JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
              WHERE f.location_id = $2 AND f.item_id IS NOT NULL
                AND ($3::date IS NULL OR f.occurred_at >= $3::date)
                AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
+            UNION ALL
+            SELECT rf.item_id, -trim_scale(rf.quantity), -rf.net_rial::numeric,
+                   CASE WHEN rf.amounts_known THEN 0 ELSE trim_scale(rf.quantity) END
+              FROM sale_return_facts rf
+              JOIN order_items oi ON oi.id = rf.order_item_id AND oi.status <> 'voided'
+             WHERE rf.business_id = $1 AND rf.location_id = $2
+               AND ($3::date IS NULL OR rf.occurred_at >= $3::date)
+               AND ($4::date IS NULL OR rf.occurred_at < ($4::date + 1))
           ) facts
          GROUP BY item_id
       ), cost AS (
@@ -309,12 +334,19 @@ const SALE_FACTS_CTE = `revenue AS (
                AND ($3::date IS NULL OR e.created_at >= $3::date)
                AND ($4::date IS NULL OR e.created_at < ($4::date + 1))
             UNION ALL
-            SELECT f.item_id, (f.cogs_rial - f.restored_cogs_rial)::numeric
+            SELECT f.item_id, f.cogs_rial::numeric
               FROM online_sale_lines f
               JOIN order_items oi ON oi.id = f.order_item_id AND oi.status <> 'voided'
              WHERE f.location_id = $2 AND f.item_id IS NOT NULL
                AND ($3::date IS NULL OR f.occurred_at >= $3::date)
                AND ($4::date IS NULL OR f.occurred_at < ($4::date + 1))
+            UNION ALL
+            SELECT rf.item_id, -rf.cogs_rial::numeric
+              FROM sale_return_facts rf
+              JOIN order_items oi ON oi.id = rf.order_item_id AND oi.status <> 'voided'
+             WHERE rf.business_id = $1 AND rf.location_id = $2
+               AND ($3::date IS NULL OR rf.occurred_at >= $3::date)
+               AND ($4::date IS NULL OR rf.occurred_at < ($4::date + 1))
           ) facts
          GROUP BY item_id
       )`;
@@ -328,6 +360,18 @@ export interface VariantSalesRow {
   netRevenue: number;
   cogs: number;
   margin: number;
+  /**
+   * GH #1567 C6 — returned units whose revenue share is unknown (pre-0328
+   * history). When not "0" the row's revenue and margin are incomplete.
+   */
+  unknownReturnQuantity: string;
+  revenueComplete: boolean;
+}
+
+/** GH #1567 C6 — the completeness pair every sale-facts row carries. */
+function completeness(unknownReturnQty: string | null | undefined): { unknownReturnQuantity: string; revenueComplete: boolean } {
+  const unknownReturnQuantity = unknownReturnQty && Number(unknownReturnQty) !== 0 ? unknownReturnQty : "0";
+  return { unknownReturnQuantity, revenueComplete: unknownReturnQuantity === "0" };
 }
 
 /**
@@ -352,6 +396,7 @@ async function readVariantSalesAnalysis(
     quantity_sold: string;
     net_revenue: string;
     cogs: string;
+    unknown_return_qty: string;
   }>(
     `WITH ${SALE_FACTS_CTE}
       SELECT i.id AS item_id, i.name AS item_name, p.name AS parent_name,
@@ -362,7 +407,8 @@ async function readVariantSalesAnalysis(
              ) AS attributes,
              COALESCE(r.quantity_sold, 0)::text AS quantity_sold,
              COALESCE(r.net_revenue, 0)::text   AS net_revenue,
-             COALESCE(c.cogs, 0)::text          AS cogs
+             COALESCE(c.cogs, 0)::text          AS cogs,
+             COALESCE(r.unknown_return_qty, 0)::text AS unknown_return_qty
         FROM revenue r
         JOIN items i ON i.id = r.item_id
         LEFT JOIN items p ON p.id = i.parent_item_id
@@ -385,6 +431,7 @@ async function readVariantSalesAnalysis(
       netRevenue,
       cogs,
       margin: netRevenue - cogs,
+      ...completeness(r.unknown_return_qty),
     };
   }) };
 }
@@ -402,6 +449,9 @@ export interface BrandSalesRow {
   netRevenue: number;
   cogs: number;
   margin: number;
+  /** GH #1567 C6 — see VariantSalesRow. */
+  unknownReturnQuantity: string;
+  revenueComplete: boolean;
 }
 
 /**
@@ -422,12 +472,14 @@ async function readBrandSalesAnalysis(
     quantity_sold: string;
     net_revenue: string;
     cogs: string;
+    unknown_return_qty: string;
   }>(
     `WITH ${SALE_FACTS_CTE}
       SELECT i.brand_id, br.name AS brand_name,
              COALESCE(SUM(r.quantity_sold), 0)::text AS quantity_sold,
              COALESCE(SUM(r.net_revenue), 0)::text   AS net_revenue,
-             COALESCE(SUM(c.cogs), 0)::text          AS cogs
+             COALESCE(SUM(c.cogs), 0)::text          AS cogs,
+             COALESCE(SUM(r.unknown_return_qty), 0)::text AS unknown_return_qty
         FROM revenue r
         JOIN items i ON i.id = r.item_id
         LEFT JOIN item_brands br ON br.id = i.brand_id
@@ -449,6 +501,7 @@ async function readBrandSalesAnalysis(
       netRevenue,
       cogs,
       margin: netRevenue - cogs,
+      ...completeness(r.unknown_return_qty),
     };
   }) };
 }

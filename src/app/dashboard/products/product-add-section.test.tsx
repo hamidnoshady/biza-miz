@@ -310,4 +310,36 @@ describe("ProductAddSection attribute drafts", () => {
       galleryMediaIds: [galleryId],
     });
   });
+
+  it("generates the size × colour matrix into variant rows without duplicating existing combos (#1567)", async () => {
+    const sizeId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const colorId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const size: AttributeDefinition = { ...definition, id: sizeId, name: "سایز", options: ["M", "L"] };
+    const color: AttributeDefinition = { ...definition, id: colorId, name: "رنگ", options: ["مشکی"] };
+    installFetch([size, color]);
+    const user = userEvent.setup();
+    render(<ProductAddSection draftScope="business-1:branch-a" />);
+
+    await user.click(await screen.findByRole("tab", { name: "تنوع‌ها" }));
+    expect(await screen.findByText("ساخت ماتریس تنوع (سایز × رنگ)")).toBeTruthy();
+
+    await user.selectOptions(screen.getByLabelText("محور اول ماتریس"), sizeId);
+    await user.type(screen.getByLabelText("مقادیر محور اول"), "M{Enter}L");
+    await user.selectOptions(screen.getByLabelText("محور دوم ماتریس"), colorId);
+    await user.type(screen.getByLabelText("مقادیر محور دوم"), "مشکی");
+
+    expect(await screen.findByText(/۲ تنوع ساخته می‌شود/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "ساخت تنوع‌ها" }));
+
+    // No jest-dom in this project — plain DOM assertions (see expense-section).
+    expect((await screen.findByRole("status")).textContent).toContain("۲ تنوع ساخته شد");
+    expect(await screen.findByText("تنوع ۱")).toBeTruthy();
+    expect(await screen.findByText("تنوع ۲")).toBeTruthy();
+
+    // The same grid again adds nothing — the combos already exist.
+    expect(
+      (await screen.findByText(/همهٔ ترکیب‌های این ماتریس از قبل در فرم وجود دارد/)).textContent,
+    ).toBeTruthy();
+    expect(screen.queryByText("تنوع ۳")).toBeNull();
+  });
 });

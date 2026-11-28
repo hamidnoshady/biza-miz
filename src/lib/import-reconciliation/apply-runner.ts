@@ -15,6 +15,7 @@ import { getSetting, SETTING_KEYS } from "../settings";
 import { HOLOO_IMPORT_SOURCE_TYPE, postReconciledHolooVoucherOnClient } from "../integrations/holoo/journal-import-service";
 import type { HolooVoucherLine } from "../integrations/holoo/journal-plan";
 import { finalizeReconciledImportJob } from "../data-transfer/import-service";
+import { appendImportedOpeningStock } from "../item-opening-stock-service";
 import { findActiveRunForConnection, hasNewSourceEventsForRun } from "./entry-guards";
 import {
   applyRun,
@@ -92,6 +93,40 @@ async function resolveCanonicalProductForExternalId(
     [ctx.run.businessId, ctx.run.connectionId, externalId],
   );
   return mapped[0]?.local_id ?? null;
+}
+
+/**
+ * A product created from an external catalogue gets its shelf price and an
+ * empty stock row. The source's stock figure is an opening balance, so it is
+ * proposed on the branch's draft opening-stock document (with no cost — the
+ * reviewer must enter one before it can post) instead of being written to the
+ * shelf with no journal entry (GH #1567 F2).
+ */
+async function seedImportedItemStock(
+  ctx: { client: PoolClient; run: ReconciliationRun; actor: { userId?: string | null } },
+  locationId: string,
+  itemId: string,
+  price: string | null,
+  stockQuantity: string | null | undefined,
+): Promise<void> {
+  await ctx.client.query(
+    `INSERT INTO item_stock (item_id, quantity, unit_price)
+     VALUES ($1, 0, $2)
+     ON CONFLICT (item_id) DO NOTHING`,
+    [itemId, price],
+  );
+  const qty = stockQuantity && /^\d+(?:\.\d+)?$/.test(stockQuantity) ? stockQuantity : null;
+  if (qty && new Decimal(qty).gt(0)) {
+    await appendImportedOpeningStock(ctx.client, {
+      businessId: ctx.run.businessId,
+      locationId,
+      sourceKey: ctx.run.sourceKey,
+      itemId,
+      quantity: new Decimal(qty).toFixed(),
+      unitCost: "0",
+      createdBy: ctx.actor.userId ?? null,
+    });
+  }
 }
 
 function parseOptionalBigInt(value: unknown): bigint | null {
@@ -200,13 +235,7 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
               ctx.client,
             );
             const price = snap.priceRial && /^\d+$/.test(snap.priceRial) && BigInt(snap.priceRial) > 0n ? snap.priceRial : null;
-            const qty = snap.stockQuantity && /^\d+(?:\.\d+)?$/.test(snap.stockQuantity) ? snap.stockQuantity : "0";
-            await ctx.client.query(
-              `INSERT INTO item_stock (item_id, quantity, unit_price)
-               VALUES ($1, $2, $3)
-               ON CONFLICT (item_id) DO NOTHING`,
-              [item.id, qty, price],
-            );
+            await seedImportedItemStock(ctx, locationId, item.id, price, snap.stockQuantity);
             return { canonicalId: item.id };
           }
           const item = await createItem(
@@ -220,13 +249,7 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
             ctx.client,
           );
           const price = snap.priceRial && /^\d+$/.test(snap.priceRial) && BigInt(snap.priceRial) > 0n ? snap.priceRial : null;
-          const qty = snap.stockQuantity && /^\d+(?:\.\d+)?$/.test(snap.stockQuantity) ? snap.stockQuantity : "0";
-          await ctx.client.query(
-            `INSERT INTO item_stock (item_id, quantity, unit_price)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (item_id) DO NOTHING`,
-            [item.id, qty, price],
-          );
+          await seedImportedItemStock(ctx, locationId, item.id, price, snap.stockQuantity);
           return { canonicalId: item.id };
         }
         // Food-service fallback: insert into menu_items
@@ -396,24 +419,24 @@ export async function applyReconciliationRunWithDomainHandlers(input: {
             targetItemId = created.id;
           }
 
-          if (snap.kind === "movement") {
-            await ctx.client.query(
-              `INSERT INTO item_stock (item_id, quantity, unit_cost)
-               VALUES ($1::uuid, $2, $3)
-               ON CONFLICT (item_id) DO UPDATE
-                 SET quantity = item_stock.quantity + EXCLUDED.quantity`,
-              [targetItemId, qty.toString(), unitCostBig > 0n ? unitCostStr : null],
-            );
-          } else {
-            await ctx.client.query(
-              `INSERT INTO item_stock (item_id, quantity, unit_cost)
-               VALUES ($1::uuid, $2, $3)
-               ON CONFLICT (item_id) DO UPDATE
-                 SET quantity = EXCLUDED.quantity,
-                     unit_cost = COALESCE(item_stock.unit_cost, EXCLUDED.unit_cost)`,
-              [targetItemId, qty.toString(), unitCostBig > 0n ? unitCostStr : null],
-            );
-          }
+          // GH #1567 F2 — imported retail stock never lands on the shelf
+          // without its ledger effect. An opening snapshot becomes a line on
+          // the branch's draft opening-stock document (reviewed and posted as
+          // Dr inventory / Cr opening equity, exactly once). A bare movement
+          // has no document behind it (no supplier, customer or count), so
+          // there is nothing to post it against: it is refused for review
+          // instead of silently changing quantity.
+          if (snap.kind === "movement") throw new Error("retail_stock_movement_requires_document");
+          if (qty.lt(0)) throw new Error("invalid_quantity");
+          await appendImportedOpeningStock(ctx.client, {
+            businessId: ctx.run.businessId,
+            locationId,
+            sourceKey: ctx.run.sourceKey,
+            itemId: targetItemId,
+            quantity: qty.toFixed(),
+            unitCost: unitCostStr,
+            createdBy: ctx.actor.userId ?? null,
+          });
           return { canonicalId: targetItemId };
         }
 

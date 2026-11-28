@@ -22,6 +22,8 @@ interface Entry {
   status: "proposed" | "processing" | "applied" | "failed" | "dismissed" | "reverted";
   deferredReason: string | null;
   payload: Record<string, unknown>;
+  /** GH #1567 F7 — the approval hash of `payload` (gated actions only). */
+  payloadHash?: string | null;
   createdAt: string;
   revertedAt: string | null;
 }
@@ -121,7 +123,7 @@ export function AiAutopilotActivity() {
         title: entry.actionTitle,
         summary: entry.actionSummary,
         payload: entry.payload,
-      }, entry.id);
+      }, entry.id, undefined, entry.payloadHash ?? null);
       if (!outcome.ok) {
         toast.error(`ثبت انجام نشد. ${outcome.detail}`.trim());
         return;

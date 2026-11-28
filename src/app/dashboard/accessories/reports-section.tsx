@@ -16,6 +16,8 @@ interface VariantSalesRow {
   netRevenue: number;
   cogs: number;
   margin: number;
+  /** GH #1567 C6 — returned units with an unknown revenue share (pre-0328 history). */
+  unknownReturnQuantity?: string;
 }
 
 export function ReportsSection({ apiBase = "/api/accessories" }: { apiBase?: string }) {
@@ -63,7 +65,11 @@ export function ReportsSection({ apiBase = "/api/accessories" }: { apiBase?: str
               </div>
             </div>
             <div className="text-xs text-muted-foreground">
-              فروش {formatQuantity(row.quantitySold)} عدد — درآمد {money.format(row.netRevenue)} / بهای تمام‌شده{" "}
+              فروش {formatQuantity(row.quantitySold)} عدد — درآمد {money.format(row.netRevenue)}
+              {row.unknownReturnQuantity && row.unknownReturnQuantity !== "0"
+                ? ` (ناقص: ${formatQuantity(row.unknownReturnQuantity)} عدد مرجوعی با مبلغ نامعلوم)`
+                : ""}{" "}
+              / بهای تمام‌شده{" "}
               {money.format(row.cogs)}
               <span className="ms-2 font-semibold text-foreground">حاشیه {money.format(row.margin)}</span>
             </div>

@@ -87,6 +87,16 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   // (the entry that invoice posts). Classifying them as their own declaration
   // would bill twice for one document.
   agency: keys("operations.shared"),
+  // GH #1567 6A — the alteration desk and encrypted measurements. Operational
+  // registers like agency's: the money a job earns is the linked ordinary
+  // order (`orders`/`sales`) and its ledger entry, so it is not billed twice.
+  tailoring: keys("operations.shared"),
+  // GH #1567 6B — fashion production orders and their BOMs move stock and post
+  // to WIP / inventory, the same inventory declaration as `inventory`/`stock`.
+  "production-orders": keys("accounting.inventory"),
+  "production-boms": keys("accounting.inventory"),
+  "size-packs": keys("accounting.inventory"),
+  "consignment-contracts": keys("accounting.inventory"),
   knowledge: keys("operations.shared"),
   support: keys("operations.shared"),
   "support-access": keys("operations.shared"),
@@ -104,6 +114,10 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   connections: keys("operations.shared"),
   "tools-fittings": keys("retail.trades"),
   haberdashery: keys("retail.trades"),
+  // Issue #1567 — a fashion shop's counter and variant board are the same
+  // retail capability the other trades bill under: `/api/fashion` is the
+  // shared trade-goods routes under a new segment, not a charged feature.
+  fashion: keys("retail.trades"),
   merchandising: keys("retail.trades"),
   jewelry: keys("retail.trades"),
   watch: keys("retail.trades"),

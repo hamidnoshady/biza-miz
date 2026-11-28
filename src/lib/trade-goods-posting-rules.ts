@@ -2,13 +2,14 @@
  * Phase 38 — trade-goods sale posting rules, registered against the
  * domain-event/posting engine.
  *
- * Wholesale, tools & fittings and haberdashery are all ordinary finished
- * goods, so each gets the same two rules accessories/cosmetics get — the
- * plain revenue/COGS pair — differing only in the accounts they post to. The
- * trade is encoded in the event type (`wholesale.sale_revenue`,
- * `tools_fittings.sale_revenue`, `haberdashery.sale_revenue`, …) exactly like
- * `accessory.*`/`cosmetic.*`, so a sale is always routed to its own chart of
- * accounts and reports can never mix two trades.
+ * Wholesale, tools & fittings, haberdashery and (issue #1567) fashion are
+ * all ordinary finished goods, so each gets the same two rules
+ * accessories/cosmetics get — the plain revenue/COGS pair — differing only in
+ * the accounts they post to. The trade is encoded in the event type
+ * (`wholesale.sale_revenue`, `tools_fittings.sale_revenue`,
+ * `haberdashery.sale_revenue`, `fashion_apparel.sale_revenue`, …) exactly
+ * like `accessory.*`/`cosmetic.*`, so a sale is always routed to its own
+ * chart of accounts and reports can never mix two trades.
  *
  *   - {trade}.sale_revenue: Debit Cash/Bank-Clearing/AR by payment method for
  *     the total; Credit {trade}SalesRevenue for the net (post-discount) line
@@ -96,6 +97,9 @@ function saleMemo(trade: TradeGoodsIndustry): string {
       return "فروش ابزار و یراق‌آلات";
     case "haberdashery":
       return "فروش لوازم خرازی";
+    // Issue #1567
+    case "fashion_apparel":
+      return "فروش پوشاک، کیف و کفش";
   }
 }
 
@@ -107,5 +111,8 @@ function cogsMemo(trade: TradeGoodsIndustry): string {
       return "بهای تمام‌شده ابزار و یراق فروخته‌شده";
     case "haberdashery":
       return "بهای تمام‌شده لوازم خرازی فروخته‌شده";
+    // Issue #1567
+    case "fashion_apparel":
+      return "بهای تمام‌شده پوشاک و کالای مد فروخته‌شده";
   }
 }

@@ -80,6 +80,8 @@
  * actionable Persian message *before* anything is written — a blocked void
  * never leaves the invoice half-reversed.
  */
+import { parseConsignmentSnapshot, voidConsignedSale } from "./fashion-consignment-service";
+import { postedCogsValue, restoreFungibleStock } from "./item-stock-valuation";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { postExactMirrorEntry } from "./ledger-service";
@@ -371,6 +373,23 @@ export async function voidRetailInvoice(
       continue;
     }
 
+    // GH #1567 6D — a consigned (امانی) line: its sale entry was reversed
+    // above; the units go back to the owner's consignment shelf, never to
+    // item_stock (which they never left).
+    const consignment = snapshot.kind === "stocked" ? parseConsignmentSnapshot(snapshot.consignment) : null;
+    if (consignment) {
+      await voidConsignedSale(client, {
+        businessId: params.businessId,
+        locationId: params.locationId,
+        orderId: params.orderId,
+        orderItemId: line.id,
+        snapshot: consignment,
+        createdBy: params.actorId,
+      });
+      await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [line.id, params.reason]);
+      continue;
+    }
+
     // Restore the quantity this line consumed.
     //
     // A batch-tracked cosmetics line restores through the canonical engine:
@@ -394,10 +413,16 @@ export async function voidRetailInvoice(
         sourceId: params.orderId,
       });
     } else {
-      await client.query(
-        `UPDATE item_stock SET quantity = quantity + $2, updated_at = now() WHERE item_id = $1`,
-        [line.item_id, snapshot.quantity],
-      );
+      // F1 (GH #1567): put back the exact value the sale's COGS relieved,
+      // together with the quantity — not quantity alone, which left
+      // `total_value_rial` short for every later movement.
+      const value = await postedCogsValue(client, params.businessId, snapshot.ledgerEntryIds ?? []);
+      await restoreFungibleStock(client, {
+        itemId: line.item_id!,
+        quantity: String(snapshot.quantity),
+        value: value.toString(),
+        fallbackToAverage: true,
+      });
     }
 
     await client.query(`UPDATE order_items SET status = 'voided', void_reason = $2 WHERE id = $1`, [

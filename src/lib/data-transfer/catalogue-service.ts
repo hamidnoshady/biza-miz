@@ -16,7 +16,7 @@ import {
   productCanonicalToken, ReconciliationError, revalidateRun, stagePlannedItems,
   type Actor, type ApplyContext, type ReconciliationRun, type StagedItem,
 } from "../import-reconciliation/service";
-import { catalogueRecords, type CatalogueRecord } from "./catalogue-plan";
+import { catalogueChildOptions, catalogueRecords, sameVariantOptions, type CatalogueRecord } from "./catalogue-plan";
 import { normalizeBrandFallback, parseCatalogueRows, type CatalogueMapping, type CatalogueRow, type CatalogueSheet, type CatalogueTarget } from "./catalogue-profile";
 import {
   planCatalogueValues,
@@ -121,7 +121,8 @@ function childRecords(record: CatalogueRecord): CatalogueRecord[] {
     domain: "product", externalId: `sku:${row.sku}`, sku: row.sku,
     name: row.title, kind: "variant_child", tracking: "none",
     barcodes: row.values.barcode ? [row.values.barcode] : [],
-    parentExternalId: record.externalId, variantOptions: { [record.family!.axis]: row.values.option! },
+    parentExternalId: record.externalId,
+    variantOptions: Object.fromEntries(catalogueChildOptions(record.family!, row).map(pair => [pair.name, pair.value])),
     catalogue: row,
   }));
 }
@@ -136,12 +137,10 @@ async function familyLinks(client: PoolClient, run: ReconciliationRun, parent: C
     if (candidates.length !== 1) return null;
     const target = candidates[0];
     const mapped = ctx.mappings.get(child.externalId!);
-    const variants = Object.entries(target.variantOptions ?? {});
-    const [name, option] = variants[0] ?? [];
+    const variants = Object.entries(target.variantOptions ?? {}).map(([name, value]) => ({ name, value: String(value) }));
     if ((mapped && mapped !== target.id) || !rows.some(row => row.id === target.id) ||
         target.kind !== "variant_child" || target.tracking !== "none" || !target.isActive ||
-        variants.length !== 1 || attributeComparisonKey(name ?? "") !== attributeComparisonKey(parent.family!.axis) ||
-        attributeComparisonKey(option ?? "") !== attributeComparisonKey(child.catalogue.values.option!) ||
+        !sameVariantOptions(catalogueChildOptions(parent.family!, child.catalogue), variants) ||
         (child.barcodes?.length && !child.barcodes.every(code => target.barcodes.includes(code)))) return null;
     return { child, id: target.id };
   });
@@ -151,13 +150,16 @@ async function familyLinks(client: PoolClient, run: ReconciliationRun, parent: C
 export async function stageCatalogue(owner: CatalogueOwner, input: {
   sheet: CatalogueSheet; mapping: CatalogueMapping; fileName: string; sourceName: string; fingerprint: string;
   fallbackBrand?: string | null; duplicateRows: number[]; axis: string;
+  /** GH #1567 F6: every variant axis in order; wins over `axis` when given. */
+  axes?: string[];
   valueMode?: CatalogueValueMode; currency?: CatalogueCurrency;
 }) {
   const fallbackBrand = normalizeBrandFallback(input.fallbackBrand);
   const valueMode: CatalogueValueMode = input.valueMode ?? "catalogue_only";
   const currency: CatalogueCurrency = input.currency === "toman" ? "toman" : "rial";
   const { rows, totals, valueTotals } = parseCatalogueRows(input.sheet, input.mapping, { fallbackBrand, currency });
-  const planned = catalogueRecords(rows, owner.target, new Set(input.duplicateRows), input.axis);
+  const axes = input.axes?.length ? input.axes : [input.axis];
+  const planned = catalogueRecords(rows, owner.target, new Set(input.duplicateRows), axes);
   return withTenantTransaction(owner.businessId, async client => {
     await lockCatalogueBranch(client, owner.locationId);
     const run = await openRun({
@@ -167,7 +169,7 @@ export async function stageCatalogue(owner: CatalogueOwner, input: {
       profileKey: CATALOGUE_PROFILE, profileVersion: VERSION,
       scope: { target: owner.target, valueMode, currency },
       evidence: { fileName: input.fileName, sheet: input.sheet.name, columns: input.sheet.columns, mapping: input.mapping,
-        sourceName: input.sourceName, fallbackBrand, axis: input.axis, totals, valueTotals, valueMode, currency },
+        sourceName: input.sourceName, fallbackBrand, axis: axes[0] ?? "", axes, totals, valueTotals, valueMode, currency },
     });
     const records = planned.map(entry => entry.record);
     const { ctx } = await loadProductContext(client, run, [...records, ...records.flatMap(childRecords)]);
@@ -273,7 +275,7 @@ async function createCatalogueItem(ctx: ApplyContext) {
     name: record.name, sku: record.sku, ...(record.family ? {} : { barcode: row.values.barcode }),
     publishStatus: "draft", variants: children.map(child => ({
       name: child.name, sku: child.sku, barcode: child.catalogue.values.barcode,
-      attributes: [{ name: record.family!.axis, value: child.catalogue.values.option }],
+      attributes: catalogueChildOptions(record.family!, child.catalogue),
     })),
   });
   if (!input.ok) throw new ReconciliationError("catalogue_product_invalid");

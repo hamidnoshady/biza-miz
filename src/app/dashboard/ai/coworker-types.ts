@@ -36,6 +36,8 @@ export interface CoworkerRunActionView {
   status: "pending" | "applied" | "failed" | "rejected" | "skipped";
   heldReason: string | null;
   error: string | null;
+  /** GH #1567 F7 — present on a pending financial/stock action; sent back with the approval. */
+  approvalHash?: string | null;
 }
 
 export interface CoworkerRunView {

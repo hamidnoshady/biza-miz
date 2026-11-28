@@ -170,6 +170,16 @@ describe("POST /api/stock/purchases — stable 400s before any database work (is
     expect(res.status).toBe(409);
     expect((await res.json()).error).toBe("idempotency_conflict");
   });
+
+  it("names the refusal when the variant holds consigned units (GH #1567 C5), instead of a raw trigger message", async () => {
+    vi.mocked(stockService.receiveItemPurchase).mockRejectedValue(
+      Object.assign(new Error("consigned_variant_owned_stock"), { code: "P0001" }));
+    const res = await POST(post({ lines: [line()], idempotencyKey: "stable-key-456" }));
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe("consigned_variant_owned_stock");
+    expect(body.message).toMatch(/امانی/);
+  });
 });
 
 describe("GET /api/stock/purchases — server-side filters and exact text money (issue #915)", () => {

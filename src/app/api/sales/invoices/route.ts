@@ -22,6 +22,8 @@ import { enqueueHolooSaleForOrder } from "@/lib/integrations/holoo/outbox-produc
 import { ledgerSettlementFor, type PaymentSettlement } from "@/lib/payment-methods";
 import { OrderPaymentRoutingError } from "@/lib/order-payment-routing-service";
 import { ensureOrderNumberLease } from "@/lib/order-number-service";
+import { sizePackErrorMessage } from "@/lib/fashion-size-pack-messages";
+import { expandSizePackInvoiceLines, recordSizePackSales, SizePackError, type SizePackInvoiceLine } from "@/lib/fashion-size-pack-service";
 import { MAX_RETAIL_TENDERS } from "@/lib/retail-tenders";
 import { toLatinDigits, toPersianDigits } from "@/lib/digits";
 import { holdsPermission } from "@/app/api/automotive/guard";
@@ -230,7 +232,9 @@ export const POST = withTenantScope(async (request: NextRequest) => {
 
   // The service validates each line against the industry; this only checks the
   // shape is a line at all, so a malformed body fails before a transaction opens.
-  const lines = body.lines as RetailInvoiceLineInput[];
+  // GH #1567 6C — a fashion till may also send `size_pack` lines; they are
+  // expanded into per-variant lines inside the sale transaction below.
+  const lines = body.lines as Array<RetailInvoiceLineInput | SizePackInvoiceLine>;
   if (!lines.every((line) => line && typeof line === "object" && typeof line.kind === "string")) {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
@@ -242,7 +246,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   // `vehicles.override_min_price`. A caller that asks for the override without
   // holding it is refused, not quietly obeyed; any other caller's line keeps the
   // floor intact.
-  const vehicleLines = lines.filter((line) => line.kind === "vehicle");
+  const vehicleLines = lines.filter((line): line is Extract<RetailInvoiceLineInput, { kind: "vehicle" }> => line.kind === "vehicle");
   if (vehicleLines.length > 0) {
     if (!(await holdsPermission(session, PERMISSIONS.vehiclesSell))) {
       return NextResponse.json({ error: "forbidden" }, { status: 403 });
@@ -283,11 +287,16 @@ export const POST = withTenantScope(async (request: NextRequest) => {
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
+    const packPlan = await expandSizePackInvoiceLines(
+      client,
+      { businessId: session.businessId, locationId: location.id, industry, clientRequestId, createdBy: session.sub ?? null },
+      lines,
+    );
     const invoice = await createRetailInvoice(client, {
       businessId: session.businessId,
       locationId: location.id,
       industry,
-      lines,
+      lines: packPlan.lines,
       tenders,
       customerId,
       note: typeof body.note === "string" ? body.note : null,
@@ -295,6 +304,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
       createdBy: session.sub,
       clientRequestId,
     });
+    await recordSizePackSales(client, packPlan, invoice);
     await enqueueHolooSaleForOrder(client, session.businessId, invoice.orderId);
     await client.query("COMMIT");
     return NextResponse.json({ invoice });
@@ -302,6 +312,12 @@ export const POST = withTenantScope(async (request: NextRequest) => {
     await client.query("ROLLBACK");
     if (err instanceof OrderPaymentRoutingError) {
       return NextResponse.json({ error: err.code }, { status: err.status });
+    }
+    if (err instanceof SizePackError) {
+      return NextResponse.json(
+        { error: err.code, message: sizePackErrorMessage(err.code, err.detail), ...(err.detail ? { detail: err.detail } : {}) },
+        { status: err.status },
+      );
     }
     if (err instanceof RetailRequestConflictError) {
       // Same key, different payload (issue #913 item 2) — loud refusal.

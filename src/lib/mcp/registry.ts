@@ -311,13 +311,13 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // POS
   { actionType: "menu.item.priceUpdate", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "menu.item.disable", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "order.discount.apply", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "order.discount.apply", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   // Batch BJ — ledger corrections on a sale: high/always-approve like every
   // other posting lane.
   { actionType: "order.amend.apply", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "order.return.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "inventory.reorder.draftPO", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "inventory.adjustment.propose", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "inventory.adjustment.propose", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   // Financial posting — this books an expense into the ledger RIGHT NOW, not
   // a draft. Issue #883 step-up: always human-approved, even on apply mode.
   { actionType: "expense.categorize", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
@@ -325,10 +325,10 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // key and posts nothing to money (settlement is deliberately not a verb
   // here — payment orchestration is route-bound), and shifts are clock
   // records under the manager's clock: all follow connection mode.
-  { actionType: "order.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "order.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "shift.start", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "shift.end", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "shift.close", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "shift.close", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   // Production consumes stock and posts its cost to the ledger — same step-up.
   { actionType: "inventory.production.run", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   // Journal drafts are drafts — they post nothing until the books flow takes
@@ -350,9 +350,9 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "ar.receipt.record", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "ap.payment.record", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "ap.payment.reverse", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
-  { actionType: "cheque.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "cheque.create", kind: "write", app: "accounting", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "cheque.transition", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
-  { actionType: "installment.plan.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "installment.plan.create", kind: "write", app: "accounting", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "installment.item.pay", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "reconciliation.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
   { actionType: "reconciliation.complete", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
@@ -361,7 +361,7 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "payroll.run.void", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "payroll.advance.record", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "payroll.advance.void", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
-  { actionType: "fixed-asset.create", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "fixed-asset.create", kind: "write", app: "accounting", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "fixed-asset.depreciate", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   { actionType: "fixed-asset.dispose", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
   // Batch C — POS catalogue and barcode hygiene (approval mode = write tool's
@@ -398,7 +398,7 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // receive posts stock + ledger and delete erases a business record, so both
   // are always_approve/high like supplier.return.create before them.
   { actionType: "purchase.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "purchase.lifecycle", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "purchase.lifecycle", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "purchase.receive", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "purchase.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   { actionType: "supplier.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
@@ -483,8 +483,8 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "courier.setActive", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "delivery.assign", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "delivery.status.set", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "businessDay.close", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "businessDay.reopen", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "businessDay.close", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "businessDay.reopen", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "businessDay.config.save", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "rollup.push", kind: "write", app: "workspace", risk: "low", approval: "mode" },
   { actionType: "rollup.location.setActive", kind: "write", app: "workspace", risk: "low", approval: "mode" },
@@ -605,7 +605,7 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   { actionType: "account.delete", kind: "write", app: "accounting", risk: "low", approval: "mode" },
   // Batch Z — a register field (source link), not a posting; the asset's
   // depreciate/dispose siblings already carry the gate tier.
-  { actionType: "fixed-asset.set_acquisition", kind: "write", app: "accounting", risk: "low", approval: "mode" },
+  { actionType: "fixed-asset.set_acquisition", kind: "write", app: "accounting", risk: "high", approval: "always_approve" }, // F7 #1567
   // Batch Z2 — same tier as the other payroll money-shaping verbs on the
   // row: settings govern every future run, wage terms change somebody's pay.
   { actionType: "payroll.settings.update", kind: "write", app: "accounting", risk: "high", approval: "always_approve" },
@@ -624,7 +624,7 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch AA — edit re-does a posted count's adjustment inside one transaction
   // (same tier as the create it corrects). Reverse unwinds a count's stock
   // AND its ledger entries — a posting reversal, hence always_approve.
-  { actionType: "inventory.count.edit", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "inventory.count.edit", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "inventory.count.reverse", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
   // Batch AB — templates are boilerplate (mode). Pause is protective (mode).
   // Resume and launch both enter the mass-outbound lane (launch can also
@@ -668,11 +668,11 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // Batch AL1 — jewelry catalog lanes are stock-composition edits (mode);
   // only the stone delete, which erases a costs-carrying component from the
   // item's genealogy, steps up.
-  { actionType: "jewelry.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "jewelry.item.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "jewelry.item.create", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "jewelry.item.update", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "jewelry.stone.add", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "jewelry.stone.delete", kind: "write", app: "pos", risk: "high", approval: "always_approve" },
-  { actionType: "jewelry.item.consign", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "jewelry.item.consign", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   // Batch AL2 — every lane below either posts money (sale/buy-back/installment
   // /payout/layaway deposit+settle) or re-prices the whole stock of a purity
   // (mass price rule). All of them step up on every single call.
@@ -691,25 +691,30 @@ export const MCP_WRITE_REGISTRY: readonly McpWriteRegistryEntry[] = [
   // mode/low like the stock-room screens they mirror.
   { actionType: "cosmetics.brand.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "cosmetics.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "cosmetics.batch.receive", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "cosmetics.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "cosmetics.tester.open", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "cosmetics.batch.receive", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "cosmetics.stock.update", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "cosmetics.tester.open", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "cosmetics.profile.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "cosmetics.matrix.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
   { actionType: "accessories.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "accessories.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "accessories.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "accessories.item.sell", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "accessories.stock.update", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   // Batch AO — trade-goods lanes. Ordinary retail sales only; all mode/low
   // like the stock-room/sell screens they mirror.
   { actionType: "wholesale.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "wholesale.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "wholesale.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "wholesale.item.sell", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "wholesale.stock.update", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "tools_fittings.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "tools_fittings.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "tools_fittings.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "tools_fittings.item.sell", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "tools_fittings.stock.update", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   { actionType: "haberdashery.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "haberdashery.item.sell", kind: "write", app: "pos", risk: "low", approval: "mode" },
-  { actionType: "haberdashery.stock.update", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "haberdashery.item.sell", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "haberdashery.stock.update", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  // Issue #1567 — fashion's lanes are the same shared trade-goods routes,
+  // classified exactly like the three verticals above.
+  { actionType: "fashion_apparel.item.create", kind: "write", app: "pos", risk: "low", approval: "mode" },
+  { actionType: "fashion_apparel.item.sell", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
+  { actionType: "fashion_apparel.stock.update", kind: "write", app: "pos", risk: "high", approval: "always_approve" }, // F7 #1567
   // Batch AP — data-transfer config records are mode/low like every config
   // lane (template/schedule deletes included). Import run/retry is a mass
   // write of tenant rows from a staged file → forced approval every time.
@@ -892,6 +897,7 @@ export function mcpModuleForWriteAction(actionType: string): McpModuleKey {
   if (actionType.startsWith("cosmetics.")) return "cosmetics";
   if (actionType.startsWith("wholesale.")) return "wholesale";
   if (actionType.startsWith("haberdashery.")) return "haberdashery";
+  if (actionType.startsWith("fashion_apparel.")) return "fashion_apparel";
   if (actionType.startsWith("tools_fittings.")) return "tools_fittings";
   if (actionType.startsWith("accessories.")) return "accessories";
   if (
@@ -1028,8 +1034,8 @@ export function mcpTenantEnabledModules(
 
 /**
  * Check whether a tool's owning module is enabled for the tenant.
- * `list_trade_goods_items` is shared across the three trade-goods verticals
- * (`wholesale`, `tools_fittings`, `haberdashery`).
+ * `list_trade_goods_items` is shared across the trade-goods verticals
+ * (`wholesale`, `tools_fittings`, `haberdashery`, `fashion_apparel`).
  */
 export function mcpIsToolModuleEnabled(
   module: McpModuleKey,
@@ -1040,7 +1046,8 @@ export function mcpIsToolModuleEnabled(
     return (
       enabledModules.has("wholesale") ||
       enabledModules.has("tools_fittings") ||
-      enabledModules.has("haberdashery")
+      enabledModules.has("haberdashery") ||
+      enabledModules.has("fashion_apparel")
     );
   }
   return enabledModules.has(module);

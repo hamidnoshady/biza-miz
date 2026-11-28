@@ -76,6 +76,12 @@ const COPY: Record<string, PublicationFailureCopy> = {
     tone: "data",
     retryable: false,
   },
+  publication_embedded_media: {
+    message:
+      "توضیحات این محصول تصویر جاسازی‌شده (data: یا base64) دارد و به فروشگاه ارسال نمی‌شود. تصویر را در کتابخانهٔ رسانه بارگذاری کنید، از توضیحات بردارید و دوباره منتشر کنید.",
+    tone: "data",
+    retryable: false,
+  },
   publication_already_linked: {
     message:
       "این محصول از قبل به محصول دیگری از همین فروشگاه پیوند دارد. برای تغییر پیوند، ابتدا پیوند فعلی را در «مدیریت فروشگاه» بررسی کنید.",

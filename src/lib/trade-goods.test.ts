@@ -12,8 +12,16 @@ import {
 import { WELL_KNOWN_CODES } from "./coa-template";
 
 describe("TRADE_GOODS_INDUSTRIES", () => {
-  it("covers exactly the three new trades and nothing else", () => {
-    expect(TRADE_GOODS_INDUSTRIES).toEqual(["wholesale", "tools_fittings", "haberdashery"]);
+  it("covers exactly the trade-goods trades and nothing else", () => {
+    // Phase 38 opened the set with three trades; issue #1567 adds
+    // `fashion_apparel` for the same reason — a garment/shoe/bag is a
+    // countable finished good sold as a variant child.
+    expect(TRADE_GOODS_INDUSTRIES).toEqual([
+      "wholesale",
+      "tools_fittings",
+      "haberdashery",
+      "fashion_apparel",
+    ]);
   });
 
   it("isTradeGoodsIndustry recognises them and rejects the rest", () => {

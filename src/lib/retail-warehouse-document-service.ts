@@ -63,6 +63,7 @@ import {
 } from "./warehouse-document-register";
 import { receiveStock } from "./accessories-service";
 import { receiveBatch, rollItemStockToBatches } from "./cosmetics-service";
+import { relieveFungibleStock } from "./item-stock-valuation";
 import {
   MAX_RIAL,
   proportionalDepletionValue,
@@ -708,8 +709,8 @@ export async function createRetailWarehouseDocumentInTransaction(
           await client.query(`UPDATE item_stock SET total_value_rial=$2 WHERE item_id=$1`, [line.itemId, sumRows[0].sum]);
         } catch {}
       } else {
-        const { rows: stockRows } = await client.query<{ quantity: string; unit_cost: string | null; total_value_rial: string | null }>(
-          `SELECT quantity::text, unit_cost::text, total_value_rial::text FROM item_stock WHERE item_id = $1 FOR UPDATE`,
+        const { rows: stockRows } = await client.query<{ quantity: string; unit_cost: string | null }>(
+          `SELECT quantity::text, unit_cost::text FROM item_stock WHERE item_id = $1 FOR UPDATE`,
           [line.itemId],
         );
         const stock = stockRows[0];
@@ -721,16 +722,13 @@ export async function createRetailWarehouseDocumentInTransaction(
           throw new InsufficientStockError("موجودی کافی نیست.");
         }
         unitCost = Number(stock.unit_cost);
-        if (stock.total_value_rial != null) {
-          value = proportionalDepletionValue(stock.quantity as QuantityText, stock.total_value_rial as RialText, line.quantity as QuantityText);
-        } else {
-          value = retailLineValue(line.quantity, unitCost);
-        }
+        // F1 (GH #1567): the canonical relief — proportional to the drift-
+        // tolerant carrying basis, quantity and value in one write. Reading a
+        // `total_value_rial` that earlier sales had left stale is what wrote
+        // off 83,333 for a 50,000 unit.
+        const relieved = await relieveFungibleStock(client, { itemId: line.itemId, quantity: line.quantity });
+        value = relieved.value;
         if (BigInt(value) > MAX_RIAL) throw new Error("cost_out_of_range");
-        await client.query(
-          `UPDATE item_stock SET quantity = quantity - $2, updated_at = now(), total_value_rial = CASE WHEN total_value_rial IS NOT NULL THEN GREATEST(total_value_rial - $3::bigint, 0) ELSE NULL END WHERE item_id = $1`,
-          [line.itemId, line.quantity, value],
-        );
       }
     }
 

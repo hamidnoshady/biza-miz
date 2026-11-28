@@ -8,6 +8,7 @@ import {
   type RestaurantModifierGroup,
 } from "../restaurant-menu";
 import type { DesiredProductState, WebsiteLocalProduct } from "./sync";
+import { findEmbeddedMedia, parseMediaUrl } from "../embedded-media-guard";
 
 export interface MenuProjectionInput {
   item: RestaurantMenuItem;
@@ -58,9 +59,15 @@ export function projectMenuItem(input: MenuProjectionInput): {
     product: {
       name: item.name,
       sku: item.sku,
-      description: item.description,
+      // GH #1567 F5 — inline image bytes never leave through the website
+      // projection; the local row keeps them (listed by the embedded-media
+      // report) until the owner moves the image to the media library.
+      description: findEmbeddedMedia(item.description) ? null : item.description,
       imageMediaId: item.imageMediaId,
-      imageUrl: item.imageUrl,
+      imageUrl: (() => {
+        const parsed = parseMediaUrl(item.imageUrl);
+        return parsed.ok ? parsed.value : null;
+      })(),
       sortOrder: item.sortOrder,
       category: category ? {
         sourceId: category.id,

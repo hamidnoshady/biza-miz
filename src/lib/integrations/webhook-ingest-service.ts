@@ -9,6 +9,9 @@
  * (connection_id, entity_type, remote_id) means an `order.updated`/`restored`
  * that arrives after `order.created` is a no-op at the order level too.
  */
+import Decimal from "decimal.js";
+import { allocateProportionally, parseSaleMerchSnapshot, recordSaleReturnFact } from "../sale-return-facts";
+import { restoreFungibleStock } from "../item-stock-valuation";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getPool, query, withoutTenantScope, withTenant } from "../db";
@@ -1728,6 +1731,19 @@ async function ingestRetailRefund(
   }
 
   let recoveredCogsRial = "0";
+  // GH #1567 F4 — what each refunded line gives back to the trade reports:
+  // quantity, the COGS actually restored for it, and its disposition. The
+  // refund's contra-revenue is shared across these once the loop is done.
+  const returnedLines = new Map<string, { itemId: string; quantity: Decimal; cogs: bigint; disposition: "restockable" | "discarded" }>();
+  const noteReturnedLine = (orderItemId: string, itemId: string, take: number, cogs: bigint) => {
+    const prior = returnedLines.get(orderItemId);
+    returnedLines.set(orderItemId, {
+      itemId,
+      quantity: (prior?.quantity ?? new Decimal(0)).plus(take),
+      cogs: (prior?.cogs ?? 0n) + cogs,
+      disposition: restock ? "restockable" : "discarded",
+    });
+  };
 
   let returnId: string | undefined;
   if (orderId) {
@@ -1786,9 +1802,11 @@ async function ingestRetailRefund(
 
         if (!restock) {
           await client.query(`UPDATE online_sale_lines SET returned_quantity = LEAST(quantity, returned_quantity + $2::numeric) WHERE order_item_id = $1`, [item.id, String(take)]);
+          noteReturnedLine(item.id, itemId, take, 0n);
           remaining -= take;
           continue;
         }
+        const cogsBefore = BigInt(recoveredCogsRial);
 
         // Restock the returned quantity. A batch-tracked line has its exact
         // original allocation persisted (migration 0198): each unit goes back
@@ -1845,11 +1863,14 @@ async function ingestRetailRefund(
             cogsRial: fact.cogs_rial,
             restoredCogsRial: fact.restored_cogs_rial,
           }, String(take));
-          if (Number(plan.restock) > 0) {
-            await client.query(
-              `UPDATE item_stock SET quantity = quantity + $2::numeric, updated_at = now() WHERE item_id = $1`,
-              [itemId, plan.restock],
-            );
+          if (Number(plan.restock) > 0 || BigInt(plan.cogsReversalRial) > 0n) {
+            // F1 (GH #1567): quantity and the exact COGS value reversed come
+            // back together.
+            await restoreFungibleStock(client, {
+              itemId,
+              quantity: plan.restock,
+              value: plan.cogsReversalRial,
+            });
           }
           await client.query(
             `UPDATE online_sale_lines
@@ -1863,18 +1884,60 @@ async function ingestRetailRefund(
         } else {
           // Legacy (pre-0209) fungible line: add the returned quantity back and
           // reverse COGS at the running weighted-average cost.
-          await client.query(
-            `UPDATE item_stock SET quantity = quantity + $2, updated_at = now()
-              WHERE item_id = $1`,
-            [itemId, take],
-          );
-          if (unitCost != null && unitCost > 0n) {
-            recoveredCogsRial = (BigInt(recoveredCogsRial) + unitCost * BigInt(take)).toString();
+          const legacyValue = unitCost != null && unitCost > 0n ? unitCost * BigInt(take) : 0n;
+          await restoreFungibleStock(client, {
+            itemId,
+            quantity: String(take),
+            value: legacyValue.toString(),
+            fallbackToAverage: true,
+          });
+          if (legacyValue > 0n) {
+            recoveredCogsRial = (BigInt(recoveredCogsRial) + legacyValue).toString();
           }
         }
 
+        noteReturnedLine(item.id, itemId, take, BigInt(recoveredCogsRial) - cogsBefore);
         remaining -= take;
       }
+    }
+  }
+
+  if (orderId && returnedLines.size > 0) {
+    const entries = [...returnedLines.entries()];
+    const { rows: factRows } = await client.query<{ order_item_id: string; net_rial: string; quantity: string; merch: unknown }>(
+      `SELECT order_item_id::text, net_rial::text, quantity::text, merch
+         FROM online_sale_lines WHERE order_item_id = ANY($1::uuid[])`,
+      [entries.map(([id]) => id)],
+    );
+    const saleFact = new Map(factRows.map((row) => [row.order_item_id, row]));
+    const weights = entries.map(([id, line]) => {
+      const fact = saleFact.get(id);
+      if (!fact || new Decimal(fact.quantity).lte(0)) return 0n;
+      return BigInt(new Decimal(fact.net_rial).times(line.quantity).div(fact.quantity).toFixed(0, Decimal.ROUND_HALF_UP));
+    });
+    // A cancellation (stockOnly) books no contra-revenue; a refund books
+    // exactly meta.net to sales returns below.
+    const shares = allocateProportionally(meta.stockOnly ? 0n : meta.net, weights);
+    const occurredAt =
+      parseRemoteInstant(refund.date_created_gmt, { assumeUtc: true }) ??
+      parseRemoteInstant(refund.date_created, { assumeUtc: false }) ??
+      null;
+    for (const [index, [orderItemId, line]] of entries.entries()) {
+      await recordSaleReturnFact(client, {
+        businessId: meta.businessId,
+        locationId: meta.locationId,
+        orderId,
+        orderItemId,
+        itemId: line.itemId,
+        factSource: "online_refund",
+        sourceId: `${connection.id}:${meta.remoteId}`,
+        quantity: line.quantity.toFixed(),
+        netRial: shares[index],
+        cogsRial: line.cogs,
+        disposition: line.disposition,
+        merch: parseSaleMerchSnapshot(saleFact.get(orderItemId)?.merch),
+        occurredAt,
+      });
     }
   }
 

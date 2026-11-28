@@ -1,4 +1,6 @@
 import Decimal from "decimal.js";
+import { parseConsignmentSnapshot, returnConsignedUnits } from "./fashion-consignment-service";
+import { allocateProportionally, parseSaleMerchSnapshot, recordSaleReturnFact } from "./sale-return-facts";
 import type { PoolClient } from "pg";
 import {
   boundedRialText,
@@ -18,14 +20,18 @@ import {
   type NormalizedCustomerReturnLine,
 } from "./customer-return-domain";
 import { isLotBased } from "./inventory-costing";
+import { restoreFungibleStock } from "./item-stock-valuation";
 import { getCostingMethod, getInventorySystem } from "./inventory-service";
 import { unitCostFromValue } from "./inventory-reversal";
 import { liveSaleInventoryEventId } from "./order-amendment-service";
 import {
   postExactCustomerRefundEntry,
+  postExactJournalEntry,
   postExactOperationalInventoryEntry,
   resolveOrderReturnAttribution,
 } from "./ledger-service";
+import { recomputeLastSoldAt } from "./retail-stock-service";
+import { restoreOrderItemBatchStock } from "./retail-batch-inventory";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { systemJournalMemo } from "./journal-memo";
 import { appendSyncOutboxEvent } from "./sync-outbox";
@@ -112,10 +118,24 @@ async function findDuplicateReturn(
       WHERE l.customer_return_id=$1`,
     [existing.id],
   );
+  // Items-model returns recover value through a journal reversal rather than
+  // warehouse allocations (their sales never had snapshots); report that so a
+  // replay answers exactly what the first call did. The two are mutually
+  // exclusive per return, so only fall back when no allocation exists.
+  let recoveredValue = recoveredRows[0]?.value ?? "0";
+  if (BigInt(recoveredValue) === 0n) {
+    const { rows: reversalRows } = await client.query<{ value: string }>(
+      `SELECT COALESCE(sum(jl.debit),0)::text AS value
+         FROM journal_entries je JOIN journal_lines jl ON jl.entry_id=je.id
+        WHERE je.source_type='customer_return' AND je.source_id=$1 AND je.posting_kind='cogs_reversal'`,
+      [existing.id],
+    );
+    recoveredValue = reversalRows[0]?.value ?? "0";
+  }
   return {
     id: existing.id,
     refundAmount: rialText(existing.refund_amount_rial),
-    recoveredValue: rialText(recoveredRows[0]?.value ?? "0"),
+    recoveredValue: rialText(recoveredValue),
     duplicate: true,
   };
 }
@@ -188,14 +208,31 @@ export async function createCustomerReturn(
   const itemIds = lines.map((line) => line.orderItemId);
   const { rows: soldItems } = await client.query<{
     id: string;
+    item_id: string | null;
     quantity: string;
+    retail_snapshot: Record<string, unknown> | null;
   }>(
-    `SELECT id, quantity::text FROM order_items
+    `SELECT id, item_id, quantity::text, retail_snapshot FROM order_items
       WHERE order_id=$1 AND id=ANY($2::uuid[]) AND location_id=$3 AND status<>'voided'
       ORDER BY id FOR UPDATE`,
     [params.orderId, itemIds, params.locationId],
   );
   if (soldItems.length !== lines.length) throw new Error("order_item_not_found");
+
+  // Retail lines always store `1` in `order_items.quantity`; the real sold
+  // quantity lives only in `retail_snapshot.quantity` (see the LineRow comment
+  // in retail-invoice-void-service.ts). The cumulative cap below and the F&B
+  // COGS basis therefore both read the *effective* quantity: the snapshot's
+  // when the line carries one, the raw column otherwise — F&B/warehouse lines
+  // store their true quantity raw, so their behaviour is unchanged.
+  const effectiveSoldQuantity = (row: (typeof soldItems)[number]): string => {
+    const snap = row.retail_snapshot as { quantity?: unknown } | null;
+    const snapQuantity =
+      snap && typeof snap.quantity === "string" && snap.quantity ? snap.quantity : null;
+    return snapQuantity ?? row.quantity;
+  };
+  const soldById = new Map(soldItems.map((item) => [item.id, effectiveSoldQuantity(item)]));
+  const soldRowById = new Map(soldItems.map((item) => [item.id, item]));
 
   const { rows: previouslyReturnedRows } = await client.query<{
     order_item_id: string;
@@ -209,7 +246,6 @@ export async function createCustomerReturn(
       GROUP BY l.order_item_id`,
     [params.orderId, itemIds, params.businessId, params.locationId],
   );
-  const soldById = new Map(soldItems.map((item) => [item.id, item.quantity]));
   const returnedById = new Map(previouslyReturnedRows.map((row) => [row.order_item_id, row.quantity]));
   for (const line of lines) {
     const sold = soldById.get(line.orderItemId);
@@ -265,15 +301,200 @@ export async function createCustomerReturn(
   // consumption, not the reversed original, and both wear `source_type='order'`.
   const saleEventId = periodic ? null : await liveSaleInventoryEventId(client, params.businessId, params.orderId);
   let recovered = 0n;
+  // Items-model (retail) returns reverse the sale's own COGS entry
+  // proportionally, mirroring the accounts it actually posted — never the
+  // generic WELL_KNOWN_CODES constants, because a fashion tenant's COGS is
+  // 5184 while an F&B tenant's is 5100. One account pair per return.
+  const retailCogs = {
+    amount: 0n,
+    inventoryAccountId: null as string | null,
+    cogsAccountId: null as string | null,
+  };
+
+  // GH #1567 F4 — the report side of each items-model line returned: its
+  // revenue weight (the sale's own net, prorated), the COGS this return
+  // reversed for it, and the sale's frozen merchandising snapshot.
+  const retailReturnLines: {
+    orderItemId: string;
+    itemId: string | null;
+    reportable: boolean;
+    quantity: string;
+    disposition: "restockable" | "discarded";
+    weight: bigint;
+    cogs: bigint;
+    merch: ReturnType<typeof parseSaleMerchSnapshot>;
+  }[] = [];
 
   for (const line of lines) {
     const soldQuantity = soldById.get(line.orderItemId);
     if (soldQuantity === undefined) throw new Error("order_item_not_found");
+    const soldRow = soldRowById.get(line.orderItemId);
+    if (!soldRow) throw new Error("order_item_not_found");
     const { rows: returnLines } = await client.query<{ id: string }>(
       `INSERT INTO customer_return_lines(customer_return_id,order_item_id,quantity,disposition)
        VALUES($1,$2,$3,$4) RETURNING id`,
       [returnId, line.orderItemId, line.quantity, line.disposition],
     );
+
+    // ---- items-model (retail) line ----
+    // Its sale relieved `item_stock` and posted revenue+COGS directly; it has
+    // no `order_item_inventory_snapshots`, so the warehouse loop below never
+    // applies. Mirror retail-invoice-void-service: restore the *real* sold
+    // quantity (never `order_items.quantity`, which retail stores as 1), and
+    // reverse the line's live COGS entry proportionally so stock and GL come
+    // back together. A discarded (damaged/unsellable) return refunds without
+    // restocking — the goods stay out of the shelf and out of the reversal.
+    if (soldRow.retail_snapshot) {
+      // GH #1567 6D — a consigned (امانی) line goes back on the owner's shelf
+      // and reclassifies its contra-revenue to 2110/4700; it never touches
+      // item_stock or COGS (it never relieved them).
+      const consignment = parseConsignmentSnapshot((soldRow.retail_snapshot as { consignment?: unknown }).consignment);
+      if (consignment) {
+        await returnConsignedUnits(client, {
+          businessId: params.businessId,
+          locationId: params.locationId,
+          orderId: params.orderId,
+          orderItemId: line.orderItemId,
+          customerReturnId: returnId,
+          quantity: String(line.quantity),
+          disposition: line.disposition,
+          snapshot: consignment,
+          createdBy: params.createdBy ?? null,
+        });
+        retailReturnLines.push({
+          orderItemId: line.orderItemId,
+          itemId: soldRow.item_id ?? null,
+          reportable: false,
+          quantity: String(line.quantity),
+          disposition: line.disposition,
+          weight: 0n,
+          cogs: 0n,
+          merch: parseSaleMerchSnapshot(undefined),
+        });
+        continue;
+      }
+      const lineCogsBefore = retailCogs.amount;
+      if (line.disposition === "restockable") {
+        const snap = soldRow.retail_snapshot as {
+          kind?: unknown;
+          ledgerEntryIds?: unknown;
+        };
+        const kind = typeof snap.kind === "string" ? snap.kind : null;
+        // gold/watch/vehicle have their own return flows (watch-return-service
+        // etc.), service sells no catalogue row, and `legacy` rows predate the
+        // snapshot contract — none of them restore stock here.
+        if (kind === "accessory" || kind === "stocked" || kind === "cosmetic") {
+          if (!soldRow.item_id) throw new Error("retail_item_missing");
+          const { rows: batchAllocation } = await client.query(
+            "SELECT 1 FROM order_item_batch_allocations WHERE order_item_id=$1 LIMIT 1",
+            [line.orderItemId],
+          );
+          if (batchAllocation.length > 0) {
+            // Batch-tracked cosmetics restore through the canonical engine so
+            // the lots and the item_stock rollup stay in step (the void path
+            // does the same); a plain quantity bump would orphan lot-less
+            // stock that belongs to no lot.
+            await restoreOrderItemBatchStock(client, {
+              orderItemId: line.orderItemId,
+              itemId: soldRow.item_id,
+              locationId: params.locationId,
+              quantity: line.quantity,
+              disposition: "restockable",
+              sourceType: "customer_return",
+              sourceId: returnId,
+            });
+          }
+          // A fungible line restores further down, once the exact COGS value
+          // this return reverses is known (F1, GH #1567): quantity and value
+          // must come back together, or the next movement reads a stale
+          // carrying value.
+          const fungibleRestore = batchAllocation.length === 0;
+          let fungibleValue = 0n;
+          const recomputed = await recomputeLastSoldAt(client, soldRow.item_id);
+          await client.query(
+            "UPDATE item_stock SET last_sold_at = $2::timestamptz WHERE item_id = $1",
+            [soldRow.item_id, recomputed],
+          );
+
+          // Proportional COGS reversal: this line's live COGS entry prorated
+          // by returned/sold quantity, mirrored to the very accounts the sale
+          // used. Return-level idempotency already guards replays, and the
+          // cumulative quantity cap keeps the prorated sum ≤ the original
+          // entry (modulo rial rounding).
+          const ledgerIds = Array.isArray(snap.ledgerEntryIds)
+            ? snap.ledgerEntryIds.filter((value: unknown): value is string => typeof value === "string")
+            : [];
+          if (ledgerIds.length > 0) {
+            const { rows: entryRows } = await client.query<{ id: string }>(
+              `SELECT id FROM journal_entries
+                WHERE id = ANY($1::uuid[]) AND business_id = $2
+                  AND posting_kind ILIKE '%cogs%'
+                  AND reversed_at IS NULL AND reverses_entry_id IS NULL`,
+              [ledgerIds, params.businessId],
+            );
+            const cogsEntry = entryRows[0];
+            if (cogsEntry) {
+              const { rows: entryLines } = await client.query<{
+                account_id: string;
+                debit: string;
+                credit: string;
+              }>(
+                `SELECT account_id, sum(debit)::text AS debit, sum(credit)::text AS credit
+                   FROM journal_lines WHERE entry_id=$1 GROUP BY account_id`,
+                [cogsEntry.id],
+              );
+              const debitLine = entryLines.find((l) => BigInt(l.debit) > 0n);
+              const creditLine = entryLines.find((l) => BigInt(l.credit) > 0n);
+              const portion = new Decimal(line.quantity).div(soldQuantity);
+              const amount = BigInt(roundRial(new Decimal(debitLine?.debit ?? "0").times(portion)));
+              if (amount > 0n && debitLine && creditLine) {
+                if (retailCogs.cogsAccountId && retailCogs.cogsAccountId !== debitLine.account_id) {
+                  // One return spans one order, whose lines all post the same
+                  // trade accounts; a mixed pair would need a second entry
+                  // under a distinct posting_kind. Refuse loudly instead of
+                  // silently merging unrelated accounts.
+                  throw new Error("mixed_cogs_accounts");
+                }
+                retailCogs.amount += amount;
+                retailCogs.cogsAccountId = debitLine.account_id;
+                retailCogs.inventoryAccountId = creditLine.account_id;
+                fungibleValue = amount;
+              }
+            }
+          }
+          if (fungibleRestore) {
+            // A legacy line with no live COGS entry to mirror comes back at
+            // the current average (fallbackToAverage).
+            await restoreFungibleStock(client, {
+              itemId: soldRow.item_id,
+              quantity: String(line.quantity),
+              value: fungibleValue.toString(),
+              fallbackToAverage: true,
+            });
+          }
+        }
+      }
+      {
+        const snap = soldRow.retail_snapshot as { kind?: unknown; net?: unknown; merch?: unknown };
+        const kind = typeof snap.kind === "string" ? snap.kind : null;
+        const soldNet = typeof snap.net === "string" || typeof snap.net === "number" ? new Decimal(snap.net) : new Decimal(0);
+        const weight = new Decimal(soldQuantity).gt(0)
+          ? BigInt(roundRial(soldNet.times(line.quantity).div(soldQuantity)))
+          : 0n;
+        retailReturnLines.push({
+          orderItemId: line.orderItemId,
+          itemId: soldRow.item_id ?? null,
+          reportable: kind === "accessory" || kind === "stocked" || kind === "cosmetic",
+          quantity: String(line.quantity),
+          disposition: line.disposition,
+          weight: weight > 0n ? weight : 0n,
+          cogs: retailCogs.amount - lineCogsBefore,
+          merch: parseSaleMerchSnapshot(snap.merch),
+        });
+      }
+      continue;
+    }
+
     if (line.disposition === "discarded" || periodic) continue;
 
     const { rows: snapshots } = await client.query<{ inventory_item_id: string; required_quantity: string }>(
@@ -368,7 +589,7 @@ export async function createCustomerReturn(
   // and journal rows violate the ledger's debit/credit constraints. Persist the
   // return itself and only write monetary rows when there is an actual refund.
   let returnAttribution: Awaited<ReturnType<typeof resolveOrderReturnAttribution>> = null;
-  if (refund > 0n || recovered > 0n) {
+  if (refund > 0n || recovered > 0n || retailCogs.amount > 0n) {
     // Issue #868 — both legs of the return mirror the sale's own attribution:
     // the contra-revenue debit and the COGS reversal carry what the sale's
     // revenue and COGS legs carried, never a rule re-read today.
@@ -403,6 +624,54 @@ export async function createCustomerReturn(
       amount: rialText(recovered.toString()), dimensions: returnAttribution,
     });
   }
+  // The items-model counterpart of the block above: same posting_kind (one
+  // order is either retail or warehouse/F&B shaped, so a single return can
+  // never trigger both and collide on (source_type, source_id, posting_kind)),
+  // but the accounts are the ones the sale itself posted — read back from its
+  // entry — not the generic constants.
+  if (retailCogs.amount > 0n && retailCogs.cogsAccountId && retailCogs.inventoryAccountId) {
+    const retailReversal = rialText(retailCogs.amount.toString());
+    const zero = "0" as RialText;
+    await postExactJournalEntry(client, {
+      businessId: params.businessId, locationId: params.locationId,
+      memo: systemJournalMemo("customer_return_cogs_reversal"),
+      sourceType: "customer_return", sourceId: returnId,
+      postingKind: "cogs_reversal", inventoryEventId: events[0].id,
+      createdBy: params.createdBy,
+      lines: [
+        { accountId: retailCogs.inventoryAccountId, debit: retailReversal, credit: zero, dimensions: returnAttribution },
+        { accountId: retailCogs.cogsAccountId, debit: zero, credit: retailReversal, dimensions: returnAttribution },
+      ],
+    });
+  }
+  if (retailReturnLines.length > 0) {
+    // The contra-revenue this return books (refund − its VAT, the same split
+    // postExactCustomerRefundEntry receives), shared across the returned lines
+    // so the report's shares sum to the ledger exactly. A zero-money exchange
+    // returns quantity with no revenue; the replacement is its own sale.
+    const refundTax = refund <= 0n || BigInt(orders[0].total) === 0n
+      ? 0n
+      : BigInt(roundRial(new Decimal(refundAmount).times(orders[0].tax).div(orders[0].total)));
+    const contraRevenue = refund > refundTax ? refund - refundTax : 0n;
+    const shares = allocateProportionally(contraRevenue, retailReturnLines.map((l) => l.weight));
+    for (const [index, returned] of retailReturnLines.entries()) {
+      if (!returned.reportable || !returned.itemId) continue;
+      await recordSaleReturnFact(client, {
+        businessId: params.businessId,
+        locationId: params.locationId,
+        orderId: params.orderId,
+        orderItemId: returned.orderItemId,
+        itemId: returned.itemId,
+        factSource: "customer_return",
+        sourceId: returnId,
+        quantity: returned.quantity,
+        netRial: shares[index],
+        cogsRial: returned.cogs,
+        disposition: returned.disposition,
+        merch: returned.merch,
+      });
+    }
+  }
   await client.query("UPDATE customer_returns SET inventory_event_id=$2 WHERE id=$1", [returnId, events[0].id]);
   await client.query("UPDATE inventory_events SET posting_status='posted' WHERE id=$1", [events[0].id]);
   await client.query(
@@ -412,7 +681,7 @@ export async function createCustomerReturn(
       orderId: params.orderId,
       refundMethod: params.refundMethod,
       refundAmountRial: refundAmount,
-      recoveredValueRial: recovered.toString(),
+      recoveredValueRial: (recovered + retailCogs.amount).toString(),
       reason,
       actorRole: params.sync?.actorRole ?? null,
       lines,
@@ -431,5 +700,5 @@ export async function createCustomerReturn(
     actorUserId: params.createdBy,
     actorRole: params.sync.actorRole,
   });
-  return { id: returnId, refundAmount, recoveredValue: rialText(recovered.toString()), duplicate: false };
+  return { id: returnId, refundAmount, recoveredValue: rialText((recovered + retailCogs.amount).toString()), duplicate: false };
 }

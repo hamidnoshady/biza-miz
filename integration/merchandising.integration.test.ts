@@ -76,6 +76,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  // A matrix quantity edit is a stock count since GH #1567 F2.
+  await db.query("DELETE FROM item_stock_count_lines");
+  await db.query("DELETE FROM item_stock_counts");
   await db.query("DELETE FROM item_stock");
   await db.query("DELETE FROM item_variant_attributes");
   await db.query("DELETE FROM items");
@@ -155,6 +158,15 @@ describe("matrix bulk editor", () => {
     );
     expect(Number(after.rows[0].quantity)).toBe(3);
     expect(Number(after.rows[1].quantity)).toBe(4);
+    // GH #1567 F2 — the new on-hand figures are a posted count, not a silent
+    // overwrite: 5→4 and 5→3 at 20,000 relieve 60,000 from inventory (1350).
+    const inventory = await db.query<{ net: string }>(
+      `SELECT (coalesce(sum(jl.debit),0) - coalesce(sum(jl.credit),0))::text AS net
+         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+        WHERE je.business_id = $1 AND jl.account_id = $2`,
+      [biz.id, acct.inventory],
+    );
+    expect(inventory.rows[0].net).toBe("-60000");
 
     // A failure on the second cell rolls back the first.
     await expect(
@@ -179,7 +191,7 @@ describe("matrix bulk editor", () => {
 });
 
 describe("markdown planner", () => {
-  it("classifies never-sold stock as dead, and an accepted markdown posts a write-down and changes the price", async () => {
+  it("classifies never-sold stock as dead, and an accepted markdown changes the price without posting (GH #1567 F3)", async () => {
     const variant = await makeVariant("قرمز");
 
     const candidates = await merch.listMarkdownCandidates(biz.id, biz.locationId, "2026-08-16");
@@ -195,8 +207,9 @@ describe("markdown planner", () => {
         inventoryAccountCode: "1350",
       }),
     );
-    // old 100,000 → new 80,000, quantity 5 → 100,000 write-down
-    expect(result.writeDownRial).toBe(100_000);
+    // GH #1567 F3: a selling-price markdown is not a write-down. Cost 20,000
+    // is still below the new 80,000 price, so nothing is posted or flagged.
+    expect(result).toMatchObject({ oldPrice: 100_000, newPrice: 80_000, writeDownRial: 0, entryId: null, belowCost: false });
 
     const price = await db.query<{ unit_price: string }>(
       "SELECT unit_price::text FROM item_stock WHERE item_id = $1",
@@ -204,14 +217,11 @@ describe("markdown planner", () => {
     );
     expect(price.rows[0].unit_price).toBe("80000");
 
-    const { rows: lines } = await db.query<{ account_id: string; debit: string; credit: string }>(
-      "SELECT account_id, debit, credit FROM journal_lines WHERE entry_id = $1 ORDER BY debit DESC",
-      [result.entryId],
+    const { rows: writeDowns } = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM journal_lines WHERE account_id = $1",
+      [acct.writeDownExpense],
     );
-    expect(lines).toEqual([
-      { account_id: acct.writeDownExpense, debit: "100000", credit: "0" },
-      { account_id: acct.inventory, debit: "0", credit: "100000" },
-    ]);
+    expect(writeDowns[0].n).toBe("0");
   });
 
   it("refuses a markdown that is not a price reduction", async () => {

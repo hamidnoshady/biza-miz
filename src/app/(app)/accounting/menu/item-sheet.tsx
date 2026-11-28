@@ -69,6 +69,8 @@ import {
   type RestaurantModifierGroup,
 } from "@/lib/restaurant-menu";
 import type { Runner } from "./menu-workspace";
+import { menuFormError } from "./menu-errors";
+import { EMBEDDED_MEDIA_DESCRIPTION_MESSAGE, findEmbeddedMedia } from "@/lib/embedded-media-guard";
 
 /** Ties the inline price message to the field it belongs to, for a screen reader. */
 const PRICE_ERROR_ID = "menu-item-create-price-error";
@@ -286,6 +288,12 @@ export function ItemSheet({
       setFormError("برای ساخت آیتم، دسته را انتخاب کنید.");
       return;
     }
+    // GH #1567 A2 — an inline image in the description is refused here, in
+    // Persian, before anything is sent; the API refuses it too.
+    if (findEmbeddedMedia(description.trim())) {
+      setFormError(EMBEDDED_MEDIA_DESCRIPTION_MESSAGE);
+      return;
+    }
     if (!editing) {
       if (!priceParsed.ok) {
         // A blank box is the form's to report; a value that cannot be a price
@@ -320,7 +328,7 @@ export function ItemSheet({
         if (typeof result.data.id === "string") onCreated(result.data.id);
         else onClose();
       } else {
-        setFormError(result.error ?? "");
+        setFormError(menuFormError(result.error));
       }
       return;
     }
@@ -338,7 +346,7 @@ export function ItemSheet({
     const result = await run(() =>
       api(`/api/menu/items/${item.id}`, { method: "PATCH", body: JSON.stringify(body) }),
     );
-    if (!result.ok) setFormError(result.error ?? "");
+    if (!result.ok) setFormError(menuFormError(result.error));
   }
 
   /** Applies one attachment patch; resolves `false` when the server refused. */

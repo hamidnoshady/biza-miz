@@ -77,7 +77,13 @@ interface MergePreview {
   moveLabels: Record<string, string>;
   resultingConsent: { smsConsent: boolean; marketingConsent: boolean };
   resultingTags: string[];
+  /** GH #1567 C2 — rows on the archived side a merge may not move or strand. */
+  blockers?: { table: string; label: string; count: number }[];
 }
+
+/** GH #1567 C2 — refused merges explain themselves instead of showing a code. */
+export const MERGE_BLOCKED_MESSAGE =
+  "این دو پرونده قابل ادغام نیستند: پرونده‌ای که بایگانی می‌شود اطلاعاتی دارد که نباید منتقل یا رها شود. آن را جداگانه نگه دارید یا ابتدا آن اطلاعات را (مثلاً اندازه‌های بدن را با ثبت دلیل) پاک کنید.";
 
 export function DuplicatesSection() {
   const [candidates, setCandidates] = useState<Candidate[] | null>(null);
@@ -258,7 +264,7 @@ function MergeDialog({
     });
     setBusy(false);
     if (!ok) {
-      setError(errorMessage(data.error));
+      setError(data.error === "party_merge_blocked" ? MERGE_BLOCKED_MESSAGE : errorMessage(data.error));
       return;
     }
     onMerged(`«${loser.name}» در «${winner.name}» ادغام شد و بایگانی گردید.`);
@@ -267,6 +273,7 @@ function MergeDialog({
   const moved = preview
     ? Object.entries(preview.moves).filter(([, count]) => count > 0)
     : [];
+  const blockers = preview?.blockers ?? [];
 
   return (
     <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
@@ -342,7 +349,20 @@ function MergeDialog({
           </div>
         ) : null}
 
-        {preview ? (
+        {blockers.length > 0 ? (
+          <div role="alert" className="mt-3 space-y-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm leading-6">
+            <p>{MERGE_BLOCKED_MESSAGE}</p>
+            <ul className="flex flex-wrap gap-1.5">
+              {blockers.map((b) => (
+                <li key={b.table}>
+                  <StatusBadge tone="danger">{b.label}: {formatPersianNumber(b.count)}</StatusBadge>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {preview && blockers.length === 0 ? (
           <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-300/70 bg-amber-50/60 p-3 text-sm leading-6 dark:border-amber-800 dark:bg-amber-950/20">
             <input
               type="checkbox"
@@ -358,7 +378,7 @@ function MergeDialog({
           <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
             انصراف
           </Button>
-          <Button type="button" onClick={confirm} disabled={busy || !preview || !acknowledged}>
+          <Button type="button" onClick={confirm} disabled={busy || !preview || !acknowledged || blockers.length > 0}>
             {busy ? "در حال ادغام…" : "ادغام نهایی"}
           </Button>
         </DialogFooter>

@@ -38,7 +38,7 @@ import {
   newAiRequestId,
   settleAiTurn,
 } from "@/lib/ai-wallet-billing";
-import { createAiActionAudit } from "@/lib/ai-action-audit";
+import { boundProposal, createAiActionAudit } from "@/lib/ai-action-audit";
 import {
   appendMessage,
   getConversationProjectId,
@@ -800,6 +800,13 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             },
           });
 
+          // GH #1567 F7 — the card shows the payload exactly as the audit row
+          // stores (and the apply path runs) it, with the hash its approval
+          // must present.
+          const bound = reply.proposedAction ? boundProposal(reply.proposedAction) : null;
+          const proposedAction = reply.proposedAction && bound
+            ? { ...reply.proposedAction, payload: bound.payload }
+            : reply.proposedAction;
           const auditId = reply.proposedAction
             ? await createAiActionAudit({
                 businessId: session.businessId,
@@ -821,7 +828,7 @@ export const POST = withTenantScope(async (request: NextRequest) => {
               conversationId,
               role: "assistant",
               content: reply.content,
-              proposal: reply.proposedAction,
+              proposal: proposedAction,
               auditId,
             }).catch((err) => {
               console.error("ai conversation persistence failed", err);
@@ -845,7 +852,8 @@ export const POST = withTenantScope(async (request: NextRequest) => {
             navigation: reply.navigation ?? null,
             guidedTour: reply.guidedTour ?? null,
             genUi: reply.genUi ?? null,
-            proposedAction: reply.proposedAction,
+            proposedAction,
+            payloadHash: bound?.payloadHash ?? null,
             // Phase E — the typed input request (spec + its persisted id), so
             // the client can render the card and submit an answer against it.
             inputRequest: reply.inputRequest

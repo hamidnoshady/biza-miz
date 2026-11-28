@@ -33,6 +33,7 @@ import { FilterChip, FilterChipRow } from "@/app/dashboard/filters";
 import { LoadingSkeleton } from "@/app/dashboard/page-chrome";
 import { formatPersianNumber } from "@/lib/digits";
 import { PRODUCT_LONG_DESCRIPTION_MAX, PRODUCT_SHORT_DESCRIPTION_MAX } from "@/lib/product-content";
+import { EMBEDDED_MEDIA_DESCRIPTION_MESSAGE, findEmbeddedMedia } from "@/lib/embedded-media-guard";
 import { diffHasChanges, diffLines, type DiffLine } from "./description-diff";
 import { formatDateTime } from "./format";
 import { looksLikeHtml, storefrontText } from "./product-content-text";
@@ -57,6 +58,8 @@ interface ContentProduct {
   gallery: ContentImage[];
   galleryCount: number | null;
   remoteModifiedAt: string | null;
+  /** GH #1567 F5 — store text the mirror held back (inline image / too long). */
+  held?: { shortDescription: "embedded_media" | "too_long" | null; description: "embedded_media" | "too_long" | null; image: "embedded_media" | null };
   lastSeenAt: string | null;
   queue: {
     state: "idle" | "queued" | "failed";
@@ -177,11 +180,22 @@ export function ProductContentSheet({
     setNotice("");
     // The one write path every product edit already uses. An empty string is a
     // real instruction here — it clears the store's field — so both halves are
-    // always sent, and each one is bounded exactly as the route bounds it.
-    const fields: Record<string, string> = {
-      short_description: shortDraft.slice(0, PRODUCT_SHORT_DESCRIPTION_MAX),
-      description: longDraft.slice(0, PRODUCT_LONG_DESCRIPTION_MAX),
-    };
+    // sent, except a half the mirror *held* (GH #1567 F5): the store still has
+    // that text, we never showed it, so an empty draft must not clear it.
+    // Over-long or image-carrying drafts are refused, never cut.
+    if (shortDraft.length > PRODUCT_SHORT_DESCRIPTION_MAX || longDraft.length > PRODUCT_LONG_DESCRIPTION_MAX) {
+      setApplying(false);
+      setError("متن از حد مجاز بلندتر است؛ آن را کوتاه کنید و دوباره ارسال کنید.");
+      return;
+    }
+    if (findEmbeddedMedia(shortDraft) || findEmbeddedMedia(longDraft)) {
+      setApplying(false);
+      setError(EMBEDDED_MEDIA_DESCRIPTION_MESSAGE);
+      return;
+    }
+    const fields: Record<string, string> = {};
+    if (!(product.held?.shortDescription && shortDraft === "")) fields.short_description = shortDraft;
+    if (!(product.held?.description && longDraft === "")) fields.description = longDraft;
     const result = await call<Record<string, unknown>>(
       `/api/integrations/connections/${connectionId}/store/products`,
       "POST",
@@ -243,6 +257,13 @@ export function ProductContentSheet({
 
         {error ? <ErrorBox>{error}</ErrorBox> : null}
         {notice ? <InfoBox>{notice}</InfoBox> : null}
+        {product?.held && (product.held.description || product.held.shortDescription || product.held.image) ? (
+          <InfoBox>
+            {product.held.description === "embedded_media" || product.held.shortDescription === "embedded_media" || product.held.image
+              ? "متن یا تصویر این محصول در فروشگاه، تصویر جاسازی‌شده (data: یا base64) دارد و اینجا نمایش داده نمی‌شود. نسخهٔ فروشگاه دست‌نخورده می‌ماند؛ اگر این فیلد را خالی بگذارید چیزی پاک نمی‌شود. برای اصلاح، تصویر را در کتابخانهٔ رسانهٔ وردپرس بارگذاری کنید."
+              : "متن این محصول در فروشگاه از حد مجاز این برنامه بلندتر است و اینجا نمایش داده نمی‌شود. نسخهٔ فروشگاه دست‌نخورده می‌ماند؛ اگر این فیلد را خالی بگذارید چیزی پاک نمی‌شود."}
+          </InfoBox>
+        ) : null}
 
         <FilterChipRow label="بخش‌های محتوای محصول">
           {TABS.map((entry) => (

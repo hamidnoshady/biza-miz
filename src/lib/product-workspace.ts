@@ -24,6 +24,13 @@ export const PRODUCT_WORKSPACE_INDUSTRIES = [
   "wholesale",
   "tools_fittings",
   "haberdashery",
+  // Issue #1567 — a fashion shop's catalogue *is* the variant board: one
+  // style (parent) with independently sellable size/colour children, each
+  // with its own SKU, barcode, prices and stock. The workspace's sidebar,
+  // `/api/products` guard, reports, tours and import eligibility all key off
+  // this set, so registering the trade here is what opens the door — no
+  // second products application.
+  "fashion_apparel",
 ] as const;
 export type ProductWorkspaceIndustry = (typeof PRODUCT_WORKSPACE_INDUSTRIES)[number];
 
@@ -54,6 +61,9 @@ const CATALOGUE_ADAPTERS = {
   wholesale: { kind: "variants", apiBase: "/api/wholesale" },
   tools_fittings: { kind: "variants", apiBase: "/api/tools-fittings" },
   haberdashery: { kind: "variants", apiBase: "/api/haberdashery" },
+  // Issue #1567 — fashion writes through its own URL namespace, bound to the
+  // shared trade-goods route handlers exactly like haberdashery above.
+  fashion_apparel: { kind: "variants", apiBase: "/api/fashion" },
   automotive: { kind: "specialist", href: "/accounting/automotive", readPermission: PERMISSIONS.vehiclesView },
 } as const satisfies Record<RetailCatalogueIndustry, CatalogueAdapter>;
 

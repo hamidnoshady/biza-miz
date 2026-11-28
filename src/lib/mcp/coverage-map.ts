@@ -1307,6 +1307,51 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     test: "src/app/api/products/duplicates/route.test.ts",
   },
   {
+    id: "misc.tailoring",
+    module: "Tailoring (fashion)",
+    entity: "Alteration / made-to-measure jobs and encrypted body measurements (GH #1567 6A)",
+    routes: ["tailoring"],
+    status: "route-only (by design)",
+    note: "customer body measurements are sensitive personal data: encrypted at rest, every access logged with a purpose, retention/export/erase — and never an AI input, so no MCP/AI read tool or write verb may reach these routes (tailoring.measurements is excluded from system AI read permissions); the job workflow stays a human desk until an approval-gated verb is designed",
+    test: "integration/tailoring.integration.test.ts",
+  },
+  {
+    id: "misc.fashion-production",
+    module: "Production (fashion)",
+    entity: "Fashion production orders, BOMs, stages, WIP costing and finished-goods receipt (GH #1567 6B)",
+    routes: ["production-orders", "production-boms"],
+    status: "route-only (by design)",
+    note: "every step moves stock and posts to WIP 1310 / the trade inventory account, behind inventory.view to read and inventory.adjust (+ ledger.approve for a WIP write-off) to act; idempotent and version-checked; no MCP/AI write verb until an approval-gated design exists (GH #1567 F7) — the advisory merchandising AI (6E) may only read the report",
+    test: "integration/fashion-production.integration.test.ts",
+  },
+  {
+    id: "misc.fashion-size-packs",
+    module: "Size packs (fashion)",
+    entity: "Virtual size packs: variant compositions with wholesale prices, derived availability and sale snapshots (GH #1567 6C)",
+    routes: ["size-packs"],
+    status: "route-only (by design)",
+    note: "a pack owns no stock — selling one goes through POST /api/sales/invoices (a size_pack line expanded into per-variant lines in the sale transaction); definitions need inventory.adjust; no MCP/AI write verb until an approval-gated design exists (GH #1567 F7)",
+    test: "integration/fashion-size-packs.integration.test.ts",
+  },
+  {
+    id: "misc.fashion-consignment",
+    module: "Consignment (fashion)",
+    entity: "Consignment-by-contract (کالای امانی): owners, contracts with owner-price/commission terms, receipts, returns to owner, settlements (GH #1567 6D)",
+    routes: ["consignment-contracts"],
+    status: "route-only (by design)",
+    note: "consigned units are sold through POST /api/sales/invoices (owner share → 2110, commission → 4700, no COGS); receipts and returns to the owner move quantity only; settlement posts Dr 2110 / Cr cash or bank and needs inventory.adjust + ledger.post; idempotent and version-checked; no MCP/AI write verb until an approval-gated design exists (GH #1567 F7)",
+    test: "integration/fashion-consignment.integration.test.ts",
+  },
+  {
+    id: "misc.product-embedded-media",
+    module: "Products (retail)",
+    entity: "Legacy embedded-media report (GH #1567 F5)",
+    routes: ["products/embedded-media"],
+    status: "route-only (by design)",
+    note: "read-only list of catalogue/menu rows written before the embedded-media rule that still inline image bytes; nothing is modified — the owner fixes each row through the guarded product/menu form, so there is no write verb to expose",
+    test: "integration/fashion-omnichannel.integration.test.ts",
+  },
+  {
     id: "misc.price-lists",
     module: "Products (retail)",
     entity: "Price lists & entries (bulk quick-update)",
@@ -1488,6 +1533,23 @@ export const TENANT_COVERAGE: CoverageEntity[] = [
     },
     note: "AO — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only",
     test: "integration/wholesale.integration.test.ts",
+  },
+  {
+    // Issue #1567 — the fashion trade's namespace is the same shared
+    // trade-goods route builder bound per namespace, exactly like the four
+    // verticals above, so its verbs are the same three lanes plus the
+    // trade-goods board read.
+    id: "vertical_fashion",
+    module: "Verticals",
+    entity: "Fashion apparel (styles, size/colour variants, stock)",
+    routes: ["fashion"],
+    ops: {
+      listDetail: ["list_trade_goods_items"],
+      create: ["fashion_apparel.item.create", "fashion_apparel.stock.update"],
+      lifecycle: ["fashion_apparel.item.sell"],
+    },
+    note: "1567 — shared trade-goods implementation (one route builder bound per namespace); sale rides ordersCreate with the ledger_account_missing envelope; variant-sales report stays report-surface only",
+    test: "integration/trade-goods.integration.test.ts",
   },
 ];
 

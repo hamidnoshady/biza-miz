@@ -248,31 +248,69 @@ async function wasteExpenseRial(): Promise<number> {
   return Number(rows[0].total);
 }
 
+/** GH #1567 F7 — what the hub sends with an approval: the hash it showed for each pending gated action. */
+function hubApprovals(run: { actions: { id: string; status: string; approvalHash: string | null }[] }): Record<string, string> {
+  return Object.fromEntries(run.actions.filter((a) => a.status === "pending" && a.approvalHash).map((a) => [a.id, a.approvalHash as string]));
+}
+
+async function approveOnlyRun() {
+  const [run] = await runs();
+  return dbLib.withTenant(shop.businessId, () =>
+    coworker.decideCoworkerRun({
+      businessId: shop.businessId,
+      runId: run.id,
+      decision: "approve",
+      approvals: hubApprovals(run),
+      actorUserId: shop.userId,
+    }),
+  );
+}
+
+// GH #1567 F7 (owner decision, all trades): a waste write-off moves stock and
+// posts to the ledger, so the coworker prepares it but never posts it alone —
+// even in 'auto' mode with the category open and the caps admitting it.
 describe("a shift closing sets the coworker going", () => {
-  it("writes off the night's remaining bread, on the ledger, with no human in the loop", async () => {
+  it("prepares the night's write-off, holds it for a human, and posts it on approval", async () => {
     await enableWasteAutopilot({ maxAmountRial: 20_000_000 });
     await createWasteJob({ approvalMode: "auto" });
 
     await closeAShift();
     expect(await tick()).toBe(1);
 
+    // Nothing moved without a human.
+    expect(await onHand()).toBe("12");
+    expect(await wasteExpenseRial()).toBe(0);
+    const [held] = await runs();
+    expect(held.status).toBe("pending_approval");
+    expect(held.triggerSource).toBe("event");
+    expect(held.actions).toHaveLength(1);
+    expect(held.actions[0].status).toBe("pending");
+    expect(held.actions[0].heldReason).toContain("تأیید انسانی");
+
+    const decided = await approveOnlyRun();
+    expect(decided.ok).toBe(true);
     // 12 loaves × 50,000 ﷼ left the shelf and hit the waste account.
     expect(await onHand()).toBe("0");
     expect(await wasteExpenseRial()).toBe(600_000);
-
     const [run] = await runs();
     expect(run.status).toBe("applied");
-    expect(run.triggerSource).toBe("event");
-    expect(run.actions).toHaveLength(1);
     expect(run.actions[0].status).toBe("applied");
 
-    // The write is in the assistant's own audit trail, tagged as the coworker's.
-    const audit = await db.query<{ source: string; status: string; action_type: string }>(
-      "SELECT source, status, action_type FROM ai_action_audit WHERE business_id = $1",
+    // The write is in the assistant's own audit trail, tagged as the
+    // coworker's, bound to the approving human and spent exactly once.
+    const audit = await db.query<{
+      source: string; status: string; action_type: string; approval_class: string | null;
+      approved_by: string | null; consumed: boolean;
+    }>(
+      `SELECT source, status, action_type, approval_class, approved_by, approval_consumed_at IS NOT NULL AS consumed
+         FROM ai_action_audit WHERE business_id = $1 AND status = 'applied'`,
       [shop.businessId],
     );
     expect(audit.rows).toEqual([
-      { source: "coworker", status: "applied", action_type: "inventory.waste.log" },
+      {
+        source: "coworker", status: "applied", action_type: "inventory.waste.log",
+        approval_class: "stock", approved_by: shop.userId, consumed: true,
+      },
     ]);
   });
 
@@ -285,6 +323,8 @@ describe("a shift closing sets the coworker going", () => {
 
     await closeAShift();
     await tick();
+    expect(await onHand()).toBe("3");
+    await approveOnlyRun();
 
     expect(await onHand()).toBe("0");
     expect(await wasteExpenseRial()).toBe(150_000);
@@ -297,11 +337,15 @@ describe("a shift closing sets the coworker going", () => {
     await closeAShift();
     expect(await tick()).toBe(1);
     // A second tick with no new event — and a third, as if two app instances
-    // raced — must not write the same night off again.
+    // raced — must not queue the same night again.
     expect(await tick()).toBe(0);
     expect(await tick()).toBe(0);
 
     expect(await runs()).toHaveLength(1);
+    await approveOnlyRun();
+    // A second approval of the same run is refused, so nothing posts twice.
+    const again = await approveOnlyRun();
+    expect(again).toEqual({ ok: false, error: "coworker_run_already_decided" });
     expect(await wasteExpenseRial()).toBe(600_000);
   });
 
@@ -326,6 +370,86 @@ describe("a shift closing sets the coworker going", () => {
 });
 
 describe("the approval boundary", () => {
+  // GH #1567 F7 — the hub's approval is bound to the exact payload it showed.
+  async function heldRun() {
+    await enableWasteAutopilot({ maxAmountRial: 20_000_000 });
+    await createWasteJob({ approvalMode: "ask" });
+    await closeAShift();
+    await tick();
+    const [run] = await runs();
+    expect(run.status).toBe("pending_approval");
+    expect(run.actions.some((a) => a.status === "pending" && a.approvalHash)).toBe(true);
+    return run;
+  }
+  const decide = (runId: string, approvals?: Record<string, string>) => dbLib.withTenant(shop.businessId, () =>
+    coworker.decideCoworkerRun({ businessId: shop.businessId, runId, decision: "approve", actorUserId: shop.userId, approvals }));
+
+  it("refuses an approval that presents no hash, and nothing moves", async () => {
+    const run = await heldRun();
+    expect(await decide(run.id)).toEqual({ ok: false, error: "approval_binding_required" });
+    expect(await onHand()).toBe("12");
+    expect((await runs())[0].status).toBe("pending_approval");
+  });
+
+  it("refuses a modified/stale hash, and nothing moves", async () => {
+    const run = await heldRun();
+    const tampered = Object.fromEntries(Object.keys(hubApprovals(run)).map((id) => [id, "0".repeat(64)]));
+    expect(await decide(run.id, tampered)).toEqual({ ok: false, error: "approval_stale" });
+    expect(await onHand()).toBe("12");
+  });
+
+  it("refuses an approval after the approval window, and nothing moves", async () => {
+    const run = await heldRun();
+    await db.query("UPDATE ai_coworker_runs SET created_at = now() - interval '73 hours' WHERE id = $1", [run.id]);
+    expect(await decide(run.id, hubApprovals(run))).toEqual({ ok: false, error: "approval_expired" });
+    expect(await onHand()).toBe("12");
+  });
+
+  it("an expired run can still be rejected, and the refusal does not claim it (GH #1567 C4)", async () => {
+    const run = await heldRun();
+    await db.query("UPDATE ai_coworker_runs SET created_at = now() - interval '73 hours' WHERE id = $1", [run.id]);
+    expect(await decide(run.id, hubApprovals(run))).toEqual({ ok: false, error: "approval_expired" });
+    const { rows } = await db.query<{ decided_at: Date | null }>("SELECT decided_at FROM ai_coworker_runs WHERE id = $1", [run.id]);
+    expect(rows[0].decided_at).toBeNull();
+    const rejected = await dbLib.withTenant(shop.businessId, () =>
+      coworker.decideCoworkerRun({ businessId: shop.businessId, runId: run.id, decision: "reject", actorUserId: shop.userId }));
+    expect(rejected.ok).toBe(true);
+    expect(await onHand()).toBe("12");
+  });
+
+  it("stamps each proposed action and refuses when the stored payload changed after proposal, even with a matching shown hash (GH #1567 C4)", async () => {
+    const run = await heldRun();
+    const gated = run.actions.find((a) => a.status === "pending" && a.approvalHash)!;
+    expect(gated.proposalHash).toBe(gated.approvalHash);
+    // Someone edits the held payload in the database; the hub would now show
+    // (and hash) the edited payload — the stamp is what catches it.
+    await db.query(
+      "UPDATE ai_coworker_run_actions SET payload = jsonb_set(payload, '{note}', '\"edited\"'::jsonb, true) WHERE id = $1", [gated.id]);
+    const [edited] = await runs();
+    const shown = edited.actions.find((a) => a.id === gated.id)!;
+    expect(shown.approvalHash).not.toBe(gated.approvalHash);
+    expect(await decide(edited.id, hubApprovals(edited))).toEqual({ ok: false, error: "approval_payload_mismatch" });
+    expect(await onHand()).toBe("12");
+    expect((await runs())[0].status).toBe("pending_approval");
+  });
+
+  it("a legacy action with no stamp is bound to its stored payload at decision (GH #1567 C4)", async () => {
+    const run = await heldRun();
+    await db.query("UPDATE ai_coworker_run_actions SET proposal_payload_hash = NULL WHERE run_id = $1", [run.id]);
+    const [legacy] = await runs();
+    expect(legacy.actions.every((a) => a.proposalHash === null)).toBe(true);
+    expect((await decide(legacy.id, hubApprovals(legacy))).ok).toBe(true);
+    expect(await wasteExpenseRial()).toBe(600_000);
+  });
+
+  it("two simultaneous approvals run the write-off exactly once", async () => {
+    const run = await heldRun();
+    const results = await Promise.all([decide(run.id, hubApprovals(run)), decide(run.id, hubApprovals(run))]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => !r.ok)).toEqual([{ ok: false, error: "coworker_run_already_decided" }]);
+    expect(await wasteExpenseRial()).toBe(600_000);
+  });
+
   it("writes nothing while the owner has asked to be asked, then writes on approval", async () => {
     await enableWasteAutopilot({ maxAmountRial: 20_000_000 });
     await createWasteJob({ approvalMode: "ask" });
@@ -347,6 +471,7 @@ describe("the approval boundary", () => {
         businessId: shop.businessId,
         runId: pending.id,
         decision: "approve",
+        approvals: hubApprovals(pending),
         actorUserId: shop.userId,
       }),
     );
@@ -355,7 +480,7 @@ describe("the approval boundary", () => {
     expect(await wasteExpenseRial()).toBe(600_000);
   });
 
-  it("keeps an auto action pending when its target app was customer-disabled", async () => {
+  it("keeps an approved action pending when its target app was customer-disabled", async () => {
     await enableWasteAutopilot({ maxAmountRial: 20_000_000 });
     await createWasteJob({ approvalMode: "auto" });
     await db.query(
@@ -366,7 +491,10 @@ describe("the approval boundary", () => {
 
     await closeAShift();
     await tick();
+    expect(await onHand()).toBe("12");
 
+    // A human's yes does not override the disabled app either.
+    await approveOnlyRun();
     expect(await onHand()).toBe("12");
     expect(await wasteExpenseRial()).toBe(0);
     const [run] = await runs();
@@ -406,7 +534,8 @@ describe("the approval boundary", () => {
     expect(await onHand()).toBe("12");
     const [run] = await runs();
     expect(run.status).toBe("pending_approval");
-    expect(run.actions[0].heldReason).toContain("سقف");
+    // F7: the human gate answers before the cap is even consulted.
+    expect(run.actions[0].heldReason).toContain("تأیید انسانی");
 
     // Held is not dropped: the identical action still applies by hand.
     await dbLib.withTenant(shop.businessId, () =>
@@ -414,6 +543,7 @@ describe("the approval boundary", () => {
         businessId: shop.businessId,
         runId: run.id,
         decision: "approve",
+        approvals: hubApprovals(run),
         actorUserId: shop.userId,
       }),
     );

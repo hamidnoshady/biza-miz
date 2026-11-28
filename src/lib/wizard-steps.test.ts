@@ -141,7 +141,7 @@ describe("wizardStepsForIndustry", () => {
   });
 
   it("gives trade-goods retail a stock-shaped path without F&B-only steps", () => {
-    for (const industry of ["jewelry", "watch", "accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery"] as const) {
+    for (const industry of ["jewelry", "watch", "accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery", "fashion_apparel"] as const) {
       expect(setupShapeForIndustry(industry)).toBe("retail");
       expect(wizardStepsForIndustry(industry)).not.toContain("costing");
       expect(wizardStepsForIndustry(industry)).not.toContain("menu");
@@ -224,7 +224,7 @@ describe("wizardStepsForIndustry", () => {
   it("points every trade with a catalogue door at it, and none at a door that does not exist", () => {
     expect(catalogueHrefFor("jewelry")).toBe("/accounting/jewelry");
     expect(catalogueHrefFor("watch")).toBe("/accounting/watch");
-    for (const industry of ["accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery"] as const) {
+    for (const industry of ["accessories", "cosmetics", "wholesale", "tools_fittings", "haberdashery", "fashion_apparel"] as const) {
       expect(catalogueHrefFor(industry)).toBe("/accounting/products");
     }
     // F&B's catalogue *is* a wizard step; service companies invoice services

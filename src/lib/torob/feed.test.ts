@@ -175,6 +175,7 @@ describe("what cannot be published", () => {
     { reason: "missing_url", product: product({ url: "" }) },
     { reason: "unusable_url", product: product({ url: "not-a-url" }) },
     { reason: "missing_image", product: product({ imageUrls: [] }) },
+    { reason: "unusable_image", product: product({ imageUrls: ["data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", "/relative.jpg"] }) },
     { reason: "missing_date", product: product({ dateAdded: "not-a-date" }) },
     { reason: "unsupported_currency", product: product({ currency: "USD" }) },
     { reason: "price_not_whole_toman", product: product({ priceRial: 25_000_005 }) },
@@ -194,6 +195,28 @@ describe("what cannot be published", () => {
     const summary = summariseFeed(feed);
     expect(summary.skippedTotal).toBe(cases.length);
     for (const entry of summary.skippedByReason) expect(entry.copy.length).toBeGreaterThan(0);
+  });
+});
+
+describe("embedded media (GH #1567 F5)", () => {
+  const blob = `data:image/jpeg;base64,${"/9j/4AAQSkZJRgABAQ".repeat(80)}`;
+
+  it("sends only real image URLs, never a data: image clipped to 1000 chars", () => {
+    const feed = buildTorobFeed({
+      products: [product({ imageUrls: [blob, "https://shop.example.com/images/1.jpg", `https://shop.example.com/${"a".repeat(1000)}.jpg`] })],
+    });
+    expect(feed.items).toHaveLength(1);
+    expect(feed.items[0].image_links).toEqual(["https://shop.example.com/images/1.jpg"]);
+  });
+
+  it("leaves out a legacy description or subtitle that carries an embedded file, instead of clipping it", () => {
+    const feed = buildTorobFeed({
+      products: [product({ description: `<p>پیراهن</p><img src="${blob}">`, subtitle: blob })],
+    });
+    expect(feed.items[0].short_desc).toBeUndefined();
+    expect(feed.items[0].subtitle).toBeUndefined();
+    const clean = buildTorobFeed({ products: [product({ description: "پیراهن نخی" })] });
+    expect(clean.items[0].short_desc).toBe("پیراهن نخی");
   });
 });
 

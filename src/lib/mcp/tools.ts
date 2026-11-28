@@ -34,6 +34,7 @@ import { aiActionPermission, canUseAiTool } from "../ai-capabilities";
 import { isWorkspaceAiActionEndpoint, isWorkspaceScopedReadTool } from "../ai-action-service";
 import type { Industry } from "../industries";
 import type { Permission } from "../permissions";
+import { TRADE_GOODS_INDUSTRIES } from "../trade-goods";
 import {
   LEGACY_GRANTS,
   isLegacyGrants,
@@ -173,7 +174,7 @@ export const MCP_READ_TOOL_SUMMARIES: Record<string, string> = {
   list_cosmetic_items: "Cosmetics board of the pinned branch — families & variants with stock, price and batch state (cosmetics businesses only).",
   list_cosmetic_brands: "Cosmetic brands registered in the pinned branch — name, country, product line.",
   list_accessory_items: "Accessories board of the pinned branch — families & variants with attributes, stock and pricing (accessories businesses only).",
-  list_trade_goods_items: "Trade-goods board (wholesale / tools_fittings / haberdashery) of the pinned branch — industry arg must equal the business's industry.",
+  list_trade_goods_items: "Trade-goods board (wholesale / tools_fittings / haberdashery / fashion_apparel) of the pinned branch — industry arg must equal the business's industry.",
   list_data_entities: "Transferable data entities for this industry — key, module, fields, default export fields.",
   list_export_jobs: "Data-export jobs, newest first — optional entityKey filter.",
   get_export_job: "One export job by id — status, fields, row count.",
@@ -368,10 +369,14 @@ const id = (description: string) => ({ type: "string", description });
  *     and a person clicks publish.
  */
 const WRITE_TOOL_SPECS: WriteToolSpec[] = [
-  // Batch AO — the three trade-goods verticals share one route implementation
-  // (trade-goods-routes.ts), so their nine tool specs are one builder too.
-  ...(["wholesale", "tools_fittings", "haberdashery"] as const).flatMap((trade) => {
-    const label = trade === "wholesale" ? "عمده" : trade === "tools_fittings" ? "ابزار و یراق" : "خرازی";
+  // Batch AO — the trade-goods verticals share one route implementation
+  // (trade-goods-routes.ts), so their tool specs are one builder too. Driven
+  // by the registry set itself (issue #1567 added `fashion_apparel` here):
+  // a restated list would fail industry-coverage.test.ts the moment the set
+  // changes.
+  ...TRADE_GOODS_INDUSTRIES.flatMap((trade) => {
+    const label =
+      trade === "wholesale" ? "عمده" : trade === "tools_fittings" ? "ابزار و یراق" : trade === "haberdashery" ? "خرازی" : "پوشاک";
     const snake = trade === "tools_fittings" ? "tools_fittings" : trade;
     return [
       {

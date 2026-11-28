@@ -35,6 +35,8 @@ export const ITEM_AUDIT_EVENTS = [
   "item.profile_changed",
   "item.merchandising_bulk_update",
   "item.markdown_applied",
+  // GH #1567 F2 — a reviewed opening-stock document received this item.
+  "item.opening_stock_posted",
 ] as const;
 export type ItemAuditEvent = (typeof ITEM_AUDIT_EVENTS)[number];
 
