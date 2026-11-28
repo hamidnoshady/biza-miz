@@ -51,8 +51,11 @@ import {
 import { api, ErrorBox, InfoBox, SetupDataSkeleton, StepShell } from "../ui";
 import { stepsFor } from "../steps";
 import { useSetupIndustry } from "../industry-context";
+import { activatableApps } from "@/lib/setup-activation";
+import { SetupActivationPanel } from "./activation-panel";
 import { SetupConnectionSheet } from "./connection-sheet";
 import { SetupMenuManualEditor } from "./menu-manual-editor";
+import { SetupPartyManualForm } from "./party-manual-form";
 
 type SourceMode = "file" | "provider" | "manual";
 type Provider = "woocommerce" | "wordpress" | "eshobe";
@@ -165,10 +168,6 @@ export default function ImportStepPage() {
   const manualDestinations = useMemo(() => {
     const catalogue = catalogueHrefFor(industry);
     return [
-      {
-        label: "مشتریان و تأمین‌کنندگان",
-        hint: "دفتر طرف‌حساب‌ها؛ پس از پایان راه‌اندازی از همین مسیر باز می‌شود.",
-      },
       ...(catalogue
         ? [
             {
@@ -187,6 +186,11 @@ export default function ImportStepPage() {
   const selectedCandidate = useMemo(
     () => data?.candidates.find((candidate) => candidate.key === entityKey) ?? null,
     [data?.candidates, entityKey],
+  );
+
+  const activatable = useMemo(
+    () => activatableApps(data?.candidates ?? []),
+    [data?.candidates],
   );
 
   function chooseType(key: string) {
@@ -254,6 +258,11 @@ export default function ImportStepPage() {
         بررسی و تنها بعد از تأیید صریح شما اجرا می‌شود. رکوردهای تکراری بی‌صدا
         ادغام نمی‌شوند و اسناد مالی گذشته به‌طور خودکار ثبت نمی‌شوند.
       </InfoBox>
+
+      <SetupActivationPanel
+        apps={activatable}
+        onActivated={() => void load(true)}
+      />
 
       <SectionCard
         title="۱. منبع اطلاعات"
@@ -456,6 +465,7 @@ export default function ImportStepPage() {
           description="فرم‌های اصلی هر بخش؛ مناسب وقتی داده کم است یا فایل آماده ندارید."
         >
           {industry === "food_service" ? <SetupMenuManualEditor /> : null}
+          <SetupPartyManualForm />
           <div className="mt-4 rounded-xl border border-border">
             <p className="border-b border-border px-4 py-2 text-xs font-semibold text-muted-foreground">
               بقیهٔ بخش‌ها
