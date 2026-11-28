@@ -274,6 +274,10 @@ describe("customer return under سیستم ادواری", () => {
       if (sql.includes("INSERT INTO audit_log")) return [];
       if (sql.includes("UPDATE customer_returns SET inventory_event_id")) return [];
       if (sql.includes("UPDATE inventory_events SET posting_status")) return [];
+      // Issue #901 — a return restores the reward value a bill was partly paid
+      // with. This order carries no such tender, so the lookup finds nothing
+      // and the refund posts exactly as before.
+      if (sql.includes("FROM growth_reward_redemptions")) return [];
       return undefined; // a restock query (snapshots/stock_movements/lots) fails the test here
     });
 

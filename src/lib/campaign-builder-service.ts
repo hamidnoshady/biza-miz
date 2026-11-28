@@ -44,6 +44,16 @@ export interface CampaignRecord {
   status: CampaignStatus;
   createdAt: string;
   updatedAt: string;
+  schedule: {
+    startsAt: string | null;
+    endsAt: string | null;
+  };
+  lifecycle: {
+    submittedAt: string | null;
+    approvedAt: string | null;
+    activatedAt: string | null;
+    pausedAt: string | null;
+  };
   version: {
     number: number;
     definition: CampaignDefinition;
@@ -78,10 +88,18 @@ interface CampaignRow extends Record<string, unknown> {
   definition: unknown;
   definition_hash: string;
   locked_at: string | null;
+  starts_at: string | null;
+  ends_at: string | null;
+  approved_at: string | null;
+  activated_at: string | null;
+  paused_at: string | null;
 }
 
 const CAMPAIGN_SELECT = `
   SELECT c.id, c.name, c.status, c.created_at::text AS created_at, c.updated_at::text AS updated_at,
+         c.starts_at::text AS starts_at, c.ends_at::text AS ends_at,
+         c.approved_at::text AS approved_at, c.activated_at::text AS activated_at,
+         c.paused_at::text AS paused_at,
          v.version_number, v.definition, v.definition_hash, v.locked_at::text AS locked_at
     FROM growth_campaigns c
     JOIN LATERAL (
@@ -98,6 +116,15 @@ function toRecord(row: CampaignRow): CampaignRecord {
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    schedule: { startsAt: row.starts_at, endsAt: row.ends_at },
+    lifecycle: {
+      // A locked version is the moment the rules were submitted for review; the
+      // audit log holds the exact action, this is the list's summary of it.
+      submittedAt: row.locked_at,
+      approvedAt: row.approved_at,
+      activatedAt: row.activated_at,
+      pausedAt: row.paused_at,
+    },
     version: {
       number: row.version_number,
       // Re-parsed so a stored document written by an older build is read through
@@ -141,10 +168,21 @@ async function assertBranchesBelongToBusiness(businessId: string, definition: Ca
   if (Number(rows[0]?.n ?? 0) !== ids.length) throw new CampaignBuilderError("branch_not_found", 400);
 }
 
+type CampaignAuditAction =
+  | "growth.campaign_created"
+  | "growth.campaign_updated"
+  | "growth.campaign_archived"
+  | "growth.campaign_submitted"
+  | "growth.campaign_approved"
+  | "growth.campaign_activated"
+  | "growth.campaign_paused"
+  | "growth.campaign_resumed"
+  | "growth.campaign_completed";
+
 async function audit(
   businessId: string,
   actorId: string | null,
-  action: "growth.campaign_created" | "growth.campaign_updated" | "growth.campaign_archived",
+  action: CampaignAuditAction,
   campaignId: string,
   payload: Record<string, unknown>,
 ): Promise<void> {
@@ -284,6 +322,163 @@ export async function archiveCampaign(businessId: string, actorId: string | null
       );
       await audit(businessId, actorId, "growth.campaign_archived", id, { from: rows[0].status });
     }
+    return (await getCampaign(businessId, id))!;
+  });
+}
+
+// ── lifecycle ─────────────────────────────────────────────────────────────────
+
+/**
+ * The consequential acts a campaign goes through, each its own audit entry.
+ *
+ * A draft is private work; submitting it locks the rules so what is reviewed
+ * is byte-for-byte what runs; approval is a second person's decision;
+ * activation is when money can start being promised. Pausing is a *safety*
+ * action available to any campaign manager — it can only stop spending.
+ */
+export const CAMPAIGN_LIFECYCLE_ACTIONS = ["submit", "approve", "activate", "pause", "resume", "complete"] as const;
+export type CampaignLifecycleAction = (typeof CAMPAIGN_LIFECYCLE_ACTIONS)[number];
+
+function parseOptionalInstant(value: unknown, field: string): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  if (typeof value !== "string") throw new CampaignBuilderError(`${field}_invalid`, 400);
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new CampaignBuilderError(`${field}_invalid`, 400);
+  return date.toISOString();
+}
+
+/**
+ * Moves a campaign through its lifecycle. Idempotent where repeating the act
+ * is harmless (approve, pause, resume, activate): a double-clicked button must
+ * not be an error the operator has to interpret.
+ */
+export async function transitionCampaign(
+  businessId: string,
+  actorId: string | null,
+  id: string,
+  action: CampaignLifecycleAction,
+  input: { startsAt?: unknown; endsAt?: unknown } = {},
+): Promise<CampaignRecord> {
+  if (!isUuid(id)) throw new CampaignBuilderError("campaign_not_found", 404);
+  if (!CAMPAIGN_LIFECYCLE_ACTIONS.includes(action)) throw new CampaignBuilderError("action_invalid", 400);
+
+  const startsAt = parseOptionalInstant(input.startsAt, "starts_at");
+  const endsAt = parseOptionalInstant(input.endsAt, "ends_at");
+
+  return withTenantTransaction(businessId, async () => {
+    const { rows } = await query<{
+      status: CampaignStatus;
+      starts_at: string | null;
+      ends_at: string | null;
+      activated_at: string | null;
+    }>(
+      `SELECT status, starts_at::text AS starts_at, ends_at::text AS ends_at, activated_at::text AS activated_at
+         FROM growth_campaigns WHERE business_id = $1 AND id = $2 FOR UPDATE`,
+      [businessId, id],
+    );
+    const current = rows[0];
+    if (!current) throw new CampaignBuilderError("campaign_not_found", 404);
+
+    const now = new Date();
+    const explicitStart = startsAt !== undefined ? startsAt : current.starts_at;
+    const explicitEnd = endsAt !== undefined ? endsAt : current.ends_at;
+    if (explicitStart && explicitEnd && new Date(explicitEnd).getTime() <= new Date(explicitStart).getTime()) {
+      throw new CampaignBuilderError("schedule_invalid", 400);
+    }
+
+    const apply = async (
+      next: CampaignStatus,
+      auditAction: CampaignAuditAction,
+    ): Promise<void> => {
+      await query(
+        `UPDATE growth_campaigns
+            SET status = $3,
+                -- An explicit null clears the schedule; an omitted key keeps it.
+                starts_at = CASE WHEN $7 THEN $4::timestamptz ELSE starts_at END,
+                ends_at = CASE WHEN $8 THEN $5::timestamptz ELSE ends_at END,
+                approved_at = CASE WHEN $3 = 'approved' AND approved_at IS NULL THEN now() ELSE approved_at END,
+                approved_by = CASE WHEN $3 = 'approved' AND approved_by IS NULL THEN $6 ELSE approved_by END,
+                activated_at = CASE WHEN $3 = 'live' AND activated_at IS NULL THEN now() ELSE activated_at END,
+                paused_at = CASE WHEN $3 = 'paused' THEN now() WHEN $3 = 'live' THEN NULL ELSE paused_at END,
+                updated_at = now()
+          WHERE business_id = $1 AND id = $2`,
+        [
+          businessId,
+          id,
+          next,
+          startsAt ?? null,
+          endsAt ?? null,
+          actorId,
+          startsAt !== undefined,
+          endsAt !== undefined,
+        ],
+      );
+      await audit(businessId, actorId, auditAction, id, { from: current.status, to: next });
+    };
+
+    /** Submitting or approving freezes the latest version. */
+    const lockLatest = async (): Promise<void> => {
+      await query(
+        `UPDATE growth_campaign_versions SET locked_at = now()
+          WHERE campaign_id = $1 AND locked_at IS NULL
+            AND version_number = (SELECT MAX(version_number) FROM growth_campaign_versions WHERE campaign_id = $1)`,
+        [id],
+      );
+    };
+
+    switch (action) {
+      case "submit": {
+        if (current.status === "pending_approval") break;
+        if (current.status !== "draft") throw new CampaignBuilderError("campaign_not_draft", 409);
+        await apply("pending_approval", "growth.campaign_submitted");
+        await lockLatest();
+        break;
+      }
+      case "approve": {
+        if (current.status === "approved" || current.status === "live" || current.status === "paused") break;
+        if (current.status !== "pending_approval") throw new CampaignBuilderError("campaign_not_pending_approval", 409);
+        await lockLatest();
+        await apply("approved", "growth.campaign_approved");
+        break;
+      }
+      case "activate": {
+        if (current.status === "live") break;
+        if (current.status !== "approved" && current.status !== "paused") {
+          throw new CampaignBuilderError("campaign_not_approved", 409);
+        }
+        if (explicitEnd && new Date(explicitEnd).getTime() <= now.getTime()) {
+          throw new CampaignBuilderError("campaign_already_ended", 409);
+        }
+        await lockLatest();
+        await apply("live", "growth.campaign_activated");
+        break;
+      }
+      case "pause": {
+        if (current.status === "paused") break;
+        if (current.status !== "live") throw new CampaignBuilderError("campaign_not_live", 409);
+        await apply("paused", "growth.campaign_paused");
+        break;
+      }
+      case "resume": {
+        if (current.status === "live") break;
+        if (current.status !== "paused") throw new CampaignBuilderError("campaign_not_paused", 409);
+        if (explicitEnd && new Date(explicitEnd).getTime() <= now.getTime()) {
+          throw new CampaignBuilderError("campaign_already_ended", 409);
+        }
+        await apply("live", "growth.campaign_resumed");
+        break;
+      }
+      case "complete": {
+        if (current.status === "completed") break;
+        if (current.status !== "live" && current.status !== "paused") {
+          throw new CampaignBuilderError("campaign_not_running", 409);
+        }
+        await apply("completed", "growth.campaign_completed");
+        break;
+      }
+    }
+
     return (await getCampaign(businessId, id))!;
   });
 }

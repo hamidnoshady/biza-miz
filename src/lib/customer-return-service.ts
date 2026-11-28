@@ -26,6 +26,7 @@ import {
   postExactOperationalInventoryEntry,
   resolveOrderReturnAttribution,
 } from "./ledger-service";
+import { restoreCampaignRewardTenders } from "./campaign-reward-service";
 import { WELL_KNOWN_CODES } from "./coa-template";
 import { systemJournalMemo } from "./journal-memo";
 import { appendSyncOutboxEvent } from "./sync-outbox";
@@ -170,8 +171,13 @@ export async function createCustomerReturn(
     `SELECT
        (SELECT COALESCE(sum(refund_amount_rial),0)::text
           FROM customer_returns WHERE business_id=$2 AND location_id=$3 AND order_id=$1) AS previously_refunded,
+       -- Reward value a customer spent at this till (issue #901) is not money
+       -- the business can hand back: that slice is restored to their wallet
+       -- instead (restoreCampaignRewardTenders below), so it must not inflate
+       -- the cap on a cash refund — otherwise a fully returned bill would pay
+       -- the customer back in cash for value they never paid in cash.
        (SELECT COALESCE(sum(p.amount) FILTER (
-                  WHERE p.method <> 'credit' AND p.superseded_by_amendment_id IS NULL
+                  WHERE p.method NOT IN ('credit', 'cashback') AND p.superseded_by_amendment_id IS NULL
                 ),0)::text
           FROM payments p WHERE p.location_id=$3 AND p.order_id=$1) AS net_non_credit_tender`,
     [params.orderId, params.businessId, params.locationId],
@@ -392,6 +398,17 @@ export async function createCustomerReturn(
       amount: refundAmount, tax: rialText(tax.toString()),
       orderId: params.orderId, dimensions: returnAttribution,
       ...source,
+    });
+    // If this bill was partly paid with campaign cashback, the refunded slice
+    // that was reward goes back to the customer's wallet rather than the drawer:
+    // the reward liability keeps the value, and the return's contra-revenue
+    // debit is settled against 2445. Idempotent per redemption (it restores only
+    // the increment the bill's cumulative refund has not covered yet), so a
+    // replayed return and a later partial one each move only their own share.
+    await restoreCampaignRewardTenders(client, {
+      businessId: params.businessId,
+      orderId: params.orderId,
+      actorId: params.createdBy,
     });
   }
   if (recovered > 0n) {

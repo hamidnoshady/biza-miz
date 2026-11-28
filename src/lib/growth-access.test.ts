@@ -219,6 +219,10 @@ describe("button abilities", () => {
     expect(Object.values(owner).every(Boolean)).toBe(true);
     expect(growthAbilities(effectivePermissions("cashier", {}))).toEqual({
       manageCampaigns: false,
+      // Issue #901: the till may pay a customer's earned campaign reward
+      // (same trust as spending their points) but may not approve a campaign.
+      approveCampaigns: false,
+      redeemCampaignRewards: true,
       manageLoyaltyPrograms: false,
       redeemPoints: true,
       issueStoreCredit: false,

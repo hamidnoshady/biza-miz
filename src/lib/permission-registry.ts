@@ -289,6 +289,9 @@ const DRAFTS: Draft[] = [
   { key: P.marketingAttributionManage, group: "growth", label: "ثبت تعامل بازاریابی", description: "ثبت گزارش تعامل با سرنخ موجود؛ به مشاهده ماموریت و مشاهده و مدیریت CRM نیز نیاز دارد.", risk: "medium", audit: true },
   { key: P.campaignsView, group: "growth", label: "مشاهده کمپین‌ها", description: "دیدن کمپین‌های تخفیف، اثربخشی آن‌ها و کمپین‌های پیامی بدون اجرای آن‌ها.", risk: "low", audit: false },
   { key: P.campaignsManage, group: "growth", label: "اجرای کمپین", description: "ساخت، توقف و ارسال کمپین تخفیف و کمپین پیامی.", risk: "high", audit: true },
+  // Issue #901: approval is a second, higher key than composition — a campaign
+  // that starts paying cashback is a liability the books carry.
+  { key: P.campaignsApprove, group: "growth", label: "تأیید و شروع کمپین پاداشی", description: "تأیید کمپین بازگشت وجه و فعال‌سازی آن؛ از این لحظه هر فروش واجد شرط به مشتری پاداش بدهکار می‌کند.", risk: "critical", audit: true },
   { key: P.loyaltyView, group: "growth", label: "مشاهده باشگاه مشتریان", description: "مشاهده برنامه‌های وفاداری، امتیاز و اعتبار فروشگاهی مشتری و یادآوری خرید مجدد.", risk: "low", audit: false },
   { key: P.loyaltyManage, group: "growth", label: "پیکربندی باشگاه مشتریان", description: "تعریف و تغییر برنامه وفاداری و قواعد امتیاز.", risk: "high", audit: true },
   { key: P.loyaltyRedeem, group: "growth", label: "استفاده از امتیاز مشتری", description: "خرج کردن امتیاز وفاداری مشتری هنگام خرید.", risk: "medium", audit: true },

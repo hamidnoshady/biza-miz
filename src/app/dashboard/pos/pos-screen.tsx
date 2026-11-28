@@ -283,6 +283,20 @@ export function PosScreen({
     );
   }, [paymentMethods]);
   const [tipInput, setTipInput] = useState("");
+  /**
+   * «بازگشت وجه کمپین» — how much of this bill the customer's campaign reward
+   * pays (issue #901), typed in the business's display unit like every other
+   * money box. It is a tender, not a discount: the bill never changes, the
+   * reward liability covers this slice and the ways below cover the rest.
+   */
+  const [cashbackInput, setCashbackInput] = useState("");
+  // A reward balance belongs to a named person, and the server refuses a
+  // reward slice without one. The field is closed until a customer is picked,
+  // and an amount typed for a customer who is then cleared is dropped rather
+  // than carried into a sale that cannot spend it.
+  useEffect(() => {
+    if (!customer) setCashbackInput("");
+  }, [customer]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CheckoutResult | null>(null);
@@ -828,10 +842,19 @@ export function PosScreen({
   const tipNum = money.fromInput(
     Math.max(0, Math.round(Number(tipInput) || 0)),
   );
+  /** The reward slice of this bill, in Rial. */
+  const cashbackRial = Math.max(
+    0,
+    money.fromInput(Math.round(Number(cashbackInput) || 0)),
+  );
   const totals = useMemo(
     () => computeOrderTotals(cartLines, discount, feeNum, activePromotions),
     [cartLines, discount, feeNum, activePromotions],
   );
+  /** What the cashier's own ways still have to cover once the reward pays its part. */
+  const cashbackDue = Math.max(0, totals.total - cashbackRial);
+  /** The reward can never exceed the bill — the server refuses it, and so does the till. */
+  const cashbackOverBill = cashbackRial > totals.total;
   /**
    * A payment whose typed amount (or way) books a difference needs a named
    * customer — the server refuses it otherwise, so the hold button says so
@@ -839,7 +862,7 @@ export function PosScreen({
    */
   const paymentNeedsCustomer =
     checkoutIntent === "payment" &&
-    draftRequiresCustomer(paymentDraft, paymentMethods, totals.total) &&
+    draftRequiresCustomer(paymentDraft, paymentMethods, cashbackDue) &&
     !customer;
   /**
    * `overrides` is how the table prompt places an order with the table that was
@@ -873,10 +896,22 @@ export function PosScreen({
     // and a cashier wondering which of the two things failed.
     let paymentBody: PaymentDraftBody[] = [];
     if (intent === "payment") {
+      // Refused here as well as on the server, so the cashier reads it before a
+      // ۴-second hold rather than after one — the server stays the backstop.
+      if (cashbackOverBill) {
+        setError(errorMessage("invalid_cashback_amount"));
+        return false;
+      }
+      if (cashbackRial > 0 && !customer) {
+        setError(errorMessage("customer_required"));
+        return false;
+      }
+      // The ways cover the bill MINUS the reward slice: the reward is part of
+      // the payment, so the split has to add up to what is left, not to the bill.
       const built = paymentDraftBody(
         paymentDraft,
         paymentMethods,
-        totals.total,
+        cashbackDue,
         money.unit,
       );
       if (!built.ok) {
@@ -1021,21 +1056,29 @@ export function PosScreen({
         let bodyToCharge = paymentBody;
         let rebuiltError: string | undefined;
         if (serverTotal !== null && totalChanged) {
-          const rebuilt = paymentDraftBody(
-            paymentDraft,
-            paymentMethods,
-            serverTotal,
-            money.unit,
-          );
-          if (!rebuilt.ok) {
-            rebuiltError = errorMessage(rebuilt.error);
-          } else if (
-            draftRequiresCustomer(paymentDraft, paymentMethods, serverTotal, money.unit) &&
-            !customer
-          ) {
-            rebuiltError = errorMessage("customer_required");
+          // The ways are rebuilt against the bill MINUS the reward slice, the
+          // same arithmetic the server will do: `due = total - cashbackRial`.
+          const rebuiltDue = Math.max(0, serverTotal - cashbackRial);
+          if (cashbackRial > serverTotal) {
+            // The server re-priced the sale below the reward the cashier typed.
+            rebuiltError = errorMessage("invalid_cashback_amount");
           } else {
-            bodyToCharge = rebuilt.value;
+            const rebuilt = paymentDraftBody(
+              paymentDraft,
+              paymentMethods,
+              rebuiltDue,
+              money.unit,
+            );
+            if (!rebuilt.ok) {
+              rebuiltError = errorMessage(rebuilt.error);
+            } else if (
+              draftRequiresCustomer(paymentDraft, paymentMethods, rebuiltDue, money.unit) &&
+              !customer
+            ) {
+              rebuiltError = errorMessage("customer_required");
+            } else {
+              bodyToCharge = rebuilt.value;
+            }
           }
         }
         if (rebuiltError !== undefined) {
@@ -1054,6 +1097,7 @@ export function PosScreen({
                   payments: bodyToCharge,
                   customerId: customer?.id ?? undefined,
                   tipAmount: tipNum,
+                  cashbackRial: cashbackRial > 0 ? cashbackRial : undefined,
                 }),
               },
             );
@@ -1124,6 +1168,7 @@ export function PosScreen({
     setCheckoutIntent("order");
     setPaymentDraft(emptyPaymentDraft(paymentMethods));
     setTipInput("");
+    setCashbackInput("");
     setCartSheetOpen(false);
     setBusy(false);
     submissionInFlight.current = false;
@@ -2226,12 +2271,25 @@ export function PosScreen({
                   value={money.format(totals.total)}
                   bold
                 />
+                {checkoutIntent === "payment" && cashbackRial > 0 ? (
+                  <>
+                    <Row
+                      label="بازگشت وجه کمپین"
+                      value={money.format(cashbackRial)}
+                    />
+                    <Row
+                      label="باقی‌ماندهٔ فاکتور برای دریافت"
+                      value={money.format(cashbackDue)}
+                      bold
+                    />
+                  </>
+                ) : null}
                 {checkoutIntent === "payment" && tipNum > 0 ? (
                   <>
                     <Row label="انعام" value={money.format(tipNum)} />
                     <Row
                       label="مبلغ دریافتی"
-                      value={money.format(totals.total + tipNum)}
+                      value={money.format(cashbackDue + tipNum)}
                       bold
                     />
                   </>
@@ -2261,6 +2319,53 @@ export function PosScreen({
                     />
                     <CustomerBalanceBadge customer={customer} />
                   </div>
+                  {/*
+                    The reward slice, asked for where the money is: a cashier
+                    types how much of this bill the customer's cashback pays
+                    and reads back what the ways below still have to cover.
+                    Closed until a customer is chosen, because a balance is a
+                    person's (the server refuses the slice without one).
+                  */}
+                  <div className="mb-2.5 rounded-xl border border-amber-200 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/15 p-2.5">
+                    <label
+                      htmlFor="pos-checkout-cashback"
+                      className="mb-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-xs font-bold text-muted-foreground"
+                    >
+                      <span>بازگشت وجه کمپین</span>
+                      <span className="font-normal tabular-nums">
+                        باقی‌مانده: {money.format(cashbackDue)}
+                      </span>
+                    </label>
+                    <PersianNumberInput
+                      id="pos-checkout-cashback"
+                      className={
+                        inputClass + " min-h-11 border-border/80 bg-card"
+                      }
+                      dir="ltr"
+                      inputMode="numeric"
+                      value={cashbackInput}
+                      disabled={busy || !customer}
+                      onChange={(event) => setCashbackInput(event.target.value)}
+                      placeholder="۰"
+                      aria-label="مبلغ بازگشت وجه کمپین"
+                    />
+                    {!customer ? (
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        برای استفاده از بازگشت وجه کمپین، مشتری را انتخاب کنید.
+                      </p>
+                    ) : cashbackOverBill ? (
+                      <p
+                        className="mt-1 text-[11px] font-bold text-destructive"
+                        role="alert"
+                      >
+                        {errorMessage("invalid_cashback_amount")}
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        مابقی فاکتور با روش‌های پرداخت زیر دریافت می‌شود.
+                      </p>
+                    )}
+                  </div>
                   <PaymentWays
                     routeOrderPayment
                     methods={paymentMethods}
@@ -2269,7 +2374,7 @@ export function PosScreen({
                     onReload={reloadPaymentMethods}
                     draft={paymentDraft}
                     onChange={setPaymentDraft}
-                    due={totals.total}
+                    due={cashbackDue}
                     disabled={busy}
                     idPrefix="pos-checkout"
                     customer={customer}

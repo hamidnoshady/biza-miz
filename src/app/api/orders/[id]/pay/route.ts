@@ -32,6 +32,7 @@ import { releaseTableAfterOrderSettled } from "@/lib/table-session-service";
 import { appendSyncOutboxEvent } from "@/lib/sync-outbox";
 import { markScoringDirtyIn } from "@/lib/crm-scoring-freshness";
 import { OrderPaymentRoutingError, routeOrderTenders, type RoutedOrderTender } from "@/lib/order-payment-routing-service";
+import { CampaignRewardError, applyCampaignRewardTender } from "@/lib/campaign-reward-service";
 
 interface PayTenderBody {
   /** `payment_methods.id` — the way the cashier tapped. */
@@ -67,6 +68,15 @@ interface PayBody {
   customerId?: string;
   /** A tip collected alongside the bill (issue #160 §4), in whole Rial — added on top of the order total, never part of revenue. */
   tipAmount?: number;
+  /**
+   * How much of this bill the customer pays with campaign cashback (issue
+   * #901). Part of the bill, not a discount: the order total and its revenue
+   * are unchanged, the reward liability (2445) covers that slice and the
+   * cashier's own tenders cover the rest. Requires `customerId` — a reward
+   * balance belongs to a person — and is spent from the soonest-expiring
+   * rewards first. Refused whole when the balance does not cover it.
+   */
+  cashbackRial?: number;
 }
 
 /**
@@ -122,6 +132,13 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   if (!Number.isSafeInteger(tipAmount) || tipAmount < 0) {
     return NextResponse.json({ error: "invalid_tip_amount" }, { status: 400 });
   }
+  const requestedCashback = body.cashbackRial ?? 0;
+  if (!Number.isSafeInteger(requestedCashback) || requestedCashback < 0) {
+    return NextResponse.json({ error: "invalid_cashback_amount" }, { status: 400 });
+  }
+  if (requestedCashback > 0 && !customerId) {
+    return NextResponse.json({ error: "customer_required" }, { status: 400 });
+  }
 
   const rawTenders: PayTenderBody[] = body.payments?.length
     ? body.payments
@@ -158,6 +175,9 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
   // credit. Both zero for the ordinary, exact checkout.
   let balanceDue = 0;
   let customerCredit = 0;
+  // The reward slice of this bill (issue #901), reported on the receipt and in
+  // the till's response.
+  let cashbackRial = 0;
   // Set when this checkout settled the last active order on a dine-in table,
   // so the floor plan can be told the table is back.
   let releasedSession: { sessionId: string } | null = null;
@@ -198,7 +218,39 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     );
     const inventoryEventId = eventRows[0].id;
     total = rialText(order.total);
-    const due = Number(rialBigInt(total));
+    const billRial = Number(rialBigInt(total));
+    // The reward slice of this bill (issue #901), spent inside the checkout
+    // transaction: the customer's soonest-expiring rewards pay `cashbackRial`
+    // of the total, and the payment entry below debits 2445 for exactly that
+    // much. Its own `payments` row keeps the shift and the receipt honest —
+    // `cashSummarySelect` buckets it as "other", never as drawer cash.
+    if (requestedCashback > 0) {
+      if (billRial <= 0 || requestedCashback > billRial) {
+        await client.query("ROLLBACK");
+        return NextResponse.json({ error: "invalid_cashback_amount" }, { status: 400 });
+      }
+      const rewardTender = await applyCampaignRewardTender(client, {
+        businessId: session.businessId,
+        locationId: location.id,
+        orderId: id,
+        customerId: customerId!,
+        amountRial: requestedCashback,
+        actorId: session.sub,
+      });
+      cashbackRial = rewardTender.amountRial;
+      // Sequence 1: the reward is the till's first slice, and 0092's
+      // `(order_id, settlement_seq)` unique index needs every positive row of
+      // one bill to carry its own position (the column is 1-based).
+      await client.query(
+        `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, settlement_seq)
+         VALUES ($1, $2, 'cashback', $3, $4, $5, 1)`,
+        [location.id, id, String(cashbackRial), "campaign-reward", session.sub],
+      );
+    }
+    // One past the reward slice, when there is one.
+    const firstTenderSeq = cashbackRial > 0 ? 2 : 1;
+    // What the cashier's own ways still have to cover.
+    const due = billRial - cashbackRial;
     let tenders: RoutedOrderTender[] = [];
     if (due > 0) {
       const validated = validateTenders(
@@ -223,13 +275,20 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       balanceDue = difference.balanceDue;
       customerCredit = difference.customerCredit;
     }
+    // A tip is money: it cannot ride on the reward slice, so a bill whose whole
+    // remainder is on credit (or covered entirely by the reward) cannot collect
+    // one.
+    if (tipAmount > 0 && !tenders.some((tender) => tender.settlement !== "credit")) {
+      await client.query("ROLLBACK");
+      return NextResponse.json({ error: "tip_requires_payment_tender" }, { status: 400 });
+    }
     paid = tenders;
     for (const [index, tender] of tenders.entries()) {
       await client.query(
         `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, payment_method_id,
                                settlement_seq, financial_account_id, financial_account_gl_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [location.id, id, tender.settlement, String(tender.amount), tender.reference, session.sub, tender.methodId, index + 1,
+        [location.id, id, tender.settlement, String(tender.amount), tender.reference, session.sub, tender.methodId, index + firstTenderSeq,
           tender.financialAccountId ?? null, tender.financialAccountGlId ?? null],
       );
     }
@@ -247,7 +306,7 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       await client.query(
         `INSERT INTO payments (location_id, order_id, method, amount, reference, received_by, payment_method_id, settlement_seq)
          VALUES ($1, $2, 'credit', $3, $4, $5, $6, $7)`,
-        [location.id, id, String(balanceDue), null, session.sub, creditWay[0]?.id ?? null, tenders.length + 1],
+        [location.id, id, String(balanceDue), null, session.sub, creditWay[0]?.id ?? null, tenders.length + firstTenderSeq],
       );
     }
     // An overpayment's excess is the customer's store credit: a real
@@ -298,14 +357,21 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       locationId: location.id,
       orderId: id,
       createdBy: session.sub,
-      tenders: tendersWithTip(tenders, tipAmount).map((tender) => ({
-        settlement: tender.settlement,
-        amount: rialText(String(tender.amount)),
-        ...(tender.financialAccountGlId ? {
-          financialAccountId: tender.financialAccountId,
-          financialAccountGlId: tender.financialAccountGlId,
-        } : {}),
-      })),
+      tenders: [
+        ...tendersWithTip(tenders, tipAmount).map((tender) => ({
+          settlement: tender.settlement,
+          amount: rialText(String(tender.amount)),
+          ...(tender.financialAccountGlId ? {
+            financialAccountId: tender.financialAccountId,
+            financialAccountGlId: tender.financialAccountGlId,
+          } : {}),
+        })),
+        // Last in the list on purpose: `tendersWithTip` puts a tip on the first
+        // money tender, and the reward slice is not money.
+        ...(cashbackRial > 0
+          ? [{ settlement: "cashback", amount: rialText(String(cashbackRial)) }]
+          : []),
+      ],
       amount: total,
       tax: rialText(order.tax),
       inventoryEventId,
@@ -363,16 +429,23 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
       schemaVersion: paid.some((tender) => tender.financialAccountId) ? 3 : 2,
       payload: {
         orderId: id,
-        tenders: paid.map((tender) => ({
-          methodId: tender.methodId,
-          settlement: tender.settlement,
-          amount: tender.amount,
-          reference: tender.reference,
-          ...(tender.financialAccountId ? {
-            financialAccountId: tender.financialAccountId,
-            financialAccountGlId: tender.financialAccountGlId,
-          } : {}),
-        })),
+        tenders: [
+          ...paid.map((tender) => ({
+            methodId: tender.methodId,
+            settlement: tender.settlement,
+            amount: tender.amount,
+            reference: tender.reference,
+            ...(tender.financialAccountId ? {
+              financialAccountId: tender.financialAccountId,
+              financialAccountGlId: tender.financialAccountGlId,
+            } : {}),
+          })),
+          // The reward slice travels too, so the peer's payment entry debits
+          // 2445 rather than reporting a bill that collected less than it sold.
+          ...(cashbackRial > 0
+            ? [{ methodId: null, settlement: "cashback", amount: cashbackRial, reference: "campaign-reward" }]
+            : []),
+        ],
         customerId,
         tipAmount,
         businessDate: businessDay?.businessDate ?? null,
@@ -390,6 +463,9 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     }
     if (err instanceof OrderPaymentRoutingError) {
       return NextResponse.json({ error: err.code }, { status: err.status });
+    }
+    if (err instanceof CampaignRewardError) {
+      return NextResponse.json({ error: err.code, ...err.details }, { status: err.status });
     }
     const failure = paymentFailureFor(err);
     if (failure) return NextResponse.json({ error: failure.error }, { status: failure.status });
@@ -410,13 +486,19 @@ export const POST = withTenantScope(async (request: NextRequest, context: { para
     tableReleased: Boolean(releasedSession),
     amount: total,
     method: paid[0]?.settlement ?? null,
-    payments: paid.map((tender) => ({
-      methodId: tender.methodId,
-      method: tender.settlement,
-      amount: tender.amount,
-      reference: tender.reference,
-      ...(tender.financialAccountId ? { financialAccountId: tender.financialAccountId } : {}),
-    })),
+    payments: [
+      ...(cashbackRial > 0
+        ? [{ methodId: null, method: "cashback", amount: cashbackRial, reference: "campaign-reward" }]
+        : []),
+      ...paid.map((tender) => ({
+        methodId: tender.methodId,
+        method: tender.settlement,
+        amount: tender.amount,
+        reference: tender.reference,
+        ...(tender.financialAccountId ? { financialAccountId: tender.financialAccountId } : {}),
+      })),
+    ],
+    cashbackRial,
     tipAmount,
     balanceDue,
     customerCredit,

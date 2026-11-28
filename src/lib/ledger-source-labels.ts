@@ -133,6 +133,16 @@ export const LEDGER_SOURCE_LABELS: Record<string, string> = {
   loyalty_store_credit: "اعتبار فروشگاهی",
   loyalty_store_credit_use: "مصرف اعتبار فروشگاهی",
   message_campaign: "هزینهٔ کمپین پیامکی",
+  // Issue #901 — campaign cashback. Two labels because the journal must show
+  // which direction the reward liability moved: the accrual for a settled sale,
+  // and the payout that settles it. (Reversals and expiry post under the same
+  // `growth_campaign_reward` document, with their own posting kind.)
+  growth_campaign_reward: "بازگشت وجه کمپین",
+  growth_cashback_redemption: "پرداخت بازگشت وجه کمپین به مشتری",
+  // A sale the customer paid for partly with a reward, returned: the reward
+  // goes back to their wallet instead of the drawer, so the entry settles
+  // against the campaign liability (2445) rather than cash.
+  growth_cashback_tender: "برگشت فروش پرداخت‌شده با پاداش کمپین",
 
   // Issue #1128 §D — an advertising agency's pass-through cost. It needs its own
   // label rather than sharing one with an ordinary expense, because the two are not

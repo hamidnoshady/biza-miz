@@ -69,7 +69,9 @@ export function GrowthSection({
     "my-marketing-assignments": () => <MyMarketingAssignmentsSection canRecordTouch={canRecordOwnMarketingTouch(permissionSet)} />,
     "marketing-assignments": () => <MarketingAssignmentsSection canManage={permissionSet.has(PERMISSIONS.marketingAssignmentsManage)} />,
     "marketing-touchpoints": () => <MarketingTouchpointsSection canManage={permissionSet.has(PERMISSIONS.marketingAttributionManage) && permissionSet.has(PERMISSIONS.crmView) && permissionSet.has(PERMISSIONS.crmManage) && permissionSet.has(PERMISSIONS.marketingAssignmentsView)} />,
-    campaigns: () => <CampaignsSection canManage={abilities.manageCampaigns} />,
+    campaigns: () => (
+      <CampaignsSection canManage={abilities.manageCampaigns} canApprove={abilities.approveCampaigns} />
+    ),
     messaging: () => <MessagingSection canManage={abilities.manageCampaigns} initialPromotionId={initialPromotionId} />,
     "gift-cards": () => <GiftCardsSection abilities={abilities} />,
     loyalty: () => <LoyaltySection abilities={abilities} />,

@@ -581,6 +581,15 @@ const ERROR_MESSAGES: Record<string, string> = {
     too_many_tenders: "تعداد روش‌های پرداخت یک فاکتور بیش از حد مجاز است.",
     too_many_open_tenders: "فقط یکی از روش‌های پرداخت می‌تواند بدون مبلغ (باقی‌مانده) باشد.",
     payment_reference_required: "برای این روش پرداخت، شمارهٔ پیگیری الزامی است.",
+    // Paying part of a bill with campaign cashback (issue #901). Each one is a
+    // refusal the server makes and the till has to say in Persian.
+    invalid_cashback_amount: "مبلغ بازگشت وجه کمپین معتبر نیست یا از مبلغ فاکتور بیشتر است.",
+    reward_balance_insufficient:
+      "بازگشت وجه کمپین این مشتری برای این مبلغ کافی نیست. مبلغ کمتری وارد کنید یا بقیه را با روش‌های پرداخت دریافت کنید.",
+    reward_tender_conflict:
+      "این فاکتور قبلاً با مبلغ دیگری از بازگشت وجه کمپین پرداخت شده است. صفحه را تازه کنید و مبلغ را بررسی کنید.",
+    tip_requires_payment_tender:
+      "برای ثبت انعام، باید بخشی از فاکتور با نقدی یا کارت‌خوان دریافت شود.",
     payment_reference_too_long: "شمارهٔ پیگیری بیش از حد طولانی است.",
     invalid_settlement: "نحوهٔ تسویه نامعتبر است.",
     invalid_payment_method_order: "ترتیب روش‌های پرداخت معتبر نیست؛ فهرست را تازه‌سازی و دوباره تلاش کنید.",

@@ -47,6 +47,9 @@ const SETTLEMENT_ICONS: Record<PaymentSettlement, typeof BanknoteIcon> = {
   credit: ReceiptTextIcon,
   cheque: ScrollTextIcon,
   snappfood: SmartphoneIcon,
+  // A reward spent at the till is the customer's wallet, and never a way this
+  // screen offers — the entry exists so the map covers the whole vocabulary.
+  cashback: WalletIcon,
 };
 
 export function paymentWayIcon(method: PaymentMethodView) {

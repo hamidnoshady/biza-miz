@@ -130,6 +130,20 @@ export const GROWTH_API_PERMISSIONS: Readonly<Record<string, Partial<Record<Http
     DELETE: PERMISSIONS.campaignsManage,
   },
   "/api/growth/campaign-builder/[id]/simulate": { POST: PERMISSIONS.campaignsManage },
+  // Issue #901 lifecycle: submitting and pausing are composition actions;
+  // approving and activating promise money, so they need the approval key.
+  "/api/growth/campaign-builder/[id]/lifecycle": {
+    POST: [PERMISSIONS.campaignsManage, PERMISSIONS.campaignsApprove],
+  },
+  // Running the reward pass is a read-only-in-intent POST; it writes grants, so
+  // it is `campaigns.manage` like the dry run beside it.
+  "/api/growth/campaign-builder/[id]/run": { POST: PERMISSIONS.campaignsManage },
+  "/api/growth/campaign-rewards": { GET: PERMISSIONS.campaignsView },
+  "/api/growth/campaign-rewards/wallet": { GET: PERMISSIONS.campaignsView },
+  // Paying a customer their campaign reward out of the till is the same trust
+  // as spending their loyalty points, so it reuses that key rather than
+  // inventing another spend capability.
+  "/api/growth/campaign-rewards/redeem": { POST: PERMISSIONS.loyaltyRedeem },
   "/api/promotions": { GET: PERMISSIONS.campaignsView, POST: PERMISSIONS.campaignsManage, PATCH: PERMISSIONS.campaignsManage },
   "/api/promotions/reports": { GET: PERMISSIONS.campaignsView },
   "/api/promotions/targets": { GET: PERMISSIONS.campaignsView },
@@ -223,7 +237,13 @@ export const GROWTH_SECTION_READS: Readonly<Record<GrowthSectionKey, readonly `$
   "marketing-assignments": ["GET /api/growth/marketing-assignments"],
   "my-marketing-assignments": ["GET /api/growth/my-marketing-assignments"],
   "marketing-touchpoints": ["GET /api/growth/marketing-touchpoints"],
-  campaigns: ["GET /api/promotions", "GET /api/promotions/reports", "GET /api/promotions/targets"],
+  campaigns: [
+    "GET /api/promotions",
+    "GET /api/promotions/reports",
+    "GET /api/promotions/targets",
+    "GET /api/growth/campaign-builder",
+    "GET /api/growth/campaign-rewards",
+  ],
   messaging: ["GET /api/messaging"],
   "gift-cards": ["GET /api/promotions/gift-cards"],
   loyalty: ["GET /api/loyalty/programs", "GET /api/loyalty/repurchase", "GET /api/loyalty/customers/[id]"],
@@ -255,6 +275,10 @@ export function canOpenGrowth(permissions: ReadonlySet<string>): boolean {
  */
 export interface GrowthAbilities {
   manageCampaigns: boolean;
+  /** Issue #901: approve and activate a cashback campaign — a liability decision. */
+  approveCampaigns: boolean;
+  /** Pay a customer's campaign reward out at the till (the loyalty.redeem trust). */
+  redeemCampaignRewards: boolean;
   manageLoyaltyPrograms: boolean;
   redeemPoints: boolean;
   issueStoreCredit: boolean;
@@ -273,6 +297,8 @@ export interface GrowthAbilities {
 export function growthAbilities(permissions: ReadonlySet<string>): GrowthAbilities {
   return {
     manageCampaigns: permissions.has(PERMISSIONS.campaignsManage),
+    approveCampaigns: permissions.has(PERMISSIONS.campaignsApprove),
+    redeemCampaignRewards: permissions.has(PERMISSIONS.loyaltyRedeem),
     manageLoyaltyPrograms: permissions.has(PERMISSIONS.loyaltyManage),
     redeemPoints: permissions.has(PERMISSIONS.loyaltyRedeem),
     issueStoreCredit: permissions.has(PERMISSIONS.storeCreditIssue),

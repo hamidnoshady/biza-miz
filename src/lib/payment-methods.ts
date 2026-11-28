@@ -23,7 +23,20 @@ import type { Rial } from "./money";
  * The settlement classes — the `payment_method` enum, which is also the set of
  * debit accounts the order-payment posting knows how to reach.
  */
-export const PAYMENT_SETTLEMENTS = ["cash", "card", "card_to_card", "online", "credit", "cheque", "snappfood"] as const;
+export const PAYMENT_SETTLEMENTS = [
+  "cash",
+  "card",
+  "card_to_card",
+  "online",
+  "credit",
+  "cheque",
+  "snappfood",
+  // Issue #901: a campaign cashback reward spent on part of a bill. Part of
+  // this vocabulary because a `payments` row carries it and the ledger has to
+  // know which account that debit lands on (2445), not because a business may
+  // configure a way that settles this way — see CUSTOM_PAYMENT_SETTLEMENTS.
+  "cashback",
+] as const;
 
 export type PaymentSettlement = (typeof PAYMENT_SETTLEMENTS)[number];
 
@@ -39,6 +52,12 @@ export function isPaymentSettlement(value: unknown): value is PaymentSettlement 
  * way settling as SnapFood would silently claim the same contract's rate. The
  * built-in stays; nobody gets to mint another.
  *
+ * `cashback` is the same kind of exclusion as `snappfood`, for a different
+ * reason: the balance it spends is a customer's campaign reward, enforced by
+ * the reward engine (customer, order, hold, expiry, budget) — never by a till
+ * configuration. A business that could mint a way settling as `cashback` would
+ * be naming a liability it has no reward ledger for.
+ *
  * `cheque` is missing for a different reason (Phase 30). A cheque is not a
  * tender the till can take: it has a serial, a bank, a due date and a life of
  * its own, and settling a bill with one would leave چک‌های نزد صندوق holding a
@@ -49,7 +68,7 @@ export function isPaymentSettlement(value: unknown): value is PaymentSettlement 
  * knows which account that is, not so a checkout can offer it.
  */
 export const CUSTOM_PAYMENT_SETTLEMENTS = PAYMENT_SETTLEMENTS.filter(
-  (method) => method !== "snappfood" && method !== "cheque",
+  (method) => method !== "snappfood" && method !== "cheque" && method !== "cashback",
 ) as readonly PaymentSettlement[];
 
 export interface PaymentMethodDefaults {
@@ -116,6 +135,11 @@ export function ledgerSettlementFor(settlement: PaymentSettlement): "cash" | "ba
     // it is.
     case "cheque":
     case "snappfood":
+      return null;
+    // A retail invoice is not a customer's bill against a reward balance; the
+    // cashback tender reaches the ledger through the order payment entry, which
+    // debits 2445 directly (ledger-service.ts).
+    case "cashback":
       return null;
   }
 }

@@ -106,6 +106,7 @@ import {
   inputClass,
 } from "@/app/dashboard/ui";
 import { JalaliDatePicker } from "@/app/dashboard/jalali-date-picker";
+import { RewardCampaignsPanel } from "./reward-campaigns-panel";
 
 interface PromotionRow {
   id: string;
@@ -146,7 +147,7 @@ const STATE_FILTER_LABELS: Record<StateFilter, string> = {
   ...CAMPAIGN_STATE_LABELS,
 };
 
-export function CampaignsSection({ canManage }: { canManage: boolean }) {
+export function CampaignsSection({ canManage, canApprove }: { canManage: boolean; canApprove: boolean }) {
   const money = useMoney();
   const [promotions, setPromotions] = useState<PromotionRow[] | null>(null);
   const [effect, setEffect] = useState<EffectivenessRow[] | null>(null);
@@ -404,6 +405,11 @@ export function CampaignsSection({ canManage }: { canManage: boolean }) {
           </ul>
         )}
       </SectionCard>
+
+      {/* Issue #901: campaign cashback, below the discount rules. A separate
+          engine with its own budget, liability and approval — shown here
+          because both are "a campaign" to the owner, not a second app. */}
+      <RewardCampaignsPanel canManage={canManage} canApprove={canApprove} />
     </div>
   );
 }

@@ -491,6 +491,14 @@ export const PERMISSIONS = {
   marketingAttributionManage: "marketing_attribution.manage",
   campaignsView: "campaigns.view",
   campaignsManage: "campaigns.manage",
+  /**
+   * Issue #901 — issuing a campaign. `campaigns.manage` composes and submits a
+   * campaign; this key is the second pair of eyes that approves it and lets it
+   * start promising money. Pausing and stopping a live campaign stay on
+   * `campaigns.manage` on purpose: a safety action must never be harder to
+   * take than the action it stops.
+   */
+  campaignsApprove: "campaigns.approve",
   loyaltyView: "loyalty.view",
   loyaltyManage: "loyalty.manage",
   loyaltyRedeem: "loyalty.redeem",
@@ -573,6 +581,8 @@ const HIGH_RISK = new Set<Permission>([
   PERMISSIONS.backupManage,
   PERMISSIONS.storeCreditIssue,
   PERMISSIONS.storeCreditPayout,
+  // Issue #901: approving a cashback campaign starts a real liability.
+  PERMISSIONS.campaignsApprove,
   PERMISSIONS.giftCardsIssue,
   PERMISSIONS.commissionManage,
   PERMISSIONS.commissionCalculate,
@@ -697,7 +707,7 @@ const {
   websiteView, websiteManage, websiteSettingsManage,
   cmsView, cmsContentManage, cmsPublish, cmsConfigure,
   woocommerceView, woocommerceManage, woocommerceSync, woocommerceConfigure,
-  growthView, marketersView, marketersManage, marketingTargetsView, marketingTargetsManage, marketingAssignmentsView, marketingAssignmentsManage, marketingAssignmentsSelf, marketingAttributionView, marketingAttributionManage, campaignsView, campaignsManage, loyaltyView, loyaltyManage, loyaltyRedeem,
+  growthView, marketersView, marketersManage, marketingTargetsView, marketingTargetsManage, marketingAssignmentsView, marketingAssignmentsManage, marketingAssignmentsSelf, marketingAttributionView, marketingAttributionManage, campaignsView, campaignsManage, campaignsApprove, loyaltyView, loyaltyManage, loyaltyRedeem,
   storeCreditIssue, storeCreditPayout, giftCardsView, giftCardsIssue, giftCardsRedeem,
   commissionView, commissionManage, commissionCalculate, commissionApprove, commissionPayout, commissionReverse,
   marketingConfigure, torobView, torobManage, torobConfigure,

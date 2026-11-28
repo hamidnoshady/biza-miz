@@ -132,6 +132,14 @@ const BANK_METHOD = {
   requiresReference: false,
 };
 
+/** The one customer the picker offers — a reward balance needs a named person. */
+const CUSTOMER = {
+  id: "cus-1",
+  name: "سارا محمدی",
+  phone: null,
+  balance: 0,
+};
+
 /** Table service and delivery both off → the till falls back to takeaway, no table question. */
 const BUSINESS_INFO = {
   name: "کافهٔ آزمایشی",
@@ -205,6 +213,7 @@ beforeEach(() => {
       if (String(url).includes("/api/menu")) return json(MENU_PAYLOAD);
       if (String(url).includes("/api/payment-methods"))
         return json({ paymentMethods: [CASH_METHOD, BANK_METHOD] });
+      if (String(url).includes("/api/parties")) return json({ customers: [CUSTOMER] });
       if (String(url).includes("/api/health")) return json({ ok: true });
       if (String(url).includes("/api/connection/status")) return json({ ok: true, online: true });
       return json({});
@@ -380,6 +389,83 @@ describe("PosScreen checkout — server-priced confirmation (issue #913 item 5)"
     const notice = screen.queryAllByText(/مبلغ نهایی با قیمت به‌روزِ سرور/)[0];
     expect(notice).toBeDefined();
     expect(notice!.textContent).toContain(formatMoney(SERVER_TOTAL, "toman"));
+  });
+});
+
+describe("PosScreen checkout — the campaign reward tender (issue #901)", () => {
+  /** Opens the payment review's customer picker and chooses the seeded customer. */
+  async function chooseCustomer() {
+    fireEvent.click(screen.getByRole("button", { name: /^مشتری:/ }));
+    await flush();
+    advance(300); // the picker's search debounce
+    await flushUntil(() => {
+      if (screen.queryAllByRole("option").length === 0)
+        throw new Error("customer results not rendered yet");
+    });
+    fireEvent.click(screen.getByRole("option", { name: /سارا/ }));
+    await flush();
+  }
+
+  it("keeps the reward field closed until a customer is chosen, and says why", async () => {
+    await renderAndLoad();
+    await addTea();
+    await openPaymentReview();
+
+    const field = screen.getByLabelText("مبلغ بازگشت وجه کمپین") as HTMLInputElement;
+    expect(field.disabled).toBe(true);
+    expect(
+      shown("برای استفاده از بازگشت وجه کمپین، مشتری را انتخاب کنید."),
+    ).toBe(true);
+  });
+
+  it("sends a partial reward as cashbackRial and leaves the ways the bill MINUS the reward", async () => {
+    await renderAndLoad();
+    await addTea();
+    await openPaymentReview();
+    await chooseCustomer();
+
+    const field = screen.getByLabelText("مبلغ بازگشت وجه کمپین") as HTMLInputElement;
+    expect(field.disabled).toBe(false);
+    // 10,000t of a 50,000t bill = 100,000 Rial of the 500,000 Rial preview.
+    fireEvent.change(field, { target: { value: "10000" } });
+    await flush();
+
+    // What the cashier's own ways still have to collect, stated on the panel.
+    expect(shown(formatMoney(400_000, "toman"))).toBe(true);
+
+    await holdPayment();
+    await flushUntil(() => {
+      if (payPost.mock.calls.length === 0) throw new Error("no payment posted yet");
+    });
+
+    const body = JSON.parse(String(payPost.mock.calls[0][1]?.body)) as {
+      cashbackRial?: number;
+      customerId?: string;
+      payments: { methodId: string; amount?: number }[];
+    };
+    expect(body.cashbackRial).toBe(100_000);
+    expect(body.customerId).toBe("cus-1");
+    // The single way is sent open ("take the rest"), so the server prices the
+    // remaining 455,000 itself — the reward slice is never charged twice.
+    expect(body.payments).toHaveLength(1);
+    expect(body.payments[0].amount).toBeUndefined();
+  });
+
+  it("refuses a reward larger than the bill before any order is created", async () => {
+    await renderAndLoad();
+    await addTea();
+    await openPaymentReview();
+    await chooseCustomer();
+
+    const field = screen.getByLabelText("مبلغ بازگشت وجه کمپین") as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "900000" } });
+    await flush();
+    // Said on the panel itself, before the ۴-second hold.
+    expect(shown(errorMessage("invalid_cashback_amount"))).toBe(true);
+
+    await holdPayment();
+    expect(postCount()).toBe(0);
+    expect(payPost).not.toHaveBeenCalled();
   });
 });
 

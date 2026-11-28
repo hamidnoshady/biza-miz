@@ -47,7 +47,10 @@ vi.mock("@/lib/order-state-sync", () => ({ recordOrderState: vi.fn() }));
 vi.mock("@/lib/order-payment-errors", () => ({ paymentFailureFor: vi.fn() }));
 vi.mock("@/lib/payment-methods-service", () => ({ listPaymentMethods: vi.fn() }));
 vi.mock("@/lib/integrations/holoo/outbox-producer", () => ({ enqueueHolooSaleForOrder: vi.fn() }));
-vi.mock("@/lib/posting-engine", () => ({ emitDomainEvent: vi.fn() }));
+// The checkout imports the campaign reward service for the cashback tender,
+// which registers its posting rules on the engine at import time — so the mock
+// has to carry `registerPostingRule` as well as the emitter the route calls.
+vi.mock("@/lib/posting-engine", () => ({ emitDomainEvent: vi.fn(), registerPostingRule: vi.fn() }));
 vi.mock("@/lib/loyalty-service", () => ({ earnPoints: vi.fn() }));
 vi.mock("@/lib/table-session-service", () => ({ releaseTableAfterOrderSettled: vi.fn() }));
 vi.mock("@/lib/sync-outbox", () => ({ appendSyncOutboxEvent: vi.fn() }));

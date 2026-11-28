@@ -739,6 +739,10 @@ const SETTLEMENT_DEBIT_CODES: Record<string, string | undefined> = {
   // and the checkout writes the `cheques` row that says which cheque it is.
   cheque: WELL_KNOWN_CODES.chequesOnHand,
   snappfood: WELL_KNOWN_CODES.platformReceivable,
+  // A campaign cashback reward spent at the till (issue #901): the customer
+  // pays part of the bill with value the business already owes them, so the
+  // debit is the reward liability — never cash, and never store credit (2410).
+  cashback: WELL_KNOWN_CODES.cashbackPayable,
 };
 
 /**
@@ -901,6 +905,7 @@ export async function postExactOrderPaymentEntry(
     WELL_KNOWN_CODES.cash,
     WELL_KNOWN_CODES.bankClearing,
     WELL_KNOWN_CODES.accountsReceivable,
+    WELL_KNOWN_CODES.cashbackPayable,
     WELL_KNOWN_CODES.dineInRevenue,
     WELL_KNOWN_CODES.takeawayRevenue,
     WELL_KNOWN_CODES.deliveryRevenue,

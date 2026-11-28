@@ -126,6 +126,13 @@ export const WELL_KNOWN_CODES = {
   // Phase 27 Wave 6 — gift cards are a liability too: issuing one credits it,
   // redeeming it debits it; the card's value is never a balance column.
   giftCardPayable: "2420",
+  // Issue #901 — marketing cashback is its own liability. It is deliberately
+  // NOT 2410 store credit and NOT 4400 sales returns: a campaign reward is a
+  // marketing expense that has been promised to a customer, so it accrues
+  // against 5600 and is settled from this account when it is paid out or
+  // expires. Reusing the store-credit or sales-return path would make a
+  // marketing promise indistinguishable from a refund in the books.
+  cashbackPayable: "2445",
   // Phase 27 Wave 9 — jewelry: the customer-deposit liability (layaway and
   // custom orders) and the gold-account (حساب طلایی) liability.
   layawayDeposit: "2430",
@@ -624,6 +631,10 @@ const SHARED_LIABILITY_ACCOUNTS: TemplateAccount[] = [
   { code: "2121", name: "چک‌های صادرشده در جریان", type: "liability", parentCode: "2120" },
   { code: "2122", name: "چک‌های پرداختنی برگشتی", type: "liability", parentCode: "2120" },
   { code: "2430", name: "پیش‌دریافت از مشتری", type: "liability", parentCode: "2000" },
+  // Issue #901 — the campaign cashback liability. Shared, not per-industry:
+  // every trade can run a cashback campaign, and the posting rule looks this
+  // code up on whatever chart the business has.
+  { code: "2445", name: "بازگشت وجه تبلیغاتی (بدهی پاداش کمپین)", type: "liability", parentCode: "2000" },
   // Payroll withholdings. A gross-to-net run (audit F11) credits 2460/2470
   // with the insurance and income tax it withheld and 2490 with any other
   // fixed deduction; only net pay goes to 2300.
