@@ -91,6 +91,10 @@ const ACCOUNTING_HEADINGS: Record<AccountingSectionKey, { title?: string; descri
     description:
       "دفتر اموال، استهلاک ماهانه، واگذاری و اسقاط دارایی‌ها، و تطبیق آن با دفتر کل.",
   },
+  "intangible-assets": {
+    description:
+      "دفتر دارایی‌های نامشهود — نرم‌افزار، مجوز، اختراع و علامت تجاری؛ استهلاک، کاهش ارزش، تغییر برآورد آتی، واگذاری، گزارش و تطبیق با دفتر کل.",
+  },
   shareholders: {
     title: "سهام‌داران، سرمایه و تقسیم سود",
     description:

@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 import { Client } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
-import { depreciationPeriod } from "../src/lib/depreciation";
+import { depreciationPeriod, depreciationPeriodOfDate } from "../src/lib/depreciation";
 
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
@@ -520,5 +520,164 @@ describe("register ↔ ledger", () => {
     expect(reconciliation.registerAccumulatedAmortization).toBe("0");
     expect(reconciliation.ledgerAccumulatedAmortization).toBe("0");
     expect(reconciliation.status).toBe("reconciled");
+  });
+});
+
+describe("prospective estimate changes", () => {
+  it("records the decision and reprices only the future months", async () => {
+    const asset = await createFinite();
+    const first = await amortize(asset.id, "1404-01");
+    // 1,000,000 over three months floors at 333,333 for the first two months
+    // and leaves 333,334 to the final one, so one posted month leaves 666,667
+    // carrying — not the 700,000 a rounded 300,000/month would suggest.
+    expect(first.amount).toBe(333_333);
+    const before = await service.getIntangibleAsset(biz.id, asset.id);
+    expect(before?.asset.carryingAmount).toBe(666_667);
+
+    const changed = await service.changeIntangibleEstimate({
+      businessId: biz.id,
+      intangibleAssetId: asset.id,
+      effectiveDate: todayIso,
+      usefulLifeType: "finite",
+      usefulLifeMonths: 6,
+      residualValue: 100_000,
+      reason: "بازنگری عمر مجوز بر اساس برنامهٔ فناوری",
+      evidenceReference: "صورت‌جلسهٔ ۱۴۰۵/۰۹",
+      createdBy: owner.id,
+    });
+    expect(changed.estimateChange.previousUsefulLifeMonths).toBe(3);
+    expect(changed.estimateChange.newUsefulLifeMonths).toBe(6);
+    expect(changed.estimateChange.previousResidualValue).toBe(0);
+    expect(changed.estimateChange.newResidualValue).toBe(100_000);
+    // The same carrying amount less the new 100,000 residual.
+    expect(changed.estimateChange.remainingBase).toBe(566_667);
+    expect(changed.asset.usefulLifeMonths).toBe(6);
+    expect(changed.asset.residualValue).toBe(100_000);
+
+    // The posted month is untouched — amount and journal.
+    const detail = await service.getIntangibleAsset(biz.id, asset.id);
+    const posted = detail?.entries.find((entry) => entry.periodKey === "1404-01");
+    expect(posted?.amount).toBe(first.amount);
+    const journals = await journalFor("intangible_asset_amortization", first.amortizationEntryId);
+    expect(journals).toHaveLength(1);
+    expect(journals[0].debit).toBe(journals[0].credit);
+
+    // From the effective month the remaining 566,667 spreads over six months:
+    // round(566,667 / 6) = 94,445, with the last month absorbing the remainder.
+    const currentKey = depreciationPeriodOfDate(todayIso)!.key;
+    const next = await service.postIntangibleAmortization({
+      businessId: biz.id,
+      intangibleAssetId: asset.id,
+      periodKey: currentKey,
+      createdBy: owner.id,
+    });
+    expect(next.amount).toBe(94_445);
+    const projection = await service.getIntangibleAsset(biz.id, asset.id);
+    // Months before the effective date that were never posted keep the OLD
+    // plan (the change is prospective), so the revised month to compare is the
+    // first forecast after the current one — priced exactly as the posting was.
+    const forecast = projection?.schedule.find(
+      (row) => row.status === "forecast" && row.periodKey > currentKey,
+    );
+    expect(forecast?.amortization).toBe(94_445);
+  });
+
+  it("is idempotent on the client's key", async () => {
+    const asset = await createFinite();
+    const first = await service.changeIntangibleEstimate({
+      businessId: biz.id,
+      intangibleAssetId: asset.id,
+      effectiveDate: todayIso,
+      usefulLifeMonths: 6,
+      residualValue: 0,
+      reason: "بازنگری",
+      createdBy: owner.id,
+      idempotencyKey: "estimate-1",
+    });
+    const second = await service.changeIntangibleEstimate({
+      businessId: biz.id,
+      intangibleAssetId: asset.id,
+      effectiveDate: todayIso,
+      usefulLifeMonths: 6,
+      residualValue: 0,
+      reason: "بازنگری",
+      createdBy: owner.id,
+      idempotencyKey: "estimate-1",
+    });
+    expect(second.estimateChange.id).toBe(first.estimateChange.id);
+    const count = await db.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM intangible_asset_estimate_changes",
+    );
+    expect(count.rows[0].n).toBe("1");
+  });
+
+  it("refuses an effective date in a posted period", async () => {
+    const asset = await createFinite();
+    await expect(
+      service.changeIntangibleEstimate({
+        businessId: biz.id,
+        intangibleAssetId: asset.id,
+        effectiveDate: inService,
+        usefulLifeMonths: 6,
+        residualValue: 0,
+        reason: "گذشته",
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow(/estimate_effective_in_past/);
+  });
+
+  it("refuses a residual above the permitted carrying amount", async () => {
+    const asset = await createFinite();
+    await amortize(asset.id, "1404-01");
+    await expect(
+      service.changeIntangibleEstimate({
+        businessId: biz.id,
+        intangibleAssetId: asset.id,
+        effectiveDate: todayIso,
+        usefulLifeMonths: 6,
+        residualValue: 900_000,
+        reason: "بیش از ارزش دفتری",
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow(/residual_above_carrying_amount/);
+  });
+
+  it("refuses a no-op change", async () => {
+    const asset = await createFinite();
+    await expect(
+      service.changeIntangibleEstimate({
+        businessId: biz.id,
+        intangibleAssetId: asset.id,
+        effectiveDate: todayIso,
+        usefulLifeType: "finite",
+        usefulLifeMonths: 3,
+        residualValue: 0,
+        reason: "بدون تغییر",
+        createdBy: owner.id,
+      }),
+    ).rejects.toThrow(/estimate_unchanged/);
+  });
+
+  it("turns an indefinite asset into an amortizable one from the effective month", async () => {
+    const asset = await createIndefinite();
+    const changed = await service.changeIntangibleEstimate({
+      businessId: biz.id,
+      intangibleAssetId: asset.id,
+      effectiveDate: todayIso,
+      usefulLifeType: "finite",
+      usefulLifeMonths: 12,
+      residualValue: 0,
+      reason: "تعیین عمر مفید بر اساس مجوز جدید",
+      createdBy: owner.id,
+    });
+    expect(changed.estimateChange.previousUsefulLifeType).toBe("indefinite");
+    const currentKey = depreciationPeriodOfDate(todayIso)!.key;
+    const posted = await service.postIntangibleAmortization({
+      businessId: biz.id,
+      intangibleAssetId: asset.id,
+      periodKey: currentKey,
+      createdBy: owner.id,
+    });
+    expect(posted.amount).toBe(83_333);
   });
 });

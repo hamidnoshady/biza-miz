@@ -22,8 +22,9 @@ would have merged two registers and their GL reconciliations, so migration
 | `intangible_assets` | Master: code, class, acquisition and in-service dates, capitalized cost (including directly attributable cost), finite/indefinite life, residual, the four/five mapped GL accounts, the capitalization policy note and approving user, evidence reference, branch, custodian, status and disposal facts. |
 | `intangible_asset_amortization_entries` | One row per posted Jalali month. Reversal **marks** the row and mirrors the journal; the month may then be posted again (partial unique index on `(asset, period_key) WHERE reversed_at IS NULL`). |
 | `intangible_asset_impairments` | Each assessment's evidence, effective date, recoverable amount, carrying amount before, and the posted amount. A reversal row points at the assessment it undoes, so history reads as a sequence of approved judgements. |
+| `intangible_asset_estimate_changes` | Each prospective life/residual revision: effective date and month, previous and new values, the remaining amortizable base and life it left, the live balances at the decision, reason, evidence, approving and recording users, and an optional idempotency key. |
 
-Both child tables carry forced RLS scoped through the parent asset.
+All child tables carry forced RLS scoped through the parent asset.
 
 ## Accounting rules
 
@@ -49,6 +50,13 @@ Both child tables carry forced RLS scoped through the parent asset.
   never amortize again.
 - **History is immutable:** amortization and impairment are reversed, never
   deleted; corrections are traceable documents.
+- **Estimate changes are prospective:** revising the remaining life or residual
+  records a new approved row and applies only from its effective month forward.
+  The revised schedule spreads the remaining carrying amount (net of the new
+  residual) over the revised life, the final month absorbs rounding, and every
+  previously posted month and voucher stays exactly as it was. An effective
+  date in a posted (or locked) period is refused; a residual above the current
+  carrying amount is refused; a no-op change is refused.
 
 ## Posting identity
 
@@ -72,6 +80,9 @@ second implementation here.
 | `/api/ledger/intangible-assets/[id]/amortize` | `POST` (`action: "reverse"` to undo a month) | `finance.assets_manage` |
 | `/api/ledger/intangible-assets/[id]/impair` | `POST` assessment or `action: "reverse"` | `finance.assets_manage` |
 | `/api/ledger/intangible-assets/[id]/dispose` | `POST` sale / retirement / write-off | `finance.assets_manage` |
+| `/api/ledger/intangible-assets/[id]/estimate` | `GET` preview, `POST` prospective estimate change | `ledger.view` / `finance.assets_manage` |
+| `/api/ledger/intangible-assets/reports` | `GET` the six reports | `ledger.view` |
+| `/api/ledger/intangible-assets/export` | `GET` `format=csv|xlsx|pdf` and `report=…|all` | `ledger.view` |
 
 Errors are stable codes (`indefinite_life_not_amortized`,
 `period_already_amortized`, `no_impairment_required`, `intangible_asset_disposed`, …);
@@ -97,12 +108,32 @@ counted (`unmappedCount`) rather than silently reconciling.
   reversal, disposal gain/write-off, idempotency, tenant isolation and
   register↔ledger reconciliation before and after a reversal.
 
+## Screen
+
+The Accounting app has one section, «دارایی‌های نامشهود»
+(`src/app/(app)/accounting/intangible-assets-section.tsx`): the register with
+search, class/life/status/branch filters and pagination; a detail dialog with
+tabs for general information, the amortization schedule (posted vs forecast),
+posted vouchers, estimate-change history, impairment and reversals, disposal,
+and reconciliation/audit history; and a reports tab with Jalali date ranges and
+CSV/XLSX/PDF exports. Every amount it shows is the API's; the screen does not
+calculate a financial balance itself.
+
+## Reports and exports
+
+`getIntangibleReports` returns six datasets over one filtered population:
+register, period amortization schedule, posted amortization history,
+impairment and reversals, disposals, and register↔ledger reconciliation. The
+screen and the export route read that one function, so a filtered screen and
+its file cannot disagree. `report=all` writes a workbook with a sheet per
+report; CSV and PDF export the selected report. Amounts are exported as **exact
+integer Rial** — the register's storage unit, the same figure the API returns —
+and every money column says «ریال» in its label, so a file is never off by the
+business's display-unit factor and never rounds a Rial away.
+
 ## Not yet built
 
-- The register/reporting **screen** — the API returns the list, history,
-  projected schedule and reconciliation it needs, but no dashboard page exists
-  yet, so there is no Jalali period filter or export in the UI.
-- **Prospective estimate changes** (revising life or residual): the schedule
-  math from `depreciation.ts` already supports a per-period governing schedule,
-  but no route or history table records the change for intangibles yet.
 - Impairment-review **reminders** for indefinite-life assets.
+- A separate approval workflow for estimate changes: the capability
+  (`finance.assets_manage`) and the recorded approving user are in place, but a
+  second-person approval queue is not.

@@ -248,6 +248,42 @@ export type AmortizationPlan =
   | { ok: false; error: IntangibleAmortizationRefusal };
 
 /**
+ * The estimate in force for one month (issue #1326, ESH-163). A prospective
+ * revision replaces the parameters a month is priced from; `remainingBase` is
+ * the amortizable carrying amount the decision left and `remainingLifeMonths`
+ * the life it has to run. The snapshot is immutable once recorded, so a later
+ * revision cannot reinterpret an earlier one.
+ */
+export interface AmortizationRevision {
+  effectivePeriodKey: string;
+  usefulLifeMonths: number;
+  residualValue: number;
+  /** Carrying amount less the new residual, at the effective date. */
+  remainingBase: number;
+  /** Live amortization already posted inside this revision's segment. */
+  accumulatedSinceEffective: number;
+}
+
+/**
+ * One month under a revision: the remaining base spread evenly over the
+ * revised life, the final month absorbing every Rial of rounding so the
+ * schedule lands exactly on the new residual. Integer arithmetic only.
+ */
+export function revisedMonthlyAmortization(input: {
+  remainingBase: number;
+  usefulLifeMonths: number;
+  monthIndex: number;
+  accumulatedSinceEffective: number;
+}): number {
+  if (input.monthIndex >= input.usefulLifeMonths) return 0;
+  const remaining = Math.max(0, input.remainingBase - input.accumulatedSinceEffective);
+  if (remaining <= 0) return 0;
+  if (input.monthIndex === input.usefulLifeMonths - 1) return remaining;
+  const even = Math.round(input.remainingBase / input.usefulLifeMonths);
+  return Math.min(Math.max(0, even), remaining);
+}
+
+/**
  * One month's amortization, decided from facts read under the asset's lock.
  *
  * Delegates the calendar/rounding/lifetime-cap rules to `planDepreciation` with
@@ -264,10 +300,53 @@ export function planAmortization(input: {
   periodKey?: string | null;
   entryDate?: string | null;
   today: string;
+  /** The approved estimate governing this month, when a revision exists. */
+  revision?: AmortizationRevision | null;
 }): AmortizationPlan {
   if (input.usefulLifeType !== "finite") {
     return { ok: false, error: "indefinite_life_not_amortized" };
   }
+
+  // A revised estimate is priced from what the decision left — not from the
+  // original cost/life — so the remaining carrying amount spreads over the
+  // revised remaining life. The shared planner still owns the calendar,
+  // entry-date and last-open-month rules: the synthetic schedule's cost is
+  // `remainingBase + residual` and its accumulated base is only what has been
+  // posted since the effective month, so `cost − residual − accumulated` is
+  // exactly the remaining base.
+  const requestedKey =
+    input.periodKey?.trim() || depreciationPeriodOfDate(input.entryDate ?? input.today)?.key || null;
+  if (input.revision && requestedKey && requestedKey >= input.revision.effectivePeriodKey) {
+    const start = parseDepreciationPeriodKey(input.revision.effectivePeriodKey);
+    if (!start) return { ok: false, error: "invalid_period" };
+    const revised = planDepreciation({
+      schedule: {
+        cost: input.revision.remainingBase + input.revision.residualValue,
+        salvageValue: input.revision.residualValue,
+        usefulLifeMonths: input.revision.usefulLifeMonths,
+        inServiceDate: start.startsOn,
+        method: "straight_line",
+      },
+      finalSalvageValue: input.revision.residualValue,
+      finalUsefulLifeMonths: input.revision.usefulLifeMonths,
+      postedPeriodKeys: input.postedPeriodKeys,
+      accumulatedSoFar: input.revision.accumulatedSinceEffective,
+      postedPostings: input.postedPostings,
+      periodKey: input.periodKey ?? null,
+      entryDate: input.entryDate ?? null,
+      today: input.today,
+    });
+    if (revised.ok) return revised;
+    const revisedError = (
+      revised.error === "period_already_depreciated"
+        ? "period_already_amortized"
+        : revised.error === "fully_depreciated"
+          ? "fully_amortized"
+          : revised.error
+    ) as IntangibleAmortizationRefusal;
+    return { ok: false, error: revisedError };
+  }
+
   const plan = planDepreciation({
     schedule: {
       cost: input.asset.cost,
@@ -330,6 +409,12 @@ export interface AmortizationScheduleTotals {
  * An indefinite-life asset has no schedule at all — the accountant reviews it
  * for impairment instead, so returning an invented "0 per month" series would
  * be worse than returning nothing.
+ *
+ * When `revisions` is supplied the schedule is segment-aware: months before the
+ * first revision run on the original parameters (recorded on that revision),
+ * and months from each revision's effective month run on the base and life
+ * that revision approved. Posted months always keep their posted amount, so a
+ * revision can never rewrite history — it only changes the forecast.
  */
 export function projectAmortization(input: {
   usefulLifeType: UsefulLifeType;
@@ -339,6 +424,17 @@ export function projectAmortization(input: {
   todayPeriodKey: string;
   /** Accumulated impairment, so carrying amounts shown match the register. */
   accumulatedImpairment?: number;
+  /** Approved estimate revisions, oldest first. Empty/absent = original plan. */
+  revisions?: {
+    effectivePeriodKey: string;
+    /** The parameters before the first revision (used for earlier months). */
+    previousUsefulLifeType?: "finite" | "indefinite";
+    previousUsefulLifeMonths: number;
+    previousResidualValue: number;
+    usefulLifeMonths: number;
+    residualValue: number;
+    remainingBase: number;
+  }[];
 }): { rows: AmortizationScheduleRow[]; totals: AmortizationScheduleTotals } {
   const impairment = Math.max(0, input.accumulatedImpairment ?? 0);
   const emptyTotals = (): AmortizationScheduleTotals => ({
@@ -352,6 +448,9 @@ export function projectAmortization(input: {
     remainingAmortizableBase: amortizableBase(input.asset),
   });
   if (input.usefulLifeType !== "finite") return { rows: [], totals: emptyTotals() };
+  if (input.revisions && input.revisions.length > 0) {
+    return projectWithRevisions(input, input.revisions, impairment);
+  }
 
   const projected = projectDepreciationSchedule({
     asset: {
@@ -394,6 +493,124 @@ export function projectAmortization(input: {
       remainingAmortizableBase: projected.totals.remainingDepreciableBase,
     },
   };
+}
+
+function projectWithRevisions(
+  input: Parameters<typeof projectAmortization>[0],
+  revisions: NonNullable<Parameters<typeof projectAmortization>[0]["revisions"]>,
+  impairment: number,
+): { rows: AmortizationScheduleRow[]; totals: AmortizationScheduleTotals } {
+  const asset = input.asset;
+  const startPeriod = depreciationPeriodOfDate(asset.availableForUseDate);
+  if (!startPeriod) {
+    return {
+      rows: [],
+      totals: {
+        cost: asset.cost,
+        residualValue: asset.residualValue,
+        amortizableBase: amortizableBase(asset),
+        postedAmortization: 0,
+        forecastAmortization: 0,
+        accumulated: 0,
+        closingCarrying: Math.max(0, asset.cost - impairment),
+        remainingAmortizableBase: amortizableBase(asset),
+      },
+    };
+  }
+  const first = revisions[0];
+  const originalWasIndefinite = first.previousUsefulLifeType === "indefinite";
+  const originalEnd = originalWasIndefinite
+    ? null
+    : scheduleEndPeriodKey(asset.availableForUseDate, first.previousUsefulLifeMonths);
+  const revisionEnds = revisions.map((revision) =>
+    addMonthsToPeriodKey(revision.effectivePeriodKey, revision.usefulLifeMonths - 1),
+  );
+  const finalEnd = revisionEnds.reduce((max, end) => (end > max ? end : max), originalEnd ?? startPeriod.key);
+  const posted = new Map(input.livePostings.map((posting) => [posting.periodKey, posting]));
+  const liveKeys = input.livePostings.map((posting) => posting.periodKey);
+  /** Forecast amounts already emitted inside each revision segment. */
+  const forecastBySegment = new Map<string, number>();
+
+  const rows: AmortizationScheduleRow[] = [];
+  let accumulated = 0;
+  let postedAmortization = 0;
+  let forecastAmortization = 0;
+
+  const firstKey = originalWasIndefinite ? first.effectivePeriodKey : startPeriod.key;
+  for (let key = firstKey; key <= finalEnd; key = addMonthsToPeriodKey(key, 1)) {
+    const governing = [...revisions].reverse().find((revision) => revision.effectivePeriodKey <= key) ?? null;
+    if (originalWasIndefinite && !governing) continue;
+    const governingEnd = governing
+      ? addMonthsToPeriodKey(governing.effectivePeriodKey, governing.usefulLifeMonths - 1)
+      : originalEnd;
+    if (!governingEnd || key > governingEnd) continue;
+
+    const period = parseDepreciationPeriodKey(key);
+    if (!period) continue;
+    const posting = posted.get(key) ?? null;
+    const segmentStart = governing ? governing.effectivePeriodKey : startPeriod.key;
+    const segmentLife = governing ? governing.usefulLifeMonths : first.previousUsefulLifeMonths;
+    const segmentBase = governing ? governing.remainingBase : Math.max(0, asset.cost - first.previousResidualValue);
+    const monthIndex = monthsBetween(segmentStart, key);
+    const postedInSegment = liveKeys
+      .filter((postedKey) => postedKey >= segmentStart && postedKey < key)
+      .reduce((sum, postedKey) => sum + Number(posted.get(postedKey)?.amount ?? 0), 0);
+
+    const forecastSoFar = forecastBySegment.get(segmentStart) ?? 0;
+    const amount = posting
+      ? Number(posting.amount)
+      : revisedMonthlyAmortization({
+          remainingBase: segmentBase,
+          usefulLifeMonths: segmentLife,
+          monthIndex,
+          accumulatedSinceEffective: postedInSegment + forecastSoFar,
+        });
+    if (!posting && amount <= 0) continue;
+    if (!posting) forecastBySegment.set(segmentStart, forecastSoFar + amount);
+
+    const openingCarrying = Math.max(0, asset.cost - accumulated - impairment);
+    accumulated += amount;
+    if (posting) postedAmortization += amount;
+    else forecastAmortization += amount;
+
+    rows.push({
+      periodKey: key,
+      label: posting?.periodLabel || period.label,
+      startsOn: period.startsOn,
+      endsOn: period.endsOn,
+      status: posting ? "posted" : "forecast",
+      openingCarrying,
+      amortization: amount,
+      closingCarrying: Math.max(0, openingCarrying - amount),
+      accumulated,
+      remainingAmortizableBase: Math.max(0, amortizableBase(asset) - accumulated),
+      entryId: posting?.entryId ?? null,
+      journalEntryId: posting?.journalEntryId ?? null,
+    });
+  }
+
+  return {
+    rows,
+    totals: {
+      cost: asset.cost,
+      residualValue: asset.residualValue,
+      amortizableBase: amortizableBase(asset),
+      postedAmortization,
+      forecastAmortization,
+      accumulated,
+      closingCarrying: Math.max(0, asset.cost - accumulated - impairment),
+      remainingAmortizableBase: Math.max(0, amortizableBase(asset) - accumulated),
+    },
+  };
+}
+
+/** Whole calendar months from one `YYYY-MM` key to another (never negative). */
+function monthsBetween(fromKey: string, toKey: string): number {
+  const from = parseDepreciationPeriodKey(fromKey);
+  const to = parseDepreciationPeriodKey(toKey);
+  if (!from || !to) return 0;
+  const diff = (to.jy - from.jy) * 12 + (to.jm - from.jm);
+  return Math.max(0, diff);
 }
 
 /** Cost less what has been posted against it — the one carrying-amount rule. */

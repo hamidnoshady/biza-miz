@@ -9,6 +9,7 @@ import {
   planAmortization,
   projectAmortization,
   reconcileIntangibleRegister,
+  revisedMonthlyAmortization,
   reversibleImpairment,
   validateIntangibleAsset,
 } from "./intangible-assets";
@@ -34,6 +35,80 @@ function plan(periodKey: string, posted: { periodKey: string; amount: number }[]
     today,
   });
 }
+
+describe("prospective estimate revisions", () => {
+  const revision = {
+    effectivePeriodKey: "1404-02",
+    usefulLifeMonths: 4,
+    residualValue: 100_000,
+    remainingBase: 500_000,
+    accumulatedSinceEffective: 0,
+  };
+
+  it("spreads the remaining base over the revised life and lands exactly on the residual", () => {
+    expect(revisedMonthlyAmortization({ remainingBase: 500_000, usefulLifeMonths: 4, monthIndex: 0, accumulatedSinceEffective: 0 })).toBe(125_000);
+    expect(revisedMonthlyAmortization({ remainingBase: 500_000, usefulLifeMonths: 4, monthIndex: 2, accumulatedSinceEffective: 250_000 })).toBe(125_000);
+    // Final month absorbs every Rial of rounding.
+    expect(revisedMonthlyAmortization({ remainingBase: 500_001, usefulLifeMonths: 3, monthIndex: 2, accumulatedSinceEffective: 333_334 })).toBe(166_667);
+  });
+
+  it("prices a month from the revised base, not the original cost", () => {
+    const revised = planAmortization({
+      usefulLifeType: "finite",
+      asset,
+      postedPeriodKeys: ["1404-01"],
+      accumulatedSoFar: 333_333,
+      postedPostings: [{ periodKey: "1404-01", amount: 333_333 }],
+      periodKey: "1404-02",
+      today,
+      revision,
+    });
+    expect(revised.ok).toBe(true);
+    if (revised.ok) expect(revised.amount).toBe(125_000);
+  });
+
+  it("a pre-change month still uses the original schedule", () => {
+    const original = planAmortization({
+      usefulLifeType: "finite",
+      asset,
+      postedPeriodKeys: [],
+      accumulatedSoFar: 0,
+      postedPostings: [],
+      periodKey: "1404-01",
+      today,
+      revision: null,
+    });
+    expect(original.ok).toBe(true);
+    if (original.ok) expect(original.amount).toBe(300_000);
+  });
+
+  it("projects posted history as-is and only the future from the revised estimate", () => {
+    const { rows, totals } = projectAmortization({
+      usefulLifeType: "finite",
+      asset,
+      livePostings: [{ periodKey: "1404-01", amount: 300_000, entryId: "e1" }],
+      todayPeriodKey: "1404-01",
+      revisions: [
+        {
+          effectivePeriodKey: "1404-02",
+          previousUsefulLifeMonths: 3,
+          previousResidualValue: 100_000,
+          usefulLifeMonths: 4,
+          residualValue: 100_000,
+          remainingBase: 600_000,
+        },
+      ],
+    });
+    const posted = rows.find((row) => row.periodKey === "1404-01");
+    expect(posted?.status).toBe("posted");
+    expect(posted?.amortization).toBe(300_000);
+    const firstForecast = rows.find((row) => row.periodKey === "1404-02");
+    expect(firstForecast?.status).toBe("forecast");
+    expect(firstForecast?.amortization).toBe(150_000);
+    expect(totals.postedAmortization).toBe(300_000);
+    expect(totals.forecastAmortization).toBe(600_000);
+  });
+});
 
 describe("validateIntangibleAsset", () => {
   const valid = {

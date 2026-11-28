@@ -261,6 +261,7 @@ const PARENT_JOIN: Record<string, { table: string; on: string }> = {
   fixed_asset_estimate_changes: { table: "fixed_assets", on: "fixed_asset_id" },
   fixed_asset_transfers: { table: "fixed_assets", on: "fixed_asset_id" },
   intangible_asset_amortization_entries: { table: "intangible_assets", on: "intangible_asset_id" },
+  intangible_asset_estimate_changes: { table: "intangible_assets", on: "intangible_asset_id" },
   intangible_asset_impairments: { table: "intangible_assets", on: "intangible_asset_id" },
   payroll_run_lines: { table: "payroll_runs", on: "run_id" },
 };
