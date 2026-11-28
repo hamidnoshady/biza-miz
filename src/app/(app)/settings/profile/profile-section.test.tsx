@@ -86,6 +86,14 @@ function defaultRoutes(): Record<string, Handler> {
     "GET /api/auth/step-up": () =>
       json(200, { availableMethods: ["pin"], methodLabels: { pin: "رمز عددی دستگاه" }, hasPin: true }),
     "POST /api/auth/step-up": () => json(200, { ok: true, recentAuth: true }),
+    /*
+     * Issue #1585 — the Profile page now asks for this membership's remembered
+     * browsers beside its sessions. The default is none, which is what every
+     * one of these fixtures assumes: without a route here the card renders its
+     * load failure, and an unrelated test that looks up «the alert» would find
+     * two.
+     */
+    "GET /api/auth/remembered-devices": () => json(200, { devices: [], currentFamilyId: null }),
   };
 }
 

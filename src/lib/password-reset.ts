@@ -6,6 +6,10 @@ import {
   SECURITY_AUDIT_ACTIONS,
   recordSecurityAudit,
 } from "./security-audit";
+import {
+  revokeRememberedLoginsForMember,
+  revokeRememberedLoginsForPlatformUser,
+} from "./remembered-login";
 
 export const MIN_PASSWORD_LENGTH = 8;
 export const MAX_PASSWORD_LENGTH = 128;
@@ -141,6 +145,21 @@ export async function revokePlatformUserSessions(
       );
     }
 
+    /*
+     * #1585 — a password reset, a lockout, a deactivation or an explicit global
+     * sign-out must take the persistent-login authority with it. Revoking the
+     * session rows alone would leave a refresh credential that mints a brand-new
+     * session minutes later, which is the one thing this feature must never do
+     * after a security event.
+     */
+    await revokeRememberedLoginsForPlatformUser({
+      platformUserId,
+      reason: options.bumpTokenVersion ? "token_version_bumped" : "sessions_revoked",
+    }).catch((err) => {
+      console.error("Remembered-login revocation failed", err);
+      return 0;
+    });
+
     return {
       tokenVersion,
       revokedEmployeeSessions: rowCount ?? 0,
@@ -180,6 +199,17 @@ export async function revokeMembershipSessions(
         [businessId, userId],
       );
     }
+
+    /* #1585 — the independent persistent-login authority, revoked with the
+     * sessions it belongs beside. */
+    await revokeRememberedLoginsForMember({
+      businessId,
+      userId,
+      reason: "sessions_revoked",
+    }).catch((err) => {
+      console.error("Remembered-login revocation failed", err);
+      return 0;
+    });
 
     return rowCount ?? 0;
   });

@@ -10,6 +10,13 @@ import {
   revokeMembershipSessions,
   revokePlatformUserSessions,
 } from "@/lib/password-reset";
+import {
+  clearedRememberedLoginCookieOptions,
+  readRememberedLoginToken,
+  REMEMBERED_LOGIN_COOKIE,
+  resolveRememberedFamilyId,
+  revokeRememberedLoginsForMember,
+} from "@/lib/remembered-login";
 import { isRecentAuth, requireRecentAuth, RECENT_AUTH_WINDOW_SECONDS } from "@/lib/recent-auth";
 import { AUTH_ERROR_CODES, authErrorMessage } from "@/lib/auth-contracts";
 import {
@@ -209,6 +216,21 @@ async function revoke(request: NextRequest) {
     const revokedCount = await revokeMembershipSessions(session.businessId, session.sub, {
       keepEmployeeSessionId: session.employeeSessionId ?? null,
     });
+    /*
+     * #1585 — the persistent-login authority follows its sessions. The current
+     * browser's remembered login is deliberately kept (it is the one the caller
+     * is using; ending it here would sign them out of their own device as a side
+     * effect of ending the *others*), everything else is revoked.
+     */
+    await revokeRememberedLoginsForMember({
+      businessId: session.businessId,
+      userId: session.sub,
+      reason: "sessions_revoked_others",
+      keepFamilyId: await resolveRememberedFamilyId(readRememberedLoginToken(request)),
+    }).catch((err) => {
+      console.error("Remembered-login revocation failed", err);
+      return 0;
+    });
     await auditRevocation(session.businessId, session.sub, SECURITY_AUDIT_ACTIONS.sessionsRevokedOthers, {
       revokedCount,
     });
@@ -237,8 +259,20 @@ async function revoke(request: NextRequest) {
       endImpersonation: true,
     });
     revokedCount = revoked.revokedEmployeeSessions;
+    // `revokePlatformUserSessions` already revokes this identity's remembered
+    // logins across every business (#1585); nothing else to do here.
   } else {
     revokedCount = await revokeMembershipSessions(session.businessId, session.sub);
+    // A membership without a global identity is not reached by the
+    // platform-wide sweep, so its own families are revoked explicitly.
+    await revokeRememberedLoginsForMember({
+      businessId: session.businessId,
+      userId: session.sub,
+      reason: "signed_out_everywhere",
+    }).catch((err) => {
+      console.error("Remembered-login revocation failed", err);
+      return 0;
+    });
   }
 
   await auditRevocation(session.businessId, session.sub, SECURITY_AUDIT_ACTIONS.signedOutEverywhere, {
@@ -254,6 +288,7 @@ async function revoke(request: NextRequest) {
     signedOut: true,
   });
   res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(session), maxAge: 0 });
+  res.cookies.set(REMEMBERED_LOGIN_COOKIE, "", clearedRememberedLoginCookieOptions());
   return res;
 }
 
