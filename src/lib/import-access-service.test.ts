@@ -140,6 +140,22 @@ describe("importAccessForTarget", () => {
     expect(decision.reason).toBe("app_not_selected");
   });
 
+  it("does not treat a failed grant read as an active grant", async () => {
+    mockActivation.mockResolvedValue(null);
+    mockGrant.mockRejectedValue(new Error("db down"));
+    const decision = await importAccessForTarget({
+      businessId,
+      ...target,
+      permissions: PERMITTED,
+      at: AT,
+    });
+    expect(decision).toMatchObject({
+      allowed: false,
+      stagingAllowed: true,
+      reason: "awaiting_activation",
+    });
+  });
+
   it("still asks the service axis when the caller already checked permissions", async () => {
     mockActivation.mockResolvedValue("suspended_insufficient_credit");
     const decision = await importAccessForTarget({
