@@ -398,4 +398,24 @@ check( false !== strpos( $cli, '[--format=<format>]' ), 'doctor declares the for
 check( false !== strpos( $cli, "\$json   = 'json' === \$format" ), 'doctor accepts both --json and --format=json' );
 check( false !== strpos( $queue, 'information_schema.tables' ), 'and that measurement reads the table size from information_schema' );
 
+// --- #1206 UX-04: the queue screen is bounded, filtered and payload-free ---------
+//
+// The WordPress «صف و خطاها» screen used to render a count card and nothing
+// else. It now asks for one bounded page; these pins keep that page from
+// becoming an unbounded scan or a payload/PII leak, and keep the notice detail
+// that handlers store from being dropped again.
+$admin_source = file_get_contents( $plugin_dir . 'includes/class-pos-admin.php' );
+same( 'open', POS_Connector_Queue::normalize_page_filters( 'DROP TABLE', '' )['status'], 'an unknown queue filter falls back to the open rows' );
+same( 'failed', POS_Connector_Queue::normalize_page_filters( 'failed', '' )['status'], 'a known queue filter survives' );
+same( 'searched', POS_Connector_Queue::normalize_page_filters( 'all', '  searched  ' )['search'], 'the queue search is trimmed' );
+same( 80, mb_strlen( POS_Connector_Queue::normalize_page_filters( 'all', str_repeat( 'x', 200 ) )['search'], 'UTF-8' ), 'the queue search is bounded to eighty characters' );
+check( false !== strpos( $queue_source, '$wpdb->esc_like( $search )' ), 'the queue search is escaped for LIKE' );
+check( false !== strpos( $queue_source, "implode( ' AND ', \$where )" ), 'the queue page composes only validated clauses' );
+check( false === strpos( $queue_source, 'payload LIKE' ), 'the queue search never reads the payload' );
+check( false !== strpos( $queue_source, 'LIMIT %d' ), 'a queue page is always limited' );
+check( false !== strpos( $admin_source, 'POS_Connector_Queue::page( $after, 20, $status, $search )' ), 'the screen asks for one bounded server-side page' );
+check( false !== strpos( $admin_source, 'aria-current="page"' ), 'the active tab is announced as the current page' );
+check( 1 === preg_match( '/\$detail\s*=\s*\$notice \? self::take_notice_detail\(\)/', $admin_source ), 'a notice detail is assigned before it is printed' );
+check( false !== strpos( $admin_source, 'pos-queue-scroll' ), 'the queue table has an explicit narrow-screen scroll affordance' );
+
 echo $assertions . " reliability-policy assertions passed\n";
