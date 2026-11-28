@@ -11,7 +11,7 @@
  * Framework-free and DB-free, like the two modules it labels, so both the
  * service and the review panel import the same strings.
  */
-import type { DuplicateItemMember, DuplicateVerdict } from "./duplicate-items";
+import type { DuplicateItemMember, DuplicateResolutionState, DuplicateVerdict } from "./duplicate-items";
 import type { OrphanBlocker } from "./duplicate-items-resolution";
 
 export interface DuplicateVerdictCopy {
@@ -38,6 +38,10 @@ export const DUPLICATE_VERDICT_COPY: Record<DuplicateVerdict, DuplicateVerdictCo
     label: "ردیف تکراری تاریخی (دو تاریخ متفاوت)",
     action: "یک ردیف بدون پیوند و یک ردیف متصل، با همان کد کالا و همان نام، هفته‌ها یا ماه‌ها فاصله دارند. ردیفی که موجودی یا سابقه دارد بایگانی نمی‌شود؛ ابتدا باید تصمیم مالک و برنامهٔ اصلاح موجودی/حسابداری ثبت شود.",
   },
+  historical_variant_orphan: {
+    label: "نسخهٔ سادهٔ قدیمی یک محصول تنوع‌دار",
+    action: "یک ردیف سادهٔ بدون پیوند، هم‌نام و هم‌کد با یک محصول تنوع‌دار متصل است (خانوادهٔ اصلی و تنوع‌ها). این ردیف، نسخهٔ تخت‌شدهٔ پیش از تبدیل محصول به تنوع‌دار است؛ فقط وقتی بایگانی می‌شود که موجودی صفر و بدون سابقه باشد.",
+  },
   same_remote_mapped_twice: {
     label: "یک محصول فروشگاه، دو ردیف محلی",
     action: "یک محصول فروشگاه به دو ردیف محلی وصل شده است. یکی از اتصال‌ها را نگه دارید و بقیه را بایگانی کنید.",
@@ -55,11 +59,77 @@ export const DUPLICATE_VERDICT_COPY: Record<DuplicateVerdict, DuplicateVerdictCo
 export const ORPHAN_BLOCKER_COPY: Record<OrphanBlocker, string> = {
   twin_not_woo_product: "ردیف همتای متصل، محصول ووکامرس نیست.",
   twin_inactive: "ردیف همتای متصل، بایگانی شده است.",
+  twin_not_variant_family: "ردیف همتای متصل دیگر یک محصول تنوع‌دار با تنوع‌های متصل نیست.",
   ambiguous_twin: "بیش از یک ردیف متصل می‌تواند همتای آن باشد.",
   different_name: "نام دو ردیف یکسان نیست؛ مدرک کافی برای بایگانی وجود ندارد.",
   nonzero_stock: "این ردیف هنوز موجودی روی دست دارد؛ بایگانی آن، موجودی واقعی را از فهرست فعال خارج می‌کند.",
   inventory_unchecked: "موجودی این ردیف خوانده نشد؛ تا زمانی که صفر بودن آن اثبات نشود، بایگانی مجاز نیست.",
   has_references: "سابقه، موجودی یا رکورد دیگری به آن ارجاع می‌دهد.",
+};
+
+export interface DuplicateResolutionCopy {
+  label: string;
+  tone: "positive" | "neutral" | "danger";
+  /** One line the screen shows under the badge. */
+  explanation: string;
+}
+
+/**
+ * The explicit state vocabulary the review screen must speak. «نگهداری
+ * جداگانه» is a decision, not a deduplication; «حفظ سابقه» keeps the row on
+ * purpose; neither may be reported as "resolved duplicate" anywhere else.
+ */
+export const DUPLICATE_RESOLUTION_COPY: Record<DuplicateResolutionState, DuplicateResolutionCopy> = {
+  pending_review: {
+    label: "در انتظار بررسی",
+    tone: "danger",
+    explanation: "این ردیف تکراری اثبات‌شده است و موجودی و سابقه‌ای ندارد؛ بایگانی آن مجاز و قابل بازگشت است.",
+  },
+  safely_archived: {
+    label: "بایگانی‌شده و قابل بازگشت",
+    tone: "positive",
+    explanation: "نسخهٔ تکراری بایگانی شده است؛ ردیف، موجودی و سابقه باقی است و بازگردانی ممکن است.",
+  },
+  blocked_stock: {
+    label: "مسدود به‌دلیل موجودی",
+    tone: "danger",
+    explanation: "این ردیف موجودی روی دست دارد؛ بایگانی بدون تصمیم مالک دربارهٔ منبع موجودی مجاز نیست.",
+  },
+  blocked_history: {
+    label: "مسدود به‌دلیل سابقه",
+    tone: "danger",
+    explanation: "سفارش یا سابقهٔ دیگری به این ردیف ارجاع می‌دهد؛ می‌توانید سابقه را حفظ کنید یا تصمیم مالک را ثبت کنید.",
+  },
+  kept_separate: {
+    label: "جدا نگه داشته‌شده (بدون ادغام)",
+    tone: "neutral",
+    explanation: "تصمیم ثبت شده که این ردیف‌ها دو محصول جدا هستند؛ هیچ ردیفی بایگانی یا ادغام نشده است.",
+  },
+  history_retained: {
+    label: "سابقه حفظ شد (بدون ادغام)",
+    tone: "neutral",
+    explanation: "ردیف به‌خاطر سابقهٔ سفارش/فاکتور فعال نگه داشته شد؛ این حذف تکراری نیست و ادغامی انجام نشده است.",
+  },
+  restored: {
+    label: "بازگردانی‌شده — نیاز به تصمیم",
+    tone: "danger",
+    explanation: "این ردیف قبلاً بایگانی شده و دوباره فعال شده است؛ تصمیم تازه لازم است.",
+  },
+  archived_elsewhere: {
+    label: "بایگانی‌شده خارج از این گردش‌کار",
+    tone: "neutral",
+    explanation: "این ردیف پیش‌تر به دلیلی غیر از این گردش‌کار بایگانی شده است؛ بازگردانی خودکار مجاز نیست.",
+  },
+  blocked_other: {
+    label: "مسدود — بررسی دستی",
+    tone: "danger",
+    explanation: "شکل این ردیف‌ها برای بایگانی خودکار کافی نیست؛ شواهد را دستی بررسی کنید.",
+  },
+  not_a_duplicate: {
+    label: "تکراری نیست",
+    tone: "neutral",
+    explanation: "این گروه یک خانوادهٔ تنوع یا نسخهٔ هر شعبه است و اقدامی لازم ندارد.",
+  },
 };
 
 /** The stored reference tables, named the way an owner reads them. */
@@ -104,6 +174,9 @@ export function duplicateAmbiguityNotes(
   const unmapped = members.filter((member) => member.mappings.length === 0);
   if (verdict === "historical_duplicate_candidate") {
     notes.push("تاریخ ایجاد این ردیف‌ها فاصلهٔ زیادی دارد؛ این شکل، حلقهٔ ایجاد هم‌زمان (چند دقیقه‌ای) نیست.");
+  }
+  if (verdict === "historical_variant_orphan") {
+    notes.push("یک ردیف سادهٔ بدون پیوند، هم‌نام با یک محصول تنوع‌دار متصل است؛ نسخهٔ تخت پیش از تبدیل محصول به تنوع‌دار.");
   }
   if (branches.size > 1) notes.push("ردیف‌ها به شعبه‌های مختلف تعلق دارند.");
   if (mapped.length > 0 && unmapped.length > 0) notes.push("یک ردیف پیوند فروشگاه دارد و دیگری ندارد.");

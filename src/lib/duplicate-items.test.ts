@@ -124,11 +124,59 @@ describe("classifyDuplicateGroup", () => {
     ).toBe("per_branch_copies");
   });
 
+  it("identifies an unmapped simple row beside a mapped variable family of the same name", () => {
+    expect(
+      classifyDuplicateGroup([
+        member("p", { kind: "variant_parent", mappings: [woo("10")] }),
+        member("c1", { kind: "variant_child", parentItemId: "p", mappings: [woo("11", { remoteParentId: "10" })] }),
+        member("c2", { kind: "variant_child", parentItemId: "p", mappings: [woo("12", { remoteParentId: "10" })] }),
+        member("flat", { createdAt: "2026-08-26T08:00:00.000Z" }),
+      ]),
+    ).toBe("historical_variant_orphan");
+  });
+
+  it("does not call a same-SKU simple row with a different name a family orphan", () => {
+    expect(
+      classifyDuplicateGroup([
+        member("p", { kind: "variant_parent", mappings: [woo("10")] }),
+        member("c1", { kind: "variant_child", parentItemId: "p", mappings: [woo("11")] }),
+        member("flat", { createdAt: "2026-08-26T08:00:00.000Z", name: "کرم دیگر" }),
+      ]),
+    ).toBe("unmapped_duplicate");
+  });
+
+  it("does not guess between two mapped families with the orphan's name", () => {
+    expect(
+      classifyDuplicateGroup([
+        member("p1", { kind: "variant_parent", mappings: [woo("10")] }),
+        member("c1", { kind: "variant_child", parentItemId: "p1", mappings: [woo("11")] }),
+        member("p2", { kind: "variant_parent", mappings: [woo("20")] }),
+        member("c2", { kind: "variant_child", parentItemId: "p2", mappings: [woo("21")] }),
+        member("flat", { createdAt: "2026-08-26T08:00:00.000Z" }),
+      ]),
+    ).toBe("unmapped_duplicate");
+  });
+
+  it("never classifies a variation as the flat family orphan", () => {
+    expect(
+      classifyDuplicateGroup([
+        member("p", { kind: "variant_parent", mappings: [woo("10")] }),
+        member("c1", { kind: "variant_child", parentItemId: "p", mappings: [woo("11")] }),
+        member("stray", {
+          kind: "variant_child",
+          parentItemId: "p",
+          createdAt: "2026-08-26T08:00:00.000Z",
+        }),
+      ]),
+    ).not.toBe("historical_variant_orphan");
+  });
+
   it("says which verdicts need a person", () => {
     expect(verdictNeedsAction("variant_family")).toBe(false);
     expect(verdictNeedsAction("per_branch_copies")).toBe(false);
     expect(verdictNeedsAction("race_orphan")).toBe(true);
     expect(verdictNeedsAction("historical_duplicate_candidate")).toBe(true);
+    expect(verdictNeedsAction("historical_variant_orphan")).toBe(true);
     expect(verdictNeedsAction("same_remote_mapped_twice")).toBe(true);
   });
 });
