@@ -1,5 +1,5 @@
 -- ============================================================================
--- 0323_growth_cashback_rewards.sql — issue #901, Wave 2 (P0 financial engine).
+-- 0324_growth_cashback_rewards.sql — issue #901, Wave 2 (P0 financial engine).
 --
 -- The campaign builder (0262) stores a *definition*: a typed trigger, a reward
 -- and hard limits. This migration adds the money side of that definition:

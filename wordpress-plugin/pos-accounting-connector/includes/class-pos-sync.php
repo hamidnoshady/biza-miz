@@ -676,7 +676,10 @@ class POS_Connector_Sync {
 
 	private static function enqueue_order( $order_id, $topic ) {
 		$order = wc_get_order( $order_id );
-		if ( ! $order || $order->get_status() === 'trash' ) {
+		// A refund is a `WC_Order_Refund`, not a sale: it has its own
+		// `refund.created` event. Treating it as an order reaches
+		// `get_refunds()` on a refund and the request dies mid-cycle.
+		if ( ! $order || 'shop_order' !== $order->get_type() || $order->get_status() === 'trash' ) {
 			return;
 		}
 		self::safe_enqueue_callable(
@@ -3796,7 +3799,11 @@ class POS_Connector_Sync {
 					'orderby'       => 'date_modified',
 					'order'         => 'ASC',
 					// Refunds and subscriptions are not orders; drafts and trashed
-					// rows are not sales.
+					// rows are not sales. `type` is explicit because HPOS returns
+					// `shop_order_refund` rows for a status-only query, and a
+					// refund object has no `get_refunds()` of its own — the walk
+					// used to die there and never reach the orders after it.
+					'type'          => 'shop_order',
 					'status'        => array_keys( wc_get_order_statuses() ),
 					'return'        => 'objects',
 				)
@@ -3869,6 +3876,7 @@ class POS_Connector_Sync {
 						'date_modified' => '>' . $after,
 						'orderby'       => 'date',
 						'order'         => 'ASC',
+						'type'          => 'shop_order',
 						'status'        => array_keys( wc_get_order_statuses() ),
 						'return'        => 'objects',
 					)

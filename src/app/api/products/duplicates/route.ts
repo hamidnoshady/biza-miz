@@ -8,6 +8,7 @@ import {
   archiveDuplicateOrphanFromReview,
   listDuplicateCandidateSkus,
   loadDuplicateReviewGroups,
+  recordDuplicateHistoryRetained,
   recordDuplicateKeepSeparate,
   restoreDuplicateFromReview,
 } from "@/lib/duplicate-items-review-service";
@@ -95,6 +96,15 @@ export const POST = withTenantScope(async (request: NextRequest) => {
         locationId,
       });
       return NextResponse.json({ ok: true, group });
+    }
+    if (body.action === "history_retained") {
+      const group = await recordDuplicateHistoryRetained(session.businessId, {
+        sku: body.sku,
+        reviewToken: body.reviewToken,
+        actorUserId: session.sub,
+        locationId,
+      });
+      return NextResponse.json({ ok: true, group, deduplicated: false });
     }
     if (body.action === "archive_orphan") {
       if (typeof body.orphanItemId !== "string" || !UUID_RE.test(body.orphanItemId)) {

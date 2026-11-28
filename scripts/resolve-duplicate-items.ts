@@ -74,8 +74,13 @@ async function main(): Promise<number> {
     return 2;
   }
   const kind = argValue("--kind");
-  if (kind !== null && kind !== "race_orphan" && kind !== "historical_duplicate_candidate") {
-    console.error("--kind takes race_orphan or historical_duplicate_candidate.");
+  if (
+    kind !== null &&
+    kind !== "race_orphan" &&
+    kind !== "historical_duplicate_candidate" &&
+    kind !== "historical_variant_orphan"
+  ) {
+    console.error("--kind takes race_orphan, historical_duplicate_candidate or historical_variant_orphan.");
     return 2;
   }
   const apply = process.argv.includes("--apply");
@@ -98,8 +103,9 @@ async function main(): Promise<number> {
   const blocked = plans.filter((p) => p.status === "blocked");
   const raceCount = plans.filter((p) => p.kind === "race_orphan").length;
   const historicalCount = plans.filter((p) => p.kind === "historical_duplicate_candidate").length;
+  const variantCount = plans.filter((p) => p.kind === "historical_variant_orphan").length;
   console.log(
-    `${plans.length} duplicate row(s) (${raceCount} race, ${historicalCount} historical): ` +
+    `${plans.length} duplicate row(s) (${raceCount} race, ${historicalCount} historical, ${variantCount} variant-family): ` +
       `${toArchive.length} can be archived, ${done.length} already archived, ${blocked.length} blocked.\n`,
   );
   console.log(

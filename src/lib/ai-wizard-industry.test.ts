@@ -24,7 +24,7 @@ import {
   type ActionType,
 } from "./ai";
 import { ENABLED_INDUSTRIES } from "./industries";
-import { wizardStepsForIndustry } from "./wizard-steps";
+import { industryNeedsSellableMenu, wizardStepsForIndustry } from "./wizard-steps";
 
 /** Every setup.* action in the catalogue, with the wizard step it belongs to. */
 const SETUP_ACTIONS = (Object.keys(ACTION_CATALOG) as ActionType[]).filter(
@@ -73,9 +73,12 @@ describe("wizardActionTypesForIndustry", () => {
 
   it("never offers a step the industry's wizard does not walk (all enabled industries)", () => {
     for (const industry of ENABLED_INDUSTRIES) {
-      const walked = new Set(wizardStepsForIndustry(industry));
+      const walked = new Set<string>(wizardStepsForIndustry(industry));
+      // #1580 — the legacy `menu` id stays proposable exactly where a sellable
+      // menu is still a POS prerequisite, even though it is no longer a page.
+      if (industryNeedsSellableMenu(industry)) walked.add("menu");
       for (const step of survivingSteps(industry)) {
-        expect(walked.has(step as never), `${industry} → ${step}`).toBe(true);
+        expect(walked.has(step), `${industry} → ${step}`).toBe(true);
       }
       // The three steps every shape keeps are always proposable.
       expect(survivingSteps(industry).has("business")).toBe(true);
@@ -115,9 +118,12 @@ describe("wizard system prompt", () => {
     expect(prompt).not.toContain("setup.costing");
   });
 
-  it("lists all nine F&B steps — including the Backup destination", () => {
+  it("lists F&B's steps — the menu is inside the one import step now", () => {
     const prompt = buildSystemPrompt({ mode: "wizard", industry: "food_service" });
-    expect(prompt).toMatch(/مراحل راه‌اندازی[^\n]*ورود منو[^\n]*مقصد پشتیبان‌گیری/);
+    // #1580 — «ورود منو» is gone from the visible sequence; the single
+    // «ورود اطلاعات» step covers it, and the menu actions still survive.
+    expect(prompt).toMatch(/مراحل راه‌اندازی[^\n]*ورود اطلاعات[^\n]*مقصد پشتیبان‌گیری/);
+    expect(prompt).not.toMatch(/مراحل راه‌اندازی[^\n]*ورود منو/);
     expect(prompt).toContain("setup.menu.item");
     expect(prompt).toContain("setup.costing");
   });

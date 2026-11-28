@@ -122,13 +122,33 @@ const SETUP_SHAPE: Record<Industry, SetupShape> = {
 
 /**
  * Steps that only make sense for F&B: `costing` picks a method for
- * `inventory_items`/`stock_movements` (Phase 6), and `menu` enters
- * `menu_items`/`menu_categories` (Phase 2). Neither table is used by a
+ * `inventory_items`/`stock_movements` (Phase 6). Neither table is used by a
  * trade-goods business, whose catalogue is `items`/`item_stock` with its own
  * batches and per-item costing (Phase 21/42), nor by a service company, nor by
  * a project business (AEC has no counter and no stock model).
+ *
+ * GitHub #1580 — `menu` is deliberately NOT here and NOT a visible step: the
+ * menu is entered inside the one «ورود اطلاعات» step (manual category/item
+ * entry or the canonical Data Transfer file path), so a restaurant no longer
+ * walks two data-entry steps. It stays in `WIZARD_STEPS` as a legacy id for
+ * stored progress markers and the existing `/api/setup/menu` clients, and its
+ * sellable-item requirement remains a Finish prerequisite through
+ * `PREREQUISITE_ONLY_STEPS` below.
  */
-const FOOD_SERVICE_ONLY_STEPS: WizardStep[] = ["costing", "menu"];
+const FOOD_SERVICE_ONLY_STEPS: WizardStep[] = ["costing"];
+
+/**
+ * Data prerequisites that are required for an industry even though they no
+ * longer own a wizard page (#1580).
+ *
+ * The F&B menu is the one case: the POS must not be declared ready to sell
+ * without a sellable item, so readiness keeps demanding it, but the owner
+ * satisfies it inside the unified import step. Keeping it out of the visible
+ * sequence is what removes the duplicate step without weakening POS readiness.
+ */
+const PREREQUISITE_ONLY_STEPS: Partial<Record<SetupShape, WizardStep[]>> = {
+  food_service: ["menu"],
+};
 
 /**
  * Steps only the AEC industry walks (issue #799). The mirror image of the F&B
@@ -154,16 +174,58 @@ export function setupShapeForIndustry(industry: Industry): SetupShape {
 export function wizardStepsForIndustry(industry: Industry): WizardStep[] {
   const shape = setupShapeForIndustry(industry);
   return WIZARD_STEPS.filter((step) => {
+    // #1580 — the menu editor lives inside the single optional import step.
+    // Keep the legacy id in WIZARD_STEPS for saved markers/API compatibility.
+    if (step === "menu") return false;
     if (AEC_ONLY_STEPS.includes(step)) return shape === "aec";
     if (FOOD_SERVICE_ONLY_STEPS.includes(step)) return shape === "food_service";
     return true;
   });
 }
 
-/** The steps that must be satisfied before the wizard can be finished. */
+/**
+ * The steps that must be satisfied before the wizard can be finished, in
+ * wizard order.
+ *
+ * `wizardStepsForIndustry(...)` minus the optional steps, plus any
+ * prerequisite-only data requirement for the industry (the F&B menu, #1580).
+ * The extra one has no page of its own any more; the Finish gate is derived
+ * from the persisted domain data (`setupReadiness`), so a stale marker can
+ * never stand in for a sellable menu.
+ */
 export function requiredStepsForIndustry(industry: Industry): WizardStep[] {
-  return wizardStepsForIndustry(industry).filter((s) => !OPTIONAL_STEPS.includes(s));
+  const visible = wizardStepsForIndustry(industry).filter(
+    (s) => !OPTIONAL_STEPS.includes(s),
+  );
+  const shape = setupShapeForIndustry(industry);
+  const prerequisiteOnly = PREREQUISITE_ONLY_STEPS[shape] ?? [];
+  if (prerequisiteOnly.length === 0) return visible;
+  const required = new Set<WizardStep>([...visible, ...prerequisiteOnly]);
+  return WIZARD_STEPS.filter((step) => required.has(step));
 }
+
+/**
+ * Whether this industry still needs at least one active, saleable menu item
+ * before it can be considered operationally ready (#1580, issue #808 §3).
+ *
+ * This is the question callers should ask instead of
+ * `wizardStepsForIndustry(...).includes("menu")`, which stopped being true when
+ * the duplicate step was consolidated into «ورود اطلاعات». It answers the
+ * *readiness* requirement, not "is there a page for it".
+ */
+export function industryNeedsSellableMenu(industry: Industry): boolean {
+  return (PREREQUISITE_ONLY_STEPS[setupShapeForIndustry(industry)] ?? []).includes(
+    "menu",
+  );
+}
+
+/**
+ * Where the F&B menu is entered after #1580 consolidated it into the single
+ * import step. Exported so the old `/setup/menu` URL, desktop-enrollment
+ * guidance, help links and the wizard's own manual section all point at the
+ * same place instead of re-spelling a query string in five files.
+ */
+export const SETUP_MENU_IMPORT_HREF = "/setup/import?source=manual&section=menu";
 
 /**
  * Where a non-F&B trade enters the things it sells, for the wizard's

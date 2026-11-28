@@ -21,11 +21,45 @@ describe("firstRunRedirect", () => {
       "/growth",
       "/websites/wp",
       "/workspace",
+      // GitHub #1580 — the internal settings area and operational workspaces
+      // are not onboarding surfaces. Direct URL, `?next=`, Back and a mobile
+      // drawer all reach the same shell, so the same answer applies.
+      "/settings",
+      "/settings/transfer",
+      "/settings/data-transfer",
+      "/settings/tax",
+      "/petty-cash",
+      "/petty-cash/new",
     ]) {
       expect(
         firstRunRedirect({ pathname, setupComplete: false, ...owner }),
         pathname,
       ).toBe("/setup");
+    }
+  });
+
+  it("keeps the wizard, its recovery surfaces and the connection return reachable", () => {
+    for (const pathname of [
+      "/setup",
+      "/setup/business",
+      "/setup/apps",
+      "/setup/import",
+      "/setup/menu",
+      "/settings/billing",
+      "/settings/security",
+      "/settings/profile",
+      // Provider OAuth/link returns and safe connection recovery land here; a
+      // guard that blocked it would strand a callback mid-onboarding.
+      "/settings/connections",
+      "/settings/connections/holoo",
+      "/knowledge",
+      "/knowledge/a/setup-wizard",
+      "/support",
+    ]) {
+      expect(
+        firstRunRedirect({ pathname, setupComplete: false, ...owner }),
+        pathname,
+      ).toBeNull();
     }
   });
 
@@ -45,26 +79,6 @@ describe("firstRunRedirect", () => {
         canManageSettings: false,
       }),
     ).toBeNull();
-  });
-
-  it("keeps the wizard and its recovery surfaces reachable", () => {
-    for (const pathname of [
-      "/setup",
-      "/setup/business",
-      "/setup/apps",
-      "/settings/billing",
-      "/settings/security",
-      "/settings/profile",
-      "/settings/connections",
-      "/knowledge",
-      "/knowledge/a/setup-wizard",
-      "/support",
-    ]) {
-      expect(
-        firstRunRedirect({ pathname, setupComplete: false, ...owner }),
-        pathname,
-      ).toBeNull();
-    }
   });
 
   it("leaves routes outside the workspace alone", () => {

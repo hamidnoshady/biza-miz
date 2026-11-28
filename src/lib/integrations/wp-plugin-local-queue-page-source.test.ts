@@ -34,7 +34,7 @@ describe("#1076 plugin-local queue paging protocol", () => {
   });
 
   it("pages by row id with a bounded size, never by the strip's failure ordering", () => {
-    const page = queue.slice(queue.indexOf("public static function page( $after = 0, $limit = 10 )"));
+    const page = queue.slice(queue.indexOf("public static function page( $after = 0, $limit = 10, $status = 'open', $search = '' )"));
     expect(page).toContain("AND id > %d");
     expect(page).toContain("ORDER BY id ASC");
     expect(page).toContain("min( 25, (int) $limit )");
