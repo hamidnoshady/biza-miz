@@ -117,6 +117,10 @@ const UNCHECKED_ATTRIBUTIONS: Record<string, string> = {
   'bug_reports.user_id': 'account support channel',
   'commission_rules.employee_id': 'commission config',
   'crm_activities.assignee_user_id': 'activity assignment',
+  // Issue #1590 playbooks: attribution on a non-financial playbook record; member delete nulls it.
+  'playbook_instances.initiator_user_id': 'playbook launch attribution (non-financial)',
+  'playbook_instances.approver_user_id': 'playbook approval attribution (non-financial)',
+  'playbook_preferences.user_id': 'per-member UI preference row; member delete removes it (cascade)',
   'crm_audit_events.actor_user_id': 'module audit log (business audit lives in audit_log)',
   'crm_cases.assignee_user_id': 'case assignment',
   'crm_deals.owner_user_id': 'deal ownership assignment',
