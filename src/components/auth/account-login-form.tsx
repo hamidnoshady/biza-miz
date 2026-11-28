@@ -145,9 +145,7 @@ export function AccountLoginForm({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          identifier,
-          password,
-          ...(businessId ? { businessId } : {}),
+          identifier, password, ...(businessId ? { businessId } : {}),
           ...(rememberLogin ? { remember: true } : {}),
         }),
         signal,

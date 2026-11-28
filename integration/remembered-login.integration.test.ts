@@ -23,12 +23,15 @@ const { EMPTY_DEVICE_CONTEXT } = { EMPTY_DEVICE_CONTEXT: { browserFamily: "chrom
 const biz = { id: "", userId: "" };
 
 /**
- * Whether this connection is actually subject to RLS. The suite's own PGlite
- * fallback (scripts/pglite-wire-server.mjs) connects as a superuser, which
- * bypasses row security entirely; the repo's isolation suites all gate on this
- * instead of pretending the assertion ran. CI's `postgres:16` service runs it.
+ * The restricted runtime role the isolation assertion runs as. This suite's own
+ * connection — and CI's `pos` role — is a SUPERUSER, which bypasses every RLS
+ * policy, so the policy is only proven through a NOSUPERUSER/NOBYPASSRLS role
+ * provisioned with `createAppRole`, exactly as `chart-of-accounts` does it.
+ * Empty when the database cannot host a second role (the PGlite fallback), in
+ * which case the assertion is skipped rather than pretended.
  */
-let rlsActive = false;
+let appRoleName = "";
+let appRoleUrl: string | null = null;
 
 /**
  * A pool of one cannot run two transactions at the same time, so "five
@@ -66,16 +69,44 @@ beforeAll(async () => {
 
   db = new Client({ connectionString: urlFor(databaseName) });
   await db.connect();
-  rlsActive = await dbLib.rlsEffective();
+
+  if (!serialisedPool) {
+    try {
+      const { createAppRole } = await import("../scripts/create-app-role");
+      appRoleName = `remember_app_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      await createAppRole({
+        databaseUrl: urlFor(databaseName),
+        roleName: appRoleName,
+        password: "test-password",
+        quiet: true,
+      });
+      const appUrl = new URL(urlFor(databaseName));
+      appUrl.username = appRoleName;
+      appUrl.password = "test-password";
+      appRoleUrl = appUrl.toString();
+    } catch {
+      // A database that refuses a second role (the PGlite fallback) leaves this
+      // null and the isolation assertion reports itself as skipped.
+      appRoleName = "";
+      appRoleUrl = null;
+    }
+  }
 }, 120_000);
 
 afterAll(async () => {
+  // The runtime role's grants live in the test database, so revoke there first;
+  // a role with dependencies cannot be dropped from the maintenance connection.
+  if (appRoleName) await db?.query(`DROP OWNED BY "${appRoleName}" CASCADE`).catch(() => {});
   await db?.end();
   await dbLib?.closeDatabasePool().catch(() => {});
   process.env.DATABASE_URL = rootDatabaseUrl;
   const maintenance = new Client({ connectionString: maintenanceUrl() });
   await maintenance.connect();
   try {
+    if (appRoleName) {
+      const { dropAppRole } = await import("../scripts/create-app-role");
+      await dropAppRole(maintenance, appRoleName);
+    }
     await maintenance.query(`DROP DATABASE IF EXISTS "${databaseName}" WITH (FORCE)`);
   } finally {
     await maintenance.end();
@@ -353,16 +384,49 @@ describe("risk", () => {
 });
 
 describe("tenant isolation and cleanup", () => {
-  it.skipIf(!rlsActive)("keeps one business's families invisible under another tenant's scope", async () => {
+  it("keeps one business's families invisible under another tenant's scope", async (context) => {
+    // Decided here, not with `it.skipIf` at definition time. The restricted role
+    // is provisioned in `beforeAll`, which runs after every test definition, so a
+    // definition-time gate reads the initial `null` and skips the assertion in
+    // every environment — silently, forever, including CI. That is how this
+    // block managed to look gated while never once having run.
+    if (!appRoleUrl) {
+      context.skip(true, "this database cannot host a second role (PGlite fallback)");
+      return;
+    }
+
     await issue();
     const other = await db.query<{ id: string }>(
       "INSERT INTO businesses (name, slug) VALUES ('Other Co', $1) RETURNING id",
       [`other-${randomUUID().slice(0, 8)}`],
     );
-    const visible = await dbLib.withTenant(other.rows[0].id, () =>
-      dbLib.query<{ count: string }>("SELECT count(*)::text AS count FROM remembered_login_families"),
-    );
-    expect(visible.rows[0].count).toBe("0");
+
+    // Renew the pool on the restricted role: without this the connection would
+    // be a superuser and the policy would be bypassed, which proves nothing.
+    await dbLib.closeDatabasePool();
+    process.env.DATABASE_URL = appRoleUrl!;
+    try {
+      const identity = await dbLib.query<{ rolname: string; privileged: boolean }>(
+        `SELECT current_user AS rolname, (rolsuper OR rolbypassrls) AS privileged
+           FROM pg_roles WHERE rolname = current_user`,
+      );
+      expect(identity.rows[0]).toEqual({ rolname: appRoleName, privileged: false });
+
+      // The owner's own scope still sees the family, so a zero below is the
+      // policy at work and not an unreadable table.
+      const own = await dbLib.withTenant(biz.id, () =>
+        dbLib.query<{ count: string }>("SELECT count(*)::text AS count FROM remembered_login_families"),
+      );
+      expect(own.rows[0].count).toBe("1");
+
+      const visible = await dbLib.withTenant(other.rows[0].id, () =>
+        dbLib.query<{ count: string }>("SELECT count(*)::text AS count FROM remembered_login_families"),
+      );
+      expect(visible.rows[0].count).toBe("0");
+    } finally {
+      await dbLib.closeDatabasePool();
+      process.env.DATABASE_URL = urlFor(databaseName);
+    }
   });
 
   it("revokes every family a membership holds, keeping a named one", async () => {

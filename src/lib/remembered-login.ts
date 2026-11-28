@@ -462,8 +462,26 @@ export async function rotateRememberedLogin(
     // A superseded credential: either a sibling tab inside the grace window, or
     // a replay. The distinction is time-bounded and one-directional — the
     // concurrent branch returns nothing usable.
+    //
+    // The age is measured by the database, in a statement of its own, because
+    // the local subtraction this replaced was wrong in the one case that
+    // matters. A request that loses the rotation race only sees
+    // `superseded_at` after it has blocked on the family lock and the winner
+    // has committed, so that timestamp is *newer* than this request's `now`
+    // (taken before it waited): the difference is negative, read as "superseded
+    // long ago", and revoked the whole family — five tabs renewing at once
+    // signed the user out. `now()` could not measure the gap either, since it is
+    // the transaction timestamp, fixed before the wait began. `clock_timestamp()`
+    // asked in a fresh READ COMMITTED statement sees the committed supersession
+    // and the real elapsed time.
     if (row.superseded_at) {
-      const age = now.getTime() - new Date(row.superseded_at).getTime();
+      const { rows: supersession } = await query<{ superseded_age_ms: string | null }>(
+        `SELECT EXTRACT(EPOCH FROM (clock_timestamp() - superseded_at)) * 1000 AS superseded_age_ms
+           FROM remembered_login_credentials
+          WHERE id = $1`,
+        [row.credential_id],
+      );
+      const age = Number(supersession[0]?.superseded_age_ms ?? Number.POSITIVE_INFINITY);
       if (age >= 0 && age <= REMEMBERED_CONCURRENCY_GRACE_MS) {
         return { status: "concurrent" };
       }

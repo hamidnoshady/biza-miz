@@ -168,7 +168,7 @@ export function RememberedDevicesCard({ onSignedOut }: { onSignedOut?: () => voi
                 <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
                   {deviceTitle(device)}
                   {device.isCurrent ? (
-                    <span className="rounded-xl bg-amber-100 px-2 py-0.5 text-xs text-amber-950">
+                    <span className="rounded-xl bg-amber-100 px-2 py-0.5 text-xs text-amber-950 dark:bg-amber-500/20 dark:text-amber-200">
                       همین دستگاه
                     </span>
                   ) : null}
