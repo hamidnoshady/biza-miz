@@ -227,6 +227,7 @@ export const MEMBER_HISTORY_RECORD_ATTRIBUTIONS: readonly MemberAttribution[] = 
   // the impairment assessment and its reversal, the disposal).
   { table: 'intangible_asset_amortization_entries', columns: ["created_by", "reversed_by"], scope: { kind: 'join', table: 'intangible_assets', on: 'intangible_asset_id' } },
   { table: 'intangible_asset_impairments', columns: ["assessed_by", "reversed_by"], scope: { kind: 'join', table: 'intangible_assets', on: 'intangible_asset_id' } },
+  { table: 'intangible_asset_estimate_changes', columns: ["approved_by", "changed_by"], scope: { kind: 'join', table: 'intangible_assets', on: 'intangible_asset_id' } },
   { table: 'intangible_assets', columns: ["capitalized_by", "created_by", "disposed_by"] },
   { table: 'inventory_count_scans', columns: ["created_by"] },
   { table: 'inventory_cutovers', columns: ["approved_by"] },
