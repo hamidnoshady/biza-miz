@@ -16,6 +16,23 @@
  *                              Cr 1100 صندوق / 1110 بانک
  *   growth.cashback_reversed   Dr 2445 / Cr 5600   (refund, unspent part)
  *   growth.cashback_expired    Dr 2445 / Cr 5600   (unspent value lapses)
+ *   growth.cashback_tender_restored
+ *                              Dr 4400 برگشت از فروش (+ Dr 1106 VAT)
+ *                              Cr 2445            (a reward spent at the till
+ *                                                  given back by a return)
+ *
+ * The two till legs are worth stating, because they are where this treatment
+ * differs from a cash payout. A sale paid partly with a reward debits 2445 in
+ * the **sale's own payment entry** (`ledger-service.ts`), so no
+ * `growth.cashback_redeemed` entry is posted for it — posting a payout as well
+ * would debit the liability twice. When that sale is returned, the customer is
+ * given the reward back on their wallet rather than in cash, so the return's
+ * contra-revenue debit is settled against 2445 (this rule) and the return's
+ * cash-refund capacity excludes the reward portion
+ * (`customer-return-service.ts`). The debit side is 4400 because this is an
+ * ordinary sales return of the bill's revenue; the credit side is the reward
+ * liability, which is what keeps a returned cashback sale out of the cash
+ * drawer and out of store credit (2410).
  *
  * Recognising the expense at grant (not at redemption) is deliberate: the
  * moment a campaign promises a reward for a settled sale, the business owes
@@ -46,6 +63,16 @@ interface CashbackAmountPayload {
   entryDate?: string | null;
   campaignId?: string | null;
   customerId?: string | null;
+}
+
+interface CashbackRestorePayload {
+  /** The gross reward value the customer gets back. */
+  amount: RialText;
+  /** The VAT share of that value, reversed with the revenue. */
+  tax?: RialText;
+  entryDate?: string | null;
+  customerId?: string | null;
+  orderId?: string | null;
 }
 
 registerPostingRule("growth.cashback_earned", async (event, client): Promise<PostingResult | null> => {
@@ -106,6 +133,48 @@ registerPostingRule("growth.cashback_reversed", async (event, client): Promise<P
     entryDate: payload.entryDate ?? null,
     memo: "برگشت پاداش کمپین — مرجوعی یا ابطال فروش",
     postingKind: "growth_cashback_reversed",
+  };
+});
+
+registerPostingRule("growth.cashback_tender_restored", async (event, client): Promise<PostingResult | null> => {
+  const payload = event.payload as unknown as CashbackRestorePayload;
+  const gross = rialBigInt(payload.amount);
+  if (gross === 0n) return null;
+  const tax = rialBigInt(payload.tax ?? ZERO);
+  // A tax share larger than the value it is part of is a caller bug, and
+  // posting it would credit more revenue back than was reversed.
+  if (tax < 0n || tax > gross) throw new Error("invalid_cashback_restore_tax");
+  const net = gross - tax;
+
+  const accounts = await accountIdsByCode(client, event.businessId, [
+    WELL_KNOWN_CODES.salesReturns,
+    WELL_KNOWN_CODES.vatPayable,
+    WELL_KNOWN_CODES.cashbackPayable,
+  ]);
+
+  return {
+    lines: [
+      {
+        accountId: accounts.get(WELL_KNOWN_CODES.salesReturns)!,
+        debit: net.toString() as RialText,
+        credit: ZERO,
+      },
+      // The bill's tax share is reversed with its revenue; a tax-free sale
+      // posts no VAT line at all rather than a zero one.
+      ...(tax > 0n
+        ? [
+            {
+              accountId: accounts.get(WELL_KNOWN_CODES.vatPayable)!,
+              debit: tax.toString() as RialText,
+              credit: ZERO,
+            },
+          ]
+        : []),
+      { accountId: accounts.get(WELL_KNOWN_CODES.cashbackPayable)!, debit: ZERO, credit: payload.amount },
+    ],
+    entryDate: payload.entryDate ?? null,
+    memo: "برگشت فروش پرداخت‌شده با پاداش کمپین — بازگشت به کیف پول مشتری",
+    postingKind: "growth_cashback_tender_restored",
   };
 });
 

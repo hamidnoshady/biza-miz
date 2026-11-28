@@ -5,7 +5,9 @@ import {
   deriveRewardStatus,
   pendingRial,
   planRedemption,
+  planTenderRestore,
   remainingRial,
+  restorableTenderRial,
   spendableRial,
   type RewardPosition,
 } from "./campaign-reward-ledger";
@@ -112,6 +114,40 @@ describe("planRedemption", () => {
   it("rejects a non-positive or non-integer amount", () => {
     expect(planRedemption([lot("a")], 0, NOW)).toMatchObject({ ok: false, reason: "invalid_amount" });
     expect(planRedemption([lot("a")], 1.5, NOW)).toMatchObject({ ok: false, reason: "invalid_amount" });
+  });
+});
+
+describe("restoring a till tender after a refund", () => {
+  it("never gives back more reward than the bill was refunded or than it spent", () => {
+    expect(restorableTenderRial(50_000, 20_000)).toBe(20_000);
+    expect(restorableTenderRial(50_000, 80_000)).toBe(50_000);
+    expect(restorableTenderRial(50_000, 0)).toBe(0);
+    // A row that disagrees with itself must not produce negative value.
+    expect(restorableTenderRial(-1, 10)).toBe(0);
+    expect(restorableTenderRial(10, -5)).toBe(0);
+  });
+
+  it("returns value to the longest-lived lots first", () => {
+    // Spending was soonest-expiry-first, so the restore walks the other way.
+    const plan = planTenderRestore(
+      [
+        { entitlementId: "soon", amountRial: 10_000 },
+        { entitlementId: "later", amountRial: 20_000 },
+        { entitlementId: "latest", amountRial: 5_000 },
+      ],
+      12_000,
+    );
+    expect(plan).toEqual([
+      { entitlementId: "latest", amountRial: 5_000 },
+      { entitlementId: "later", amountRial: 7_000 },
+    ]);
+  });
+
+  it("cannot restore more than the lots gave, and stops when covered", () => {
+    const consumed = [{ entitlementId: "only", amountRial: 4_000 }];
+    expect(planTenderRestore(consumed, 9_000)).toEqual([{ entitlementId: "only", amountRial: 4_000 }]);
+    expect(planTenderRestore(consumed, 0)).toEqual([]);
+    expect(planTenderRestore([], 1_000)).toEqual([]);
   });
 });
 

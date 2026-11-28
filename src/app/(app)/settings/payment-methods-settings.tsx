@@ -35,6 +35,11 @@ const SETTLEMENT_LABELS: Record<PaymentSettlement, string> = {
   credit: "نسیه",
   cheque: "چک",
   snappfood: "اسنپ‌فود",
+  // Not a way a business can add (CUSTOM_PAYMENT_SETTLEMENTS excludes it), and
+  // no seeded way settles this way: a campaign reward spent at the till is the
+  // reward engine's, not the settings screen's. Named anyway so this map stays
+  // exhaustive over the settlement vocabulary.
+  cashback: "بازگشت وجه کمپین",
 };
 
 const SETTLEMENT_ACCOUNTS: Record<PaymentSettlement, string> = {
@@ -45,6 +50,7 @@ const SETTLEMENT_ACCOUNTS: Record<PaymentSettlement, string> = {
   credit: "حساب‌های دریافتنی (۱۳۰۰)",
   cheque: "چک‌های نزد صندوق (۱۲۴۱)",
   snappfood: "مطالبات از پلتفرم",
+  cashback: "بازگشت وجه تبلیغاتی (۲۴۴۵)",
 };
 
 function settlementText(value: PaymentSettlement): string {

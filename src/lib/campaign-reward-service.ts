@@ -55,8 +55,11 @@ import {
   clipToCustomerCap,
   deriveRewardStatus,
   planRedemption,
+  planTenderRestore,
   remainingRial,
+  restorableTenderRial,
   spendableRial,
+  type RedemptionAllocation,
   type RewardPosition,
   type RewardStatus,
 } from "./campaign-reward-ledger";
@@ -308,7 +311,7 @@ export async function sweepCampaignRewards(
       const { rows: facts } = await client.query<OrderFactsRow>(
         `SELECT o.id, o.status::text AS order_status,
                 o.total::text AS total, o.tax::text AS tax,
-                COALESCE(SUM(p.amount) FILTER (WHERE p.method <> 'credit'), 0)::text AS net_paid,
+                COALESCE(SUM(p.amount) FILTER (WHERE p.method NOT IN ('credit', 'cashback')), 0)::text AS net_paid,
                 app_business_date(COALESCE(o.closed_at, o.opened_at), l.timezone, l.business_day_start_minutes)::text AS business_date
            FROM orders o
            JOIN locations l ON l.id = o.location_id
@@ -469,7 +472,7 @@ export async function sweepCampaignRewards(
       const { rows: candidates } = await client.query<CandidateRow>(
         `SELECT o.id, o.location_id, o.customer_id,
                 app_business_date(COALESCE(o.closed_at, o.opened_at), l.timezone, l.business_day_start_minutes)::text AS business_date,
-                COALESCE(SUM(p.amount) FILTER (WHERE p.method <> 'credit'), 0)::text AS net_paid,
+                COALESCE(SUM(p.amount) FILTER (WHERE p.method NOT IN ('credit', 'cashback')), 0)::text AS net_paid,
                 o.total::text AS total, o.tax::text AS tax
            FROM orders o
            JOIN locations l ON l.id = o.location_id
@@ -858,6 +861,308 @@ export async function redeemCampaignReward(
       availableRialAfter: plan.plan.leftoverRial,
     };
   });
+}
+
+// ── the till: spending a reward on a bill ────────────────────────────────────
+
+export interface RewardTenderResult {
+  redemptionId: string;
+  /** What the reward paid towards this bill. */
+  amountRial: number;
+  /** True when this order had already spent a reward; nothing new was spent. */
+  replayed: boolean;
+}
+
+/**
+ * Spends a customer's available campaign rewards on an open POS bill.
+ *
+ * This is the same allocation the wallet payout uses (`planRedemption`: soonest
+ * expiry first, deterministic), with two differences that make it a *tender*
+ * rather than a payout:
+ *
+ *   * **it posts nothing.** The bill's own payment entry debits 2445 for this
+ *     portion (`ledger-service.ts` → `cashback`), so posting
+ *     `growth.cashback_redeemed` here as well would debit the same liability
+ *     twice. The redemption row and the `redeemed` events are what the till
+ *     and the report read; the journal is the sale's.
+ *   * **it belongs to an order.** The redemption names that order, which is what
+ *     makes the refund path possible: a customer return finds this row and
+ *     restores its value (see `restoreCampaignRewardTenders`).
+ *
+ * Idempotency: the caller's transaction already owns the order, and the key is
+ * derived from it (`pos-tender:<order id>`), so a retried or double-clicked
+ * checkout finds the existing redemption and returns it unchanged. The
+ * `(business_id, order_id)` partial unique index is the final guard if two
+ * workers race past the read.
+ */
+export async function applyCampaignRewardTender(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    locationId: string;
+    orderId: string;
+    customerId: string;
+    amountRial: number;
+    actorId?: string | null;
+    /** Deterministic "now" for a test; the till always omits it. */
+    now?: Date;
+  },
+): Promise<RewardTenderResult> {
+  if (!isUuid(input.orderId)) throw new CampaignRewardError("order_not_found", 404);
+  if (!isUuid(input.customerId)) throw new CampaignRewardError("customer_not_found", 404);
+  if (!Number.isSafeInteger(input.amountRial) || input.amountRial <= 0) {
+    throw new CampaignRewardError("amount_invalid", 400);
+  }
+  const requestKey = `pos-tender:${input.orderId}`;
+
+  const { rows: existing } = await client.query<{ id: string; amount_rial: string }>(
+    `SELECT id, amount_rial::text AS amount_rial
+       FROM growth_reward_redemptions
+      WHERE business_id = $1 AND request_key = $2`,
+    [input.businessId, requestKey],
+  );
+  if (existing[0]) {
+    const spent = Number(existing[0].amount_rial);
+    if (spent !== input.amountRial) {
+      // The same bill can never spend a different amount on replay: that would
+      // mean the customer paid part of it twice, or paid a different price.
+      throw new CampaignRewardError("reward_tender_conflict", 409, { tenderedRial: spent });
+    }
+    return { redemptionId: existing[0].id, amountRial: spent, replayed: true };
+  }
+
+  // The same per-customer lock the wallet payout takes, so two tills cannot
+  // both spend the same Rial — one waits, then sees the balance already spent.
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+    `growth-customer-reward:${input.businessId}:${input.customerId}`,
+  ]);
+
+  const now = input.now ?? new Date();
+  const positions = await spendablePositions(client, input.businessId, input.customerId);
+  const plan = planRedemption(
+    positions.map((row) => ({ entitlementId: row.id, ...row.position })),
+    input.amountRial,
+    now,
+  );
+  if (!plan.ok) {
+    throw new CampaignRewardError(
+      plan.reason === "insufficient" ? "reward_balance_insufficient" : "amount_invalid",
+      plan.reason === "insufficient" ? 409 : 400,
+      { availableRial: plan.availableRial },
+    );
+  }
+
+  const { rows: redemptionRows } = await client.query<{ id: string }>(
+    `INSERT INTO growth_reward_redemptions
+       (business_id, customer_id, amount_rial, payout_method, request_key, created_by,
+        channel, order_id, location_id)
+     VALUES ($1, $2, $3, 'pos_tender', $4, $5, 'pos_tender', $6, $7)
+     RETURNING id`,
+    [
+      input.businessId,
+      input.customerId,
+      input.amountRial,
+      requestKey,
+      input.actorId ?? null,
+      input.orderId,
+      input.locationId,
+    ],
+  );
+  const redemptionId = redemptionRows[0].id;
+
+  const byId = new Map(positions.map((row) => [row.id, row.position]));
+  for (const allocation of plan.plan.allocations) {
+    const position = byId.get(allocation.entitlementId)!;
+    const redeemedRial = position.redeemedRial + allocation.amountRial;
+    const after: RewardPosition = { ...position, redeemedRial };
+    await client.query(
+      `INSERT INTO growth_reward_events
+         (business_id, entitlement_id, campaign_id, customer_id, event_type, amount_rial,
+          order_id, redemption_id, reason)
+       SELECT $1, e.id, e.campaign_id, e.customer_id, 'redeemed', $3, $5, $4, 'pos_sale_tender'
+         FROM growth_reward_entitlements e WHERE e.id = $2`,
+      [input.businessId, allocation.entitlementId, allocation.amountRial, redemptionId, input.orderId],
+    );
+    await client.query(
+      `UPDATE growth_reward_entitlements
+          SET redeemed_rial = $2, status = $3, updated_at = now()
+        WHERE id = $1`,
+      [allocation.entitlementId, redeemedRial, deriveRewardStatus(after, now)],
+    );
+  }
+
+  return { redemptionId, amountRial: input.amountRial, replayed: false };
+}
+
+export interface RewardTenderRestoreResult {
+  /** Reward value given back to the wallet by this pass. */
+  restoredRial: number;
+  redemptionId: string | null;
+  entryId: string | null;
+}
+
+/** Rounded half-up share of `amount` in `total`'s tax, in Rial, never over the amount. */
+function proportionalTaxRial(amountRial: number, taxRial: number, totalRial: number): number {
+  if (totalRial <= 0 || taxRial <= 0 || amountRial <= 0) return 0;
+  const amount = BigInt(amountRial);
+  const tax = BigInt(taxRial);
+  const total = BigInt(totalRial);
+  const share = (amount * tax + total / 2n) / total;
+  return Number(share > amount ? amount : share);
+}
+
+/**
+ * Gives back the reward value a customer return refunded.
+ *
+ * A sale that was paid partly with a reward must not refund that part in cash:
+ * the customer never handed over money for it, so the reward goes back to their
+ * wallet instead. This function is the wallet side of that; the return's own
+ * cash-refund capacity already excludes the reward portion
+ * (`customer-return-service.ts`), so the two halves cannot both pay.
+ *
+ * How much: the cumulative refunded amount on the bill, capped by what the
+ * reward actually paid (`restorableTenderRial`), minus what has been restored
+ * already (`growth_reward_redemptions.refunded_rial`). One subtraction, stored
+ * — so a replayed return, a retried sweep or an overlapping refund each move
+ * only their own increment and never restore twice.
+ *
+ * Accounting: one `growth.cashback_tender_restored` entry for the increment —
+ * Dr 4400 + Dr VAT share / Cr 2445 — which is the mirror of the sale's 2445
+ * debit and leaves the liability holding the value the customer can spend
+ * again. The entry's source id is the first `restored` event it wrote, so a
+ * later partial restore posts its own entry rather than being suppressed by the
+ * ledger's (source, kind) idempotency.
+ */
+export async function restoreCampaignRewardTenders(
+  client: PoolClient,
+  input: {
+    businessId: string;
+    orderId: string;
+    actorId?: string | null;
+    entryDate?: string | null;
+    now?: Date;
+  },
+): Promise<RewardTenderRestoreResult> {
+  if (!isUuid(input.orderId)) return { restoredRial: 0, redemptionId: null, entryId: null };
+
+  const { rows: redemptions } = await client.query<{
+    id: string;
+    customer_id: string;
+    amount_rial: string;
+    refunded_rial: string;
+  }>(
+    `SELECT id, customer_id, amount_rial::text AS amount_rial, refunded_rial::text AS refunded_rial
+       FROM growth_reward_redemptions
+      WHERE business_id = $1 AND order_id = $2 AND channel = 'pos_tender'
+      FOR UPDATE`,
+    [input.businessId, input.orderId],
+  );
+  const redemption = redemptions[0];
+  if (!redemption) return { restoredRial: 0, redemptionId: null, entryId: null };
+
+  const { rows: refunds } = await client.query<{ refunded: string }>(
+    `SELECT COALESCE(-SUM(amount) FILTER (WHERE amount < 0), 0)::text AS refunded
+       FROM payments WHERE order_id = $1`,
+    [input.orderId],
+  );
+  const target = restorableTenderRial(Number(redemption.amount_rial), Number(refunds[0]?.refunded ?? 0));
+  const already = Number(redemption.refunded_rial);
+  const increment = target - already;
+  if (increment <= 0) return { restoredRial: 0, redemptionId: redemption.id, entryId: null };
+
+  const { rows: consumedRows } = await client.query<{ entitlement_id: string; amount_rial: string }>(
+    `SELECT entitlement_id, amount_rial::text AS amount_rial
+       FROM growth_reward_events
+      WHERE redemption_id = $1 AND event_type = 'redeemed'
+      ORDER BY created_at, id`,
+    [redemption.id],
+  );
+  const consumed: RedemptionAllocation[] = consumedRows.map((row) => ({
+    entitlementId: row.entitlement_id,
+    amountRial: Number(row.amount_rial),
+  }));
+  const plan = planTenderRestore(consumed, increment);
+
+  const now = input.now ?? new Date();
+  const eventIds: string[] = [];
+  let restored = 0;
+  for (const allocation of plan) {
+    const { rows: positionRows } = await client.query<SpendableRow>(
+      `SELECT id, earned_rial::text AS earned_rial, redeemed_rial::text AS redeemed_rial,
+              reversed_rial::text AS reversed_rial, expired_rial::text AS expired_rial,
+              unrecovered_rial::text AS unrecovered_rial,
+              available_at::text AS available_at, expires_at::text AS expires_at
+         FROM growth_reward_entitlements WHERE id = $1 FOR UPDATE`,
+      [allocation.entitlementId],
+    );
+    const row = positionRows[0];
+    if (!row) continue; // the position left with its tenant or campaign
+    const position: RewardPosition = {
+      earnedRial: Number(row.earned_rial),
+      redeemedRial: Number(row.redeemed_rial),
+      reversedRial: Number(row.reversed_rial),
+      expiredRial: Number(row.expired_rial),
+      unrecoveredRial: Number(row.unrecovered_rial),
+      availableAt: row.available_at,
+      expiresAt: row.expires_at,
+    };
+    // Never restore more than this lot still reports as spent.
+    const giveBack = Math.min(allocation.amountRial, position.redeemedRial);
+    if (giveBack <= 0) continue;
+    const after: RewardPosition = { ...position, redeemedRial: position.redeemedRial - giveBack };
+    const { rows: eventRows } = await client.query<{ id: string }>(
+      `INSERT INTO growth_reward_events
+         (business_id, entitlement_id, campaign_id, customer_id, event_type, amount_rial,
+          order_id, redemption_id, reason)
+       SELECT $1, e.id, e.campaign_id, e.customer_id, 'restored', $3, $4, $5, 'refunded_sale'
+         FROM growth_reward_entitlements e WHERE e.id = $2
+       RETURNING id`,
+      [input.businessId, allocation.entitlementId, giveBack, input.orderId, redemption.id],
+    );
+    await client.query(
+      `UPDATE growth_reward_entitlements
+          SET redeemed_rial = $2, status = $3, updated_at = now()
+        WHERE id = $1`,
+      [allocation.entitlementId, after.redeemedRial, deriveRewardStatus(after, now)],
+    );
+    eventIds.push(eventRows[0].id);
+    restored += giveBack;
+  }
+
+  if (restored <= 0) return { restoredRial: 0, redemptionId: redemption.id, entryId: null };
+
+  await client.query(
+    `UPDATE growth_reward_redemptions SET refunded_rial = $2 WHERE id = $1`,
+    [redemption.id, already + restored],
+  );
+
+  const { rows: orderRows } = await client.query<{ total: string; tax: string }>(
+    `SELECT total::text AS total, tax::text AS tax FROM orders WHERE id = $1`,
+    [input.orderId],
+  );
+  const taxShare = proportionalTaxRial(
+    restored,
+    Number(orderRows[0]?.tax ?? 0),
+    Number(orderRows[0]?.total ?? 0),
+  );
+
+  const { entryId } = await emitDomainEvent(client, {
+    businessId: input.businessId,
+    locationId: null,
+    eventType: "growth.cashback_tender_restored",
+    payload: {
+      customerId: redemption.customer_id,
+      orderId: input.orderId,
+      amount: rialText(String(restored)) as RialText,
+      tax: rialText(String(taxShare)) as RialText,
+      entryDate: input.entryDate ?? null,
+    },
+    sourceType: "growth_cashback_tender",
+    sourceId: eventIds[0] ?? null,
+    createdBy: input.actorId ?? null,
+  });
+
+  return { restoredRial: restored, redemptionId: redemption.id, entryId };
 }
 
 // ── reads ────────────────────────────────────────────────────────────────────

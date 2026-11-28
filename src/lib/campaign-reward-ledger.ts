@@ -29,6 +29,9 @@
  *             a reward a customer already spent cannot be clawed back from
  *             their next order, so the shortfall is recorded separately.
  *   expired   the validity window ended with value still unspent.
+ *   restored  a till tender was refunded and the value goes back to the
+ *             wallet: the mirror of `redeemed`, and its own event because the
+ *             amounts are positive and a balance is a SUM over these rows.
  */
 
 /** How long a granted reward stays usable after it becomes available. */
@@ -37,7 +40,7 @@ export const CAMPAIGN_REWARD_VALIDITY_DAYS = 180;
 /** The maximum a single campaign can grant per order — a sanity ceiling, not a business rule. */
 export const MAX_REWARD_RIAL = 2_000_000_000;
 
-export const REWARD_EVENT_TYPES = ["earned", "redeemed", "reversed", "expired"] as const;
+export const REWARD_EVENT_TYPES = ["earned", "redeemed", "reversed", "expired", "restored"] as const;
 export type RewardEventType = (typeof REWARD_EVENT_TYPES)[number];
 
 export const REWARD_STATUSES = [
@@ -180,6 +183,45 @@ export function planRedemption(
     ok: true,
     plan: { allocations, totalRial: amountRial, leftoverRial: availableRial - amountRial },
   };
+}
+
+/**
+ * How much of a till tender a cumulative refund has made restorable.
+ *
+ * `refundedRial` is what the order has been refunded so far (every return and
+ * reversal on it), `tenderedRial` what the reward paid for. A refund can never
+ * give back more reward than was spent on the bill, so the smaller of the two
+ * wins — and because the caller stores how much it has already restored, a
+ * repeated pass restores only the difference. That is the whole idempotency
+ * argument for a restore: one subtraction, no counters.
+ */
+export function restorableTenderRial(tenderedRial: number, refundedRial: number): number {
+  return Math.min(nonNegative(tenderedRial), nonNegative(refundedRial));
+}
+
+/**
+ * Split a restore across the lots a tender consumed.
+ *
+ * The spending order is soonest-expiry-first (`planRedemption`), so a restore
+ * walks the other way: value goes back to the longest-lived lots first, which
+ * is what keeps a refunded reward from landing on a lot that expires tomorrow.
+ * Each lot can only take back what it gave, and the walk stops when the
+ * restore is covered — deterministic for the same inputs, like the plan.
+ */
+export function planTenderRestore(
+  consumed: readonly RedemptionAllocation[],
+  restoreRial: number,
+): RedemptionAllocation[] {
+  let remaining = nonNegative(restoreRial);
+  const allocations: RedemptionAllocation[] = [];
+  for (let index = consumed.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const lot = consumed[index];
+    const take = Math.min(nonNegative(lot.amountRial), remaining);
+    if (take <= 0) continue;
+    allocations.push({ entitlementId: lot.entitlementId, amountRial: take });
+    remaining -= take;
+  }
+  return allocations;
 }
 
 /**
