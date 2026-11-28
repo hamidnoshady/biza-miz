@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   loadDuplicateReviewGroups: vi.fn(),
   listDuplicateCandidateSkus: vi.fn(),
   recordDuplicateKeepSeparate: vi.fn(),
+  recordDuplicateHistoryRetained: vi.fn(),
   archiveDuplicateOrphanFromReview: vi.fn(),
   restoreDuplicateFromReview: vi.fn(),
 }));
@@ -58,6 +59,7 @@ beforeEach(() => {
   mocks.loadDuplicateReviewGroups.mockResolvedValue([]);
   mocks.listDuplicateCandidateSkus.mockResolvedValue(["zza05023"]);
   mocks.recordDuplicateKeepSeparate.mockResolvedValue({ sku: "zza05023", reviewed: true });
+  mocks.recordDuplicateHistoryRetained.mockResolvedValue({ sku: "zza05023", resolution: "history_retained" });
   mocks.archiveDuplicateOrphanFromReview.mockResolvedValue({ archived: { orphanItemId: UUID }, blockers: [] });
   mocks.restoreDuplicateFromReview.mockResolvedValue({ restored: true });
 });
@@ -178,5 +180,25 @@ describe("POST", () => {
     await expect(
       post({ sku: "zza05023", action: "keep_separate", confirm: true, reviewToken: "token-1" }),
     ).rejects.toThrow("connection terminated");
+  });
+});
+
+describe("history retention", () => {
+  it("records a history disposition and never reports it as deduplicated", async () => {
+    const response = await post({
+      sku: "zza05023",
+      action: "history_retained",
+      confirm: true,
+      reviewToken: "token-1",
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, deduplicated: false });
+    expect(mocks.recordDuplicateHistoryRetained).toHaveBeenCalledWith("tenant-a", {
+      sku: "zza05023",
+      reviewToken: "token-1",
+      actorUserId: "user-1",
+      locationId: LOCATION,
+    });
+    expect(mocks.archiveDuplicateOrphanFromReview).not.toHaveBeenCalled();
   });
 });

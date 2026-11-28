@@ -36,11 +36,14 @@ export const PRODUCT_IDENTITY_REVIEW_REQUIRED = "product_identity_review_require
 export async function lockProductSkuIdentity(
   client: PoolClient,
   locationId: string,
-  sku: string | null | undefined,
+  identity: { column: IdentityColumn; value: string } | null,
 ): Promise<void> {
-  const key = (sku ?? "").trim().toLowerCase();
+  if (!identity) return;
+  const key = identity.value.trim().toLowerCase();
   if (!key) return;
-  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`product-sku:${locationId}:${key}`]);
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+    `product-${identity.column}:${locationId}:${key}`,
+  ]);
 }
 
 export interface LocalSkuMapping {
@@ -64,6 +67,28 @@ export interface LocalSkuGuardInput {
   connectionId: string;
   /** The incoming remote SKU (un-normalised). */
   sku: string | null | undefined;
+  /** The incoming product name; used only when the store sends no SKU/barcode. */
+  name?: string | null;
+  /** A GTIN/barcode from the store payload, when it has one. */
+  barcode?: string | null;
+  /** The local shape the create would use (simple / variant_parent / variant_child). */
+  kind?: "simple" | "variant_parent" | "variant_child";
+  /** The local parent for a variation, so sibling variations are not compared. */
+  parentItemId?: string | null;
+}
+
+type IdentityColumn = "sku" | "barcode" | "name";
+
+function identityOf(input: LocalSkuGuardInput): { column: IdentityColumn; value: string } | null {
+  const sku = (input.sku ?? "").trim();
+  if (sku) return { column: "sku", value: sku };
+  const barcode = (input.barcode ?? "").trim();
+  if (barcode) return { column: "barcode", value: barcode };
+  // A name is a *hint for review*, never a merge key. It is only used for a
+  // top-level row: sibling variations legitimately share their parent's name.
+  const name = (input.name ?? "").trim();
+  if (name && input.kind !== "variant_child" && !input.parentItemId) return { column: "name", value: name };
+  return null;
 }
 
 /** True when this row could be the same physical product, not this connection's own family. */
@@ -78,13 +103,26 @@ export function isAmbiguousLocalMatch(match: LocalSkuMatch, connectionId: string
   return match.mappings.some((mapping) => mapping.connectionId !== connectionId);
 }
 
-/** Every active row in the branch carrying the same normalised SKU, with its product mappings. */
+/** Every active row in the branch carrying the same SKU (or barcode, or — for a top-level row without either — the same normalised name), with its product mappings. */
 export async function findLocalSkuMatches(
   client: PoolClient,
   input: LocalSkuGuardInput,
 ): Promise<LocalSkuMatch[]> {
-  const sku = (input.sku ?? "").trim();
-  if (!sku) return [];
+  const identity = identityOf(input);
+  if (!identity) return [];
+  const params: unknown[] = [input.businessId, input.locationId, identity.value];
+  let match: string;
+  if (identity.column === "sku") {
+    match = `NULLIF(btrim(i.sku), '') IS NOT NULL AND lower(btrim(i.sku)) = lower(btrim($3))`;
+  } else if (identity.column === "barcode") {
+    match = `NULLIF(btrim(i.barcode), '') IS NOT NULL AND lower(btrim(i.barcode)) = lower(btrim($3))`;
+  } else {
+    params.push(input.kind ?? "simple");
+    match = `NULLIF(btrim(i.name), '') IS NOT NULL
+      AND lower(regexp_replace(btrim(i.name), '\\s+', ' ', 'g')) =
+          lower(regexp_replace(btrim($3), '\\s+', ' ', 'g'))
+      AND i.kind = $4 AND i.parent_item_id IS NULL`;
+  }
   const { rows } = await client.query<{
     item_id: string;
     name: string;
@@ -97,10 +135,9 @@ export async function findLocalSkuMatches(
       WHERE l.business_id = $1
         AND i.location_id = $2
         AND i.is_active
-        AND NULLIF(btrim(i.sku), '') IS NOT NULL
-        AND lower(btrim(i.sku)) = lower(btrim($3))
+        AND ${match}
       ORDER BY i.created_at, i.id`,
-    [input.businessId, input.locationId, sku],
+    params,
   );
   if (rows.length === 0) return [];
   const { rows: mappings } = await client.query<{
@@ -138,7 +175,7 @@ export async function assertNoAmbiguousLocalIdentity(
   client: PoolClient,
   input: LocalSkuGuardInput,
 ): Promise<void> {
-  await lockProductSkuIdentity(client, input.locationId, input.sku);
+  await lockProductSkuIdentity(client, input.locationId, identityOf(input));
   const matches = await findLocalSkuMatches(client, input);
   if (matches.some((match) => isAmbiguousLocalMatch(match, input.connectionId))) {
     throw new Error(PRODUCT_IDENTITY_REVIEW_REQUIRED);

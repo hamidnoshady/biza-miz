@@ -33,7 +33,7 @@ import { PERMISSIONS, type Permission } from "@/lib/permissions";
 import { workspaceAccessFor } from "@/lib/workspace-access";
 import { findEntity } from "@/lib/data-transfer/registry";
 import { ExportError } from "@/lib/data-transfer/export-service";
-import { ImportError } from "@/lib/data-transfer/import-service";
+import { ImportAccessDeniedError, ImportError } from "@/lib/data-transfer/import-service";
 import { ScheduleError } from "@/lib/data-transfer/schedule-service";
 import { TemplateError } from "@/lib/data-transfer/templates-service";
 import type { EntityDefinition } from "@/lib/data-transfer/types";
@@ -170,6 +170,14 @@ const ERROR_STATUS: Record<string, number> = {
    */
   export_requires_regeneration: 403,
   service_disabled: 403,
+  // GitHub #1580 — effective import access. A temporary (activation/grant/
+  // suspension) state is a 409 the wizard can explain and stage around; a
+  // permanent one (not selected, disabled, unsupported) is a 403.
+  service_not_selected: 403,
+  service_not_activated: 409,
+  service_grant_inactive: 409,
+  service_suspended: 409,
+  service_unavailable: 503,
   service_activation_check_unavailable: 503,
   // Issue #1110 — My Workspace data entities are not importable for a business
   // type that does not have the feature.
@@ -191,11 +199,24 @@ export function handleDataError(error: unknown): NextResponse {
     // `entityAccess` answers with, so one screen reader handles both.
     const requires = error instanceof ExportError ? error.requires : undefined;
     const reason = error instanceof ExportError ? error.reason : undefined;
+    // #1580 — an import refused by effective service access explains itself in
+    // the operator's language, so staging screens are not dead ends.
+    const access =
+      error instanceof ImportAccessDeniedError
+        ? { label: error.decision.label, serviceReason: error.decision.reason, entityKey: error.entityKey }
+        : null;
     return NextResponse.json(
       {
         error: error.code,
         ...(requires && requires.length > 0 ? { requires } : {}),
         ...(reason ? { reason } : {}),
+        ...(access
+          ? {
+              message: access.label,
+              serviceReason: access.serviceReason,
+              entityKey: access.entityKey,
+            }
+          : {}),
       },
       { status },
     );

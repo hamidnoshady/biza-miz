@@ -19,7 +19,6 @@ import { Client } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../scripts/migrate";
 import { encryptSecret } from "../src/lib/integrations/secrets";
-
 const rootDatabaseUrl = process.env.DATABASE_URL;
 if (!rootDatabaseUrl) {
   throw new Error("DATABASE_URL is required for database integration tests");
@@ -418,5 +417,431 @@ describe("weeks-apart duplicate products", () => {
     );
     expect(queued.rows).toHaveLength(1);
     expect(Number(queued.rows[0].payload.stock_quantity)).toBe(6);
+  });
+});
+
+describe("variable-family orphans (issue #1592 follow-up)", () => {
+  async function insertMappedItem(input: {
+    sku: string;
+    kind: "simple" | "variant_parent" | "variant_child";
+    parentItemId?: string | null;
+    remoteId: string;
+    quantity: number | null;
+    name?: string;
+    locationId?: string;
+    connectionId?: string;
+  }): Promise<string> {
+    const { rows } = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id, parent_item_id, name, sku, kind, created_at)
+       VALUES ($1, $2, $3, $4, $5, now() - interval '2 days') RETURNING id`,
+      [input.locationId ?? biz.locationId, input.parentItemId ?? null, input.name ?? PRODUCT_NAME, input.sku, input.kind],
+    );
+    const id = rows[0].id;
+    if (input.quantity != null) {
+      await db.query(`INSERT INTO item_stock (item_id, quantity) VALUES ($1, $2)`, [id, input.quantity]);
+    }
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'product', $3, $4)`,
+      [biz.id, input.connectionId ?? biz.connectionId, input.remoteId, id],
+    );
+    return id;
+  }
+
+  async function mapFamily(sku: string, base: number): Promise<{ parent: string; child: string }> {
+    const parent = await insertMappedItem({ sku, kind: "variant_parent", remoteId: String(base), quantity: null });
+    const child = await insertMappedItem({
+      sku,
+      kind: "variant_child",
+      parentItemId: parent,
+      remoteId: String(base + 1),
+      quantity: 2,
+    });
+    return { parent, child };
+  }
+
+  it("classifies and archives the flat August copy of a mapped variable family", async () => {
+    const { parent } = await mapFamily("FAM-1", 8100);
+    const flat = await insertHistoricalTwin("FAM-1", 34);
+
+    const groups = await report.findDuplicateItemGroups(biz.id, { sku: "FAM-1" });
+    expect(groups).toHaveLength(1);
+    expect(groups[0].verdict).toBe("historical_variant_orphan");
+
+    const [plan] = await resolve.planDuplicateOrphanArchives(biz.id, { sku: "FAM-1" });
+    expect(plan).toMatchObject({
+      kind: "historical_variant_orphan",
+      orphanItemId: flat,
+      twinItemId: parent,
+      status: "archive",
+    });
+
+    const result = await resolve.archiveDuplicateOrphans(biz.id, [plan]);
+    expect(result.archived.map((row) => row.orphanItemId)).toEqual([flat]);
+    expect(await isActive(flat)).toBe(false);
+    expect(await auditRows("item.duplicate_variant_orphan_archived", flat)).toHaveLength(1);
+    // The family and its stock are untouched; the flat row's zero stock stays.
+    expect(await quantityOf(flat)).toBe(0);
+  });
+
+  it("blocks the flat copy when it still holds stock", async () => {
+    await mapFamily("FAM-2", 8110);
+    const flat = await insertHistoricalTwin("FAM-2", 34, 1);
+    const [plan] = await resolve.planDuplicateOrphanArchives(biz.id, { sku: "FAM-2" });
+    expect(plan.status).toBe("blocked");
+    expect(plan.blockers).toContain("nonzero_stock");
+    expect(await isActive(flat)).toBe(true);
+  });
+
+  it("does not pair a differently-named simple row, and does not guess between two families", async () => {
+    await mapFamily("FAM-3", 8120);
+    await db.query(
+      `INSERT INTO items (location_id, name, sku, kind, created_at)
+       VALUES ($1, 'کرم دیگر', 'FAM-3', 'simple', now() - interval '34 days')`,
+      [biz.locationId],
+    );
+    expect((await report.findDuplicateItemGroups(biz.id, { sku: "FAM-3" }))[0].verdict).toBe("unmapped_duplicate");
+    expect(await resolve.planDuplicateOrphanArchives(biz.id, { sku: "FAM-3" })).toEqual([]);
+
+    await mapFamily("FAM-4", 8130);
+    await mapFamily("FAM-4", 8140);
+    await insertHistoricalTwin("FAM-4", 34);
+    expect((await report.findDuplicateItemGroups(biz.id, { sku: "FAM-4" }))[0].verdict).toBe("unmapped_duplicate");
+    expect(await resolve.planDuplicateOrphanArchives(biz.id, { sku: "FAM-4" })).toEqual([]);
+  });
+
+  it("keeps branch and tenant isolation for family orphans", async () => {
+    // A family in another branch must not become the twin of this branch's row.
+    const otherBranch = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name) VALUES ($1, 'Second') RETURNING id`,
+      [biz.id],
+    );
+    const otherParent = await insertMappedItem({
+      sku: "FAM-5",
+      kind: "variant_parent",
+      remoteId: "8150",
+      quantity: null,
+      locationId: otherBranch.rows[0].id,
+    });
+    await insertMappedItem({
+      sku: "FAM-5",
+      kind: "variant_child",
+      parentItemId: otherParent,
+      remoteId: "8151",
+      quantity: 1,
+      locationId: otherBranch.rows[0].id,
+    });
+    const flatHere = await insertHistoricalTwin("FAM-5", 34);
+    expect((await report.findDuplicateItemGroups(biz.id, { sku: "FAM-5" }))[0].verdict).toBe("unmapped_duplicate");
+    expect(await resolve.planDuplicateOrphanArchives(biz.id, { sku: "FAM-5" })).toEqual([]);
+    expect(await isActive(flatHere)).toBe(true);
+  });
+});
+
+describe("resolution states and history disposition", () => {
+  it("retains a history-referenced row without calling it deduplicated", async () => {
+    await mapProduct(7200, "HIST-REF");
+    const orphan = await insertHistoricalTwin("HIST-REF", 34);
+    await db.query(
+      `INSERT INTO item_barcodes (location_id, item_id, code, symbology) VALUES ($1, $2, '2000000072000', 'internal')`,
+      [biz.locationId, orphan],
+    );
+
+    const [group] = await review.loadDuplicateReviewGroups(biz.id, { sku: "HIST-REF", locationId: biz.locationId });
+    expect(group.resolution).toBe("blocked_history");
+    expect(group.needsAction).toBe(true);
+    expect(group.resolved).toBe(false);
+
+    const retained = await review.recordDuplicateHistoryRetained(biz.id, {
+      sku: "HIST-REF",
+      reviewToken: group.reviewToken,
+      actorUserId: null,
+      locationId: biz.locationId,
+    });
+    expect(retained.resolution).toBe("history_retained");
+    expect(retained.resolved).toBe(true);
+    expect(retained.needsAction).toBe(false);
+    expect(retained.deduplicated).toBe(false);
+    expect(await isActive(orphan)).toBe(true);
+    expect(await auditRows("item.duplicate_history_retained", group.members[0].itemId)).toHaveLength(1);
+    // The product list no longer flags this SKU.
+    expect(await review.listDuplicateCandidateSkus(biz.id, { locationId: biz.locationId })).not.toContain("HIST-REF");
+  });
+
+  it("refuses to retain history for a stocked row (stock needs its own decision)", async () => {
+    await mapProduct(7201, "HIST-REF-STOCK");
+    const orphan = await insertHistoricalTwin("HIST-REF-STOCK", 34, 2);
+    await db.query(
+      `INSERT INTO item_barcodes (location_id, item_id, code, symbology) VALUES ($1, $2, '2000000072010', 'internal')`,
+      [biz.locationId, orphan],
+    );
+    const [group] = await review.loadDuplicateReviewGroups(biz.id, {
+      sku: "HIST-REF-STOCK",
+      locationId: biz.locationId,
+    });
+    await expect(
+      review.recordDuplicateHistoryRetained(biz.id, {
+        sku: "HIST-REF-STOCK",
+        reviewToken: group.reviewToken,
+        actorUserId: null,
+        locationId: biz.locationId,
+      }),
+    ).rejects.toThrow("duplicate_history_has_stock");
+  });
+
+  it("keeps keep-separate distinct from deduplication and stops the flag", async () => {
+    await db.query(
+      `INSERT INTO items (location_id, name, sku, kind) VALUES
+         ($1, 'کرم یک', 'SEP-1', 'simple'), ($1, 'کرم دو', 'SEP-1', 'simple')`,
+      [biz.locationId],
+    );
+    const [group] = await review.loadDuplicateReviewGroups(biz.id, { sku: "SEP-1", locationId: biz.locationId });
+    expect(group.resolution).toBe("pending_review");
+    const kept = await review.recordDuplicateKeepSeparate(biz.id, {
+      sku: "SEP-1",
+      reviewToken: group.reviewToken,
+      actorUserId: null,
+      locationId: biz.locationId,
+    });
+    expect(kept.resolution).toBe("kept_separate");
+    expect(kept.deduplicated).toBe(false);
+    expect(kept.needsAction).toBe(false);
+    expect(await review.listDuplicateCandidateSkus(biz.id, { locationId: biz.locationId })).not.toContain("SEP-1");
+  });
+
+  it("stops flagging a safely archived row and reports it as archived, not pending", async () => {
+    await mapProduct(7202, "HIST-ARCH");
+    const orphan = await insertHistoricalTwin("HIST-ARCH", 34);
+    const [group] = await review.loadDuplicateReviewGroups(biz.id, { sku: "HIST-ARCH", locationId: biz.locationId });
+    const archived = await review.archiveDuplicateOrphanFromReview(biz.id, {
+      sku: "HIST-ARCH",
+      orphanItemId: orphan,
+      reviewToken: group.reviewToken,
+      actorUserId: null,
+      locationId: biz.locationId,
+    });
+    expect(archived.archived).not.toBeNull();
+    const [after] = await review.loadDuplicateReviewGroups(biz.id, { sku: "HIST-ARCH", locationId: biz.locationId });
+    expect(after.resolution).toBe("safely_archived");
+    expect(after.deduplicated).toBe(true);
+    expect(after.needsAction).toBe(false);
+    expect(await review.listDuplicateCandidateSkus(biz.id, { locationId: biz.locationId })).not.toContain("HIST-ARCH");
+  });
+});
+
+describe("stock-authority preview", () => {
+  async function storePayload(remoteId: string, sku: string, stock: number | null) {
+    await db.query(
+      `INSERT INTO integration_webhook_events (business_id, connection_id, event_topic, remote_id, delivery_id, payload, status)
+       VALUES ($1, $2, 'product.updated', $3, $4, $5, 'processed')`,
+      [
+        biz.id,
+        biz.connectionId,
+        remoteId,
+        `auth-${randomUUID()}`,
+        JSON.stringify({ ...simpleProduct(Number(remoteId), sku, stock ?? 0), stock_quantity: stock }),
+      ],
+    );
+  }
+
+  it("marks a store-equal pair safe, proposes zero physical movement and writes nothing", async () => {
+    const authority = await import("../src/lib/duplicate-items-stock-authority-service");
+    const canonical = await mapProduct(7300, "AUTH-1"); // 6 units locally
+    await storePayload("7300", "AUTH-1", 6);
+    const orphan = await insertHistoricalTwin("AUTH-1", 34, 5);
+
+    const preview = await authority.previewStockAuthority(biz.id, { sku: "AUTH-1", locationId: biz.locationId });
+    expect(preview.totals).toMatchObject({ pairs: 1, safe: 1, needsReconciliation: 0, manual: 0 });
+    const [item] = preview.items;
+    expect(item).toMatchObject({
+      itemId: orphan,
+      canonicalItemId: canonical,
+      orphanQuantity: 5,
+      canonicalQuantity: 6,
+      storeQuantity: 6,
+      evidence: "canonical_matches_store",
+      verdict: "safe_to_archive",
+    });
+    expect(item.proposal.physicalUnitsDelta).toBe(0);
+    expect(item.proposal.catalogueUnitsDelta).toBe(-5);
+    expect(preview.approvalToken).toMatch(/^[0-9a-f]{64}$/);
+    // Stable evidence ⇒ stable token; the preview is read-only.
+    const again = await authority.previewStockAuthority(biz.id, { sku: "AUTH-1", locationId: biz.locationId });
+    expect(again.approvalToken).toBe(preview.approvalToken);
+    expect(await isActive(orphan)).toBe(true);
+    expect(await quantityOf(orphan)).toBe(5);
+    expect(await auditRows("item.duplicate_historical_archived", orphan)).toHaveLength(0);
+  });
+
+  it("refuses negative store stock and a missing stock_quantity", async () => {
+    const authority = await import("../src/lib/duplicate-items-stock-authority-service");
+    await mapProduct(7301, "AUTH-NEG");
+    await storePayload("7301", "AUTH-NEG", -1);
+    await insertHistoricalTwin("AUTH-NEG", 34, 2);
+    const negative = await authority.previewStockAuthority(biz.id, { sku: "AUTH-NEG", locationId: biz.locationId });
+    expect(negative.items[0].evidence).toBe("store_stock_negative");
+    expect(negative.items[0].verdict).toBe("needs_store_reconciliation");
+    expect(negative.approvalToken).toMatch(/^[0-9a-f]{64}$/);
+
+    await mapProduct(7302, "AUTH-NONE");
+    await storePayload("7302", "AUTH-NONE", null);
+    await insertHistoricalTwin("AUTH-NONE", 34, 2);
+    const missing = await authority.previewStockAuthority(biz.id, { sku: "AUTH-NONE", locationId: biz.locationId });
+    expect(missing.items[0].evidence).toBe("store_stock_missing");
+  });
+
+  it("sends a stocked variable-family orphan to a person", async () => {
+    const authority = await import("../src/lib/duplicate-items-stock-authority-service");
+    const parent = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id, name, sku, kind) VALUES ($1, $2, 'AUTH-FAM', 'variant_parent') RETURNING id`,
+      [biz.locationId, PRODUCT_NAME],
+    );
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'product', '7310', $3)`,
+      [biz.id, biz.connectionId, parent.rows[0].id],
+    );
+    const child = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id, parent_item_id, name, sku, kind) VALUES ($1, $2, $3, 'AUTH-FAM', 'variant_child')
+       RETURNING id`,
+      [biz.locationId, parent.rows[0].id, PRODUCT_NAME],
+    );
+    await db.query(`INSERT INTO item_stock (item_id, quantity) VALUES ($1, 2)`, [child.rows[0].id]);
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'product', '7311', $3)`,
+      [biz.id, biz.connectionId, child.rows[0].id],
+    );
+    await insertHistoricalTwin("AUTH-FAM", 34, 1);
+    const preview = await authority.previewStockAuthority(biz.id, { sku: "AUTH-FAM", locationId: biz.locationId });
+    expect(preview.items[0].variantFamily).toBe(true);
+    expect(preview.items[0].verdict).toBe("manual_review");
+  });
+});
+
+describe("mapping provenance on a physical connection delete", () => {
+  it("archives the connection snapshot and every mapping before the cascade", async () => {
+    const provenance = await import("../src/lib/integrations/mapping-provenance-service");
+    const created = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections
+         (business_id, location_id, name, base_url, consumer_key_ciphertext, consumer_secret_ciphertext,
+          webhook_secret_ciphertext, currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices)
+       VALUES ($1, $2, 'Store (delete)', 'https://delete.example.com', $3, $4, $5, 'toman', true, true, true, false, false)
+       RETURNING id`,
+      [
+        biz.id,
+        biz.locationId,
+        encryptSecret("ck", Buffer.from(KEY, "hex")),
+        encryptSecret("cs", Buffer.from(KEY, "hex")),
+        encryptSecret("ws", Buffer.from(KEY, "hex")),
+      ],
+    );
+    const connectionId = created.rows[0].id;
+    const item = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id, name, sku, kind) VALUES ($1, 'کرم حذف', 'PROV-1', 'simple') RETURNING id`,
+      [biz.locationId],
+    );
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'product', '9001', $3)`,
+      [biz.id, connectionId, item.rows[0].id],
+    );
+
+    await db.query(`DELETE FROM integration_connections WHERE id = $1`, [connectionId]);
+    expect(
+      (
+        await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM integration_mappings WHERE connection_id = $1`, [
+          connectionId,
+        ])
+      ).rows[0].n,
+    ).toBe(0);
+
+    const rows = await provenance.listMappingProvenance(biz.id, { connectionId });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      connectionId,
+      connectionName: "Store (delete)",
+      provider: "woocommerce",
+      entityType: "product",
+      remoteId: "9001",
+      localId: item.rows[0].id,
+      archivedReason: "connection_deleted",
+    });
+    expect(rows[0].storeKey).toContain("delete.example.com");
+    // The item itself is untouched: provenance is evidence, not a re-link.
+    expect(await isActive(item.rows[0].id)).toBe(true);
+  });
+
+  it("never blocks a tenant deletion (the business is already gone when the cascade runs)", async () => {
+    const business = await db.query<{ id: string }>(
+      `INSERT INTO businesses (name, slug, industry) VALUES ('Gone', $1, 'cosmetics') RETURNING id`,
+      [`gone-${randomUUID().slice(0, 8)}`],
+    );
+    const location = await db.query<{ id: string }>(
+      `INSERT INTO locations (business_id, name) VALUES ($1, 'Gone') RETURNING id`,
+      [business.rows[0].id],
+    );
+    const connection = await db.query<{ id: string }>(
+      `INSERT INTO integration_connections
+         (business_id, location_id, name, base_url, consumer_key_ciphertext, consumer_secret_ciphertext,
+          webhook_secret_ciphertext, currency_unit, sync_orders, sync_products, sync_customers, push_stock, push_prices)
+       VALUES ($1, $2, 'Gone store', 'https://gone.example.com', $3, $4, $5, 'toman', true, true, true, false, false)
+       RETURNING id`,
+      [
+        business.rows[0].id,
+        location.rows[0].id,
+        encryptSecret("ck", Buffer.from(KEY, "hex")),
+        encryptSecret("cs", Buffer.from(KEY, "hex")),
+        encryptSecret("ws", Buffer.from(KEY, "hex")),
+      ],
+    );
+    const goneItem = await db.query<{ id: string }>(
+      `INSERT INTO items (location_id, name, sku, kind) VALUES ($1, 'Gone item', 'GONE-1', 'simple') RETURNING id`,
+      [location.rows[0].id],
+    );
+    await db.query(
+      `INSERT INTO integration_mappings (business_id, connection_id, entity_type, remote_id, local_id)
+       VALUES ($1, $2, 'product', '9999', $3)`,
+      [business.rows[0].id, connection.rows[0].id, goneItem.rows[0].id],
+    );
+
+    await expect(db.query(`DELETE FROM businesses WHERE id = $1`, [business.rows[0].id])).resolves.toBeDefined();
+    expect(
+      (
+        await db.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM integration_mapping_provenance WHERE business_id = $1`,
+          [business.rows[0].id],
+        )
+      ).rows[0].n,
+    ).toBe(0);
+  });
+});
+
+describe("reporting after an archive", () => {
+  it("keeps the archived row's stock and history while operational totals exclude it", async () => {
+    await mapProduct(7400, "REPORT-1");
+    const orphan = await insertHistoricalTwin("REPORT-1", 34);
+    const before = (
+      await db.query<{ units: string }>(
+        `SELECT sum(s.quantity)::text AS units FROM item_stock s JOIN items i ON i.id = s.item_id
+          WHERE i.location_id = $1 AND i.is_active`,
+        [biz.locationId],
+      )
+    ).rows[0].units;
+    const [plan] = await resolve.planDuplicateOrphanArchives(biz.id, { sku: "REPORT-1" });
+    await resolve.archiveDuplicateOrphans(biz.id, [plan]);
+
+    const after = (
+      await db.query<{ units: string }>(
+        `SELECT sum(s.quantity)::text AS units FROM item_stock s JOIN items i ON i.id = s.item_id
+          WHERE i.location_id = $1 AND i.is_active`,
+        [biz.locationId],
+      )
+    ).rows[0].units;
+    // The orphan held zero, so operational units are unchanged; its row and
+    // stock snapshot still exist for history and restore.
+    expect(after).toBe(before);
+    expect(await quantityOf(orphan)).toBe(0);
+    expect((await db.query<{ is_active: boolean }>(`SELECT is_active FROM items WHERE id = $1`, [orphan])).rows[0].is_active).toBe(false);
   });
 });

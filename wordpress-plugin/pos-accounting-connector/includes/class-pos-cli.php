@@ -168,8 +168,16 @@ class POS_Connector_CLI {
 	 *
 	 * ## OPTIONS
 	 *
-	 * [--json]
-	 * : Machine-readable output for monitoring and support tickets.
+	 * [--format=<format>]
+	 * : Output format. `--json` is WP-CLI's shorthand for `--format=json`;
+	 * the option is declared this way because WP-CLI rewrites `--json` to
+	 * `--format=json` before the command sees it.
+	 * ---
+	 * default: table
+	 * options:
+	 *   - table
+	 *   - json
+	 * ---
 	 *
 	 * [--ping]
 	 * : Also ping the panel. A successful ping is a CONNECTION test only; it
@@ -187,6 +195,11 @@ class POS_Connector_CLI {
 	 * @subcommand doctor
 	 */
 	public function doctor( $args, $assoc_args ) {
+		// WP-CLI rewrites `--json` to `--format=json` before dispatch. Reading
+		// both keeps the documented example working while still accepting the
+		// explicit `--format=json`.
+		$format = isset( $assoc_args['format'] ) ? (string) $assoc_args['format'] : 'table';
+		$json   = 'json' === $format || isset( $assoc_args['json'] );
 		$settings = pos_connector_settings();
 		$now      = time();
 		$state    = POS_Connector_Health::cron_state( $settings, $now );
@@ -278,7 +291,7 @@ class POS_Connector_CLI {
 			);
 		}
 
-		if ( isset( $assoc_args['queue-bytes'], $assoc_args['json'] ) ) {
+		if ( $json && isset( $assoc_args['queue-bytes'] ) ) {
 			$report['queue']['payloadStorageByTopic'] = POS_Connector_Queue::payload_storage_by_topic();
 			$report['queue']['tableStorageBytes']     = POS_Connector_Queue::table_storage_bytes();
 		}
@@ -300,7 +313,7 @@ class POS_Connector_CLI {
 		// would page on every shared-host hiccup.
 		$failing = 'failed' === $state['state'];
 
-		if ( isset( $assoc_args['json'] ) ) {
+		if ( $json ) {
 			WP_CLI::line( wp_json_encode( $report ) );
 			if ( $failing ) {
 				WP_CLI::halt( 1 );
@@ -678,7 +691,7 @@ class POS_Connector_CLI {
 				return;
 			case 'orders':
 				$days = isset( $assoc_args['days'] ) ? (int) $assoc_args['days'] : (int) pos_connector_settings()['resync_orders_days'];
-				$count = POS_Connector_Sync::export_orders( $days );
+				$count = POS_Connector_Sync::export_orders( $days, true );
 				WP_CLI::success( sprintf( '%d سفارش در صف قرار گرفت.', $count ) );
 				return;
 			case 'customers':

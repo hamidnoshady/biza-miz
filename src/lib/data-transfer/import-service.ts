@@ -35,11 +35,9 @@
 
 import { query, withoutTenantScope, withTenant } from "../db";
 import { partyWriteAudienceForActor } from "../member-access";
-import { serviceActivationState } from "../service-activation/app-gate-service";
 import { SERVICE_STATES, SERVICE_STATE_META } from "../service-activation/catalog";
-import { serviceGateBlocks } from "../service-activation/app-gate";
-import { readBusinessIndustry } from "../business-industry";
-import { resolveWorkspaceIndustryEligibility } from "../workspace-eligibility";
+import { importAccessForTarget } from "../import-access-service";
+import type { ImportAccessDecision } from "../import-access";
 import { DATA_ENTITIES, findEntity, requireEntity } from "./registry";
 import { ensureAdaptersRegistered } from "./entities";
 import { RowRejection, requireAdapter, type AdapterContext, type WriteOptions } from "./adapters";
@@ -93,43 +91,110 @@ export class ImportError extends Error {
   }
 }
 
-function importServiceForEntity(entity: EntityDefinition): { kind: "app" | "workspace"; key: string } {
-  if (entity.module === "crm") return { kind: "app", key: "crm" };
-  if (entity.module === "website") return { kind: "app", key: "website" };
-  if (entity.module === "workspace") return { kind: "workspace", key: "projects" };
-  return { kind: "app", key: "accounting" };
+/**
+ * The effective access for one entity's service, asked at every write boundary
+ * (#1580).
+ *
+ * The route has already authorized the member (two-key rule in `api/data/
+ * guard.ts`), so this asks the *service* axis only: was the app selected, and is
+ * it effective right now — through a paid activation or a #1579 complimentary
+ * grant — with a usable deployment and, for Workspace, an eligible industry
+ * and enabled capability. No money, no selection-only proxy.
+ */
+async function importEntityAccess(
+  businessId: string,
+  entity: EntityDefinition,
+): Promise<ImportAccessDecision> {
+  return importAccessForTarget({
+    businessId,
+    module: entity.module,
+    requiredPermission: entity.importPermission,
+    permissions: new Set<string>(),
+    importable: true,
+    permissionAlreadyEnforced: true,
+    // The HTTP route already applied the install's deployment gate. The worker
+    // must not re-litigate a property of the *install* (and #1110's runtime
+    // decision is unchanged by an import); industry eligibility and service
+    // state are still read from the canonical axes.
+    deploymentAgnostic: true,
+  });
 }
 
-async function assertImportServiceOperational(businessId: string, entity: EntityDefinition): Promise<void> {
-  const service = importServiceForEntity(entity);
-  // Issue #1110 — a business type without My Workspace cannot create project,
-  // task, contract or document rows through an import either. Historical
-  // records are not deleted; a restore into an eligible business still works.
-  if (service.kind === "workspace") {
-    let industry: string | null;
-    try {
-      industry = await readBusinessIndustry(businessId);
-    } catch {
-      throw new ImportError("workspace_access_check_unavailable");
-    }
-    if (!resolveWorkspaceIndustryEligibility(industry).eligible) {
-      throw new ImportError("workspace_not_available");
-    }
+/** The engine's stable error code for a service that cannot receive a write. */
+function importAccessErrorCode(decision: ImportAccessDecision): string {
+  switch (decision.reason) {
+    case "app_not_selected":
+      return "service_not_selected";
+    case "awaiting_activation":
+      return "service_not_activated";
+    case "grant_inactive":
+      return "service_grant_inactive";
+    case "service_suspended":
+      return "service_suspended";
+    case "service_disabled":
+    case "service_purged":
+      return "service_disabled";
+    case "app_unavailable":
+    case "deployment_unsupported":
+      return "service_unavailable";
+    case "workspace_unavailable":
+      return "workspace_not_available";
+    default:
+      return "service_not_activated";
   }
-  let state;
-  try {
-    state = await serviceActivationState(businessId, service.kind, service.key);
-  } catch {
-    throw new ImportError("service_activation_check_unavailable");
-  }
-  if (serviceGateBlocks(state)) throw new ImportError("service_disabled");
 }
 
+/** Staging only writes the engine's own job rows, never tenant domain data. */
+async function assertImportStagingAllowed(
+  businessId: string,
+  entity: EntityDefinition,
+): Promise<void> {
+  const decision = await importEntityAccess(businessId, entity);
+  if (!decision.stagingAllowed) {
+    throw new ImportError(importAccessErrorCode(decision));
+  }
+}
+
+export class ImportAccessDeniedError extends ImportError {
+  constructor(
+    readonly decision: ImportAccessDecision,
+    readonly entityKey: string,
+  ) {
+    super(importAccessErrorCode(decision));
+  }
+}
+
+/**
+ * Refuse a mutating boundary (queue, run, retry, resumed job) unless the owning
+ * service is effective for this business at this instant.
+ */
+async function assertImportServiceOperational(
+  businessId: string,
+  entity: EntityDefinition,
+): Promise<void> {
+  const decision = await importEntityAccess(businessId, entity);
+  if (!decision.allowed) {
+    throw new ImportAccessDeniedError(decision, entity.key);
+  }
+}
+
+/**
+ * The service that owns each importable entity, for the worker's claim query:
+ * jobs whose owning service is deliberately customer-disabled stay parked
+ * instead of being claimed forever.
+ */
 const IMPORT_SERVICE_MAP = DATA_ENTITIES.flatMap((entity) => {
   if (!entity.importPermission) return [];
-  const service = importServiceForEntity(entity);
-  return [{ entity_key: entity.key, service_kind: service.kind, service_key: service.key }];
+  const service =
+    entity.module === "workspace"
+      ? { service_kind: "workspace", service_key: "projects" }
+      : {
+          service_kind: "app",
+          service_key: entity.module === "crm" ? "crm" : entity.module === "website" ? "website" : "accounting",
+        };
+  return [{ entity_key: entity.key, ...service }];
 });
+
 const CUSTOMER_DISABLED_SERVICE_STATES = SERVICE_STATES.filter(
   (state) => SERVICE_STATE_META[state].customerDisabled,
 );
@@ -322,7 +387,10 @@ export async function createImportJob(input: CreateImportJobInput): Promise<{
   if (!entity) throw new ImportError("unknown_entity");
   if (!entity.importPermission) throw new ImportError("entity_not_importable");
   if (entity.locationScoped && !input.locationId) throw new ImportError("location_required");
-  await assertImportServiceOperational(input.businessId, entity);
+  // Staging (this function) writes only the engine's own job/row tables, so it
+  // is allowed whenever the destination could ever accept a write. The apply
+  // boundaries below demand full effective access.
+  await assertImportStagingAllowed(input.businessId, entity);
 
   const sheet = await parseImportFile(input.buffer, input.format);
   if (sheet.columns.length === 0) throw new ImportError("empty_file");
@@ -907,6 +975,14 @@ export async function runImportJob(
   // hold every mapped record in memory for the whole run.
   const PAGE = 200;
   for (;;) {
+    // #1580 — revalidate before every page's write boundary. A grant that
+    // expired, a service that was suspended, a customer disable or a selection
+    // change stops the run here, after the rows already committed (which stay)
+    // and before any further write. The job returns to `queued`/`failed`
+    // through the worker's own error path, and a retry after reactivation
+    // resumes from the rows still marked valid/warning — the duplicate rules
+    // make that replay safe.
+    await assertImportServiceOperational(businessId, entity);
     const { rows } = await query<{
       id: string;
       row_number: number;
@@ -1469,6 +1545,10 @@ export async function retryFailedRows(businessId: string, jobId: string): Promis
   const job = await getImportJob(businessId, jobId);
   if (!job) throw new ImportError("job_not_found");
   if (job.status === "running") throw new ImportError("job_running");
+  // #1580 — a retry is another approval to write: re-ask the service axis here,
+  // not only at execution, so a queued retry cannot be used to keep a suspended
+  // or unactivated destination busy.
+  await assertImportServiceOperational(businessId, requireEntity(job.entityKey));
 
   const { rowCount } = await query(
     `UPDATE data_import_rows r
@@ -1630,8 +1710,29 @@ export async function runImportQueueTick(): Promise<number> {
           actorName: claim.created_by_name,
         });
       } catch (error) {
-        // The job goes back to `queued` so the next tick retries it, until the
-        // attempt ceiling parks it.
+        // GitHub #1580 — access lost mid-job (a grant expired, the service was
+        // suspended/disabled or the selection changed). The rows already
+        // written stay; the job is parked truthfully instead of being retried
+        // hot every tick. `queueImportJob` is the resume path once the service
+        // is effective again, and it revalidates before requeueing.
+        if (error instanceof ImportAccessDeniedError) {
+          await query(
+            `UPDATE data_import_jobs
+                SET status = 'failed',
+                    error = $3,
+                    finished_at = now(),
+                    updated_at = now()
+              WHERE business_id = $1 AND id = $2`,
+            [
+              claim.business_id,
+              claim.id,
+              error.decision.label ?? describeError(error),
+            ],
+          );
+          return;
+        }
+        // Otherwise the job goes back to `queued` so the next tick retries it,
+        // until the attempt ceiling parks it.
         await query(
           `UPDATE data_import_jobs
               SET status = CASE WHEN attempts >= ${MAX_JOB_ATTEMPTS} THEN 'failed' ELSE 'queued' END,

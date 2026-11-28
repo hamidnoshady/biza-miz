@@ -26,6 +26,7 @@ import {
   historicalTwinsOf,
   namesMatch,
   raceTwinsOf,
+  variantFamilyTwinOf,
   type DuplicateItemMember,
   type DuplicateVerdict,
 } from "./duplicate-items";
@@ -46,6 +47,7 @@ export interface ItemInventory {
 export type OrphanBlocker =
   | "twin_not_woo_product"
   | "twin_inactive"
+  | "twin_not_variant_family"
   | "ambiguous_twin"
   | "different_name"
   | "nonzero_stock"
@@ -55,6 +57,7 @@ export type OrphanBlocker =
 export const ORPHAN_BLOCKER_LABEL: Record<OrphanBlocker, string> = {
   twin_not_woo_product: "its mapped twin is not a WooCommerce product mapping",
   twin_inactive: "its mapped twin is archived",
+  twin_not_variant_family: "its mapped twin is no longer a variable product with mapped children",
   ambiguous_twin: "more than one mapped row could be its twin",
   different_name: "the rows do not carry the same product name",
   nonzero_stock: "it still holds on-hand stock",
@@ -64,8 +67,11 @@ export const ORPHAN_BLOCKER_LABEL: Record<OrphanBlocker, string> = {
 
 export type OrphanStatus = "archive" | "already_archived" | "blocked";
 
-/** The two duplicate shapes this planner can prove. */
-export type PlannedDuplicateKind = Extract<DuplicateVerdict, "race_orphan" | "historical_duplicate_candidate">;
+/** The three duplicate shapes this planner can prove. */
+export type PlannedDuplicateKind = Extract<
+  DuplicateVerdict,
+  "race_orphan" | "historical_duplicate_candidate" | "historical_variant_orphan"
+>;
 
 export interface OrphanPlan {
   /** Which fingerprint proved the row surplus. */
@@ -91,7 +97,10 @@ function hasWooProductMapping(member: DuplicateItemMember): boolean {
 }
 
 function twinsFor(kind: PlannedDuplicateKind, orphan: DuplicateItemMember, mapped: DuplicateItemMember[]) {
-  return kind === "race_orphan" ? raceTwinsOf(orphan, mapped) : historicalTwinsOf(orphan, mapped);
+  if (kind === "race_orphan") return raceTwinsOf(orphan, mapped);
+  if (kind === "historical_duplicate_candidate") return historicalTwinsOf(orphan, mapped);
+  const family = variantFamilyTwinOf(orphan, mapped);
+  return family ? [family] : [];
 }
 
 function daysBetween(a: string, b: string): number | null {
@@ -162,6 +171,19 @@ export function planHistoricalDuplicates(
   return planUnmapped("historical_duplicate_candidate", members, referencesByItem, inventoryByItem);
 }
 
+/**
+ * Plan the flat August copies of a September variable product. The surviving
+ * row is the mapped parent; its children are the evidence that the family is a
+ * real variable product, not a guess.
+ */
+export function planVariantFamilyOrphans(
+  members: DuplicateItemMember[],
+  referencesByItem: ReadonlyMap<string, ItemReference[]>,
+  inventoryByItem: ReadonlyMap<string, ItemInventory>,
+): OrphanPlan[] {
+  return planUnmapped("historical_variant_orphan", members, referencesByItem, inventoryByItem);
+}
+
 /** Plan the creation-race orphans of one group. */
 export function planRaceOrphans(
   members: DuplicateItemMember[],
@@ -180,6 +202,7 @@ export function planDuplicateArchives(
   return [
     ...planRaceOrphans(members, referencesByItem, inventoryByItem),
     ...planHistoricalDuplicates(members, referencesByItem, inventoryByItem),
+    ...planVariantFamilyOrphans(members, referencesByItem, inventoryByItem),
   ];
 }
 

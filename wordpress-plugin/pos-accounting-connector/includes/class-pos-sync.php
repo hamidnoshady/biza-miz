@@ -676,7 +676,10 @@ class POS_Connector_Sync {
 
 	private static function enqueue_order( $order_id, $topic ) {
 		$order = wc_get_order( $order_id );
-		if ( ! $order || $order->get_status() === 'trash' ) {
+		// A refund is a `WC_Order_Refund`, not a sale: it has its own
+		// `refund.created` event. Treating it as an order reaches
+		// `get_refunds()` on a refund and the request dies mid-cycle.
+		if ( ! $order || 'shop_order' !== $order->get_type() || $order->get_status() === 'trash' ) {
 			return;
 		}
 		self::safe_enqueue_callable(
@@ -2790,7 +2793,12 @@ class POS_Connector_Sync {
 				return;
 
 			case 'orders_export':
-				self::export_orders( isset( $payload['sinceDays'] ) && $payload['sinceDays'] ? (int) $payload['sinceDays'] : (int) $settings['resync_orders_days'] );
+				// An explicit app request is a re-send, not the periodic sweep:
+				// it keeps the old "queue every order in the window" behaviour.
+				self::export_orders(
+					isset( $payload['sinceDays'] ) && $payload['sinceDays'] ? (int) $payload['sinceDays'] : (int) $settings['resync_orders_days'],
+					true
+				);
 				return;
 
 			case 'content_export':
@@ -3754,7 +3762,7 @@ class POS_Connector_Sync {
 	 * is drained or the hard ceiling is reached, and the log says when a
 	 * ceiling was hit so the next sweep's shorter window still backfills.
 	 */
-	public static function export_orders( $days = 7 ) {
+	public static function export_orders( $days = 7, $force = false ) {
 		$days  = max( 1, min( 365, (int) $days ) );
 		$after = gmdate( 'Y-m-d H:i:s', time() - ( $days * DAY_IN_SECONDS ) );
 
@@ -3791,7 +3799,11 @@ class POS_Connector_Sync {
 					'orderby'       => 'date_modified',
 					'order'         => 'ASC',
 					// Refunds and subscriptions are not orders; drafts and trashed
-					// rows are not sales.
+					// rows are not sales. `type` is explicit because HPOS returns
+					// `shop_order_refund` rows for a status-only query, and a
+					// refund object has no `get_refunds()` of its own — the walk
+					// used to die there and never reach the orders after it.
+					'type'          => 'shop_order',
 					'status'        => array_keys( wc_get_order_statuses() ),
 					'return'        => 'objects',
 				)
@@ -3813,8 +3825,12 @@ class POS_Connector_Sync {
 				if ( $ts < $boundary_ts || ( $ts === $boundary_ts && isset( $boundary_seen[ $order_id ] ) ) ) {
 					continue;
 				}
-				POS_Connector_Queue::enqueue( 'order.updated', $order->get_id(), self::order_payload( $order ) );
-				++$enqueued;
+				$payload     = self::order_payload( $order );
+				$fingerprint = POS_Connector_Queue::fingerprint_for( 'order.updated', $payload );
+				if ( $force || ! POS_Connector_Queue::reconcile_swept_state( 'order.updated', $order_id, $fingerprint ) ) {
+					POS_Connector_Queue::enqueue( 'order.updated', $order_id, $payload );
+					++$enqueued;
+				}
 				++$fresh;
 				if ( $ts !== $boundary_ts ) {
 					$boundary_ts   = $ts;
@@ -3860,13 +3876,18 @@ class POS_Connector_Sync {
 						'date_modified' => '>' . $after,
 						'orderby'       => 'date',
 						'order'         => 'ASC',
+						'type'          => 'shop_order',
 						'status'        => array_keys( wc_get_order_statuses() ),
 						'return'        => 'objects',
 					)
 				);
 				foreach ( $orders as $order ) {
-					POS_Connector_Queue::enqueue( 'order.updated', $order->get_id(), self::order_payload( $order ) );
-					++$enqueued;
+					$payload     = self::order_payload( $order );
+					$fingerprint = POS_Connector_Queue::fingerprint_for( 'order.updated', $payload );
+					if ( $force || ! POS_Connector_Queue::reconcile_swept_state( 'order.updated', $order->get_id(), $fingerprint ) ) {
+						POS_Connector_Queue::enqueue( 'order.updated', $order->get_id(), $payload );
+						++$enqueued;
+					}
 				}
 				++$page;
 			} while ( count( $orders ) === self::ORDER_SWEEP_LIMIT && $page <= 100 );

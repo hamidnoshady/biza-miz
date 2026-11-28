@@ -84,7 +84,9 @@ async function main(): Promise<number> {
   }
 
   const actionable = groups.filter((g) => verdictNeedsAction(g.verdict));
-  const historical = groups.filter((g) => g.verdict === "historical_duplicate_candidate").length;
+  const historical = groups.filter(
+    (g) => g.verdict === "historical_duplicate_candidate" || g.verdict === "historical_variant_orphan",
+  ).length;
   const race = groups.filter((g) => g.verdict === "race_orphan").length;
   const stocked = groups.filter(
     (g) => verdictNeedsAction(g.verdict) && g.members.some((m) => m.mappings.length === 0 && Number(m.quantity ?? 0) !== 0),
@@ -92,7 +94,7 @@ async function main(): Promise<number> {
   console.log(
     `${groups.length} duplicate SKU group(s); ${actionable.length} need a person's decision.` +
       (race ? ` ${race} creation-race,` : "") +
-      (historical ? ` ${historical} historical (weeks apart),` : "") +
+      (historical ? ` ${historical} historical (weeks apart / variant family),` : "") +
       (stocked ? ` ${stocked} carry stock on an unmapped row.` : ""),
   );
   console.log("");

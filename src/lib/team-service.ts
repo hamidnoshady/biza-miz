@@ -353,7 +353,10 @@ export async function listMembers(businessId: string): Promise<TeamMember[]> {
             -- members whose active role happened to be empty.
             CASE WHEN u.custom_role_id IS NULL OR tr.id IS NULL OR NOT tr.is_active THEN NULL
                  ELSE ARRAY(SELECT jsonb_array_elements_text(tr.permissions)) END custom_role_permissions,
-            u.full_name, u.email, u.is_active,
+            u.full_name,
+            -- Login resolves the identity email; keep users.email for rehire.
+            COALESCE(p.email::text, u.email::text) AS email,
+            u.is_active,
             u.membership_status, u.location_scope,
             (u.pin_hash IS NOT NULL OR EXISTS (
               SELECT 1 FROM employee_credentials ec
@@ -392,6 +395,7 @@ export async function listMembers(businessId: string): Promise<TeamMember[]> {
             -- The roster shows the reasons before the server refuses with them.
             ${memberHistorySql("u.id", "u.business_id")}
        FROM users u
+       LEFT JOIN platform_users p ON p.id = u.platform_user_id
        LEFT JOIN tenant_roles tr ON tr.id=u.custom_role_id AND tr.business_id=u.business_id
       WHERE u.business_id = $1
       ORDER BY u.created_at`,

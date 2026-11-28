@@ -150,6 +150,8 @@ describe("scopeOwnerProfileForCredential", () => {
     membershipActive: true,
     membershipCreatedAt: "2026-01-01T00:00:00.000Z",
     fullName: "Owner One",
+    membershipEmail: "owner@example.com",
+    membershipPhone: "+989121234567",
     platformUserId: "identity-1",
     email: "owner@example.com",
     identityActive: true,

@@ -19,6 +19,7 @@ import {
   isImportable,
 } from "@/lib/data-transfer/registry";
 import { listImportJobs } from "@/lib/data-transfer/import-service";
+import { importAccessForTargets } from "@/lib/import-access-service";
 import {
   setupImportCandidates,
   setupImportSessionState,
@@ -28,16 +29,20 @@ import {
 } from "@/lib/setup-imports";
 
 /**
- * The optional «ورود اطلاعات اولیه» step's read model (issue #1535 / ESH-218).
+ * The optional «ورود اطلاعات» step's read model (#1535 / ESH-218, #1580).
  *
  * GET only. There is deliberately no write here: uploading, mapping, previewing
  * and approving all go through the existing `/api/data/*` Data Transfer routes,
  * which already own validation, reconciliation, idempotency and permissions.
  * The wizard composes that engine; it does not wrap it in a second one.
  *
- * Two facts are computed here rather than trusted from the client:
+ * Three facts are computed here rather than trusted from the client:
  *  - which registered types this business/member may import, from the same
- *    registry and permission set the settings screen uses; and
+ *    registry and permission set the settings screen uses;
+ *  - the **effective service access** for each type (#1580): activation state,
+ *    an active complimentary grant (#1579), Workspace eligibility/service
+ *    (#1110), deployment and operator availability — never the draft selection
+ *    alone;
  *  - each stored job's *onboarding* state, so a staged or partial import can
  *    never be reported as applied.
  */
@@ -62,8 +67,24 @@ export const GET = withTenantScope(async () => {
   // rather than globally, so the settings transfer catalogue is unchanged.
   const industryKey = (industry ?? "food_service") as Industry;
   const industryModules = new Set<string>(industryProfile(industryKey).modules);
+
+  const targetInputs = definitions.map((entity) => ({
+    module: entity.module,
+    requiredPermission: entity.importPermission ?? null,
+    importable: isImportable(entity),
+    industryEligible: entity.requiresModule
+      ? industryModules.has(entity.requiresModule)
+      : true,
+  }));
+
+  const decisions = await importAccessForTargets(
+    session.businessId,
+    targetInputs,
+    granted,
+  );
+
   const candidates = setupImportCandidates(
-    definitions.map((entity) => ({
+    definitions.map((entity, index) => ({
       key: entity.key,
       module: entity.module,
       label: entity.label,
@@ -71,22 +92,23 @@ export const GET = withTenantScope(async () => {
       importable: isImportable(entity),
       granted:
         canImport &&
-        Boolean(entity.importPermission) &&
-        granted.has(entity.importPermission!),
-      industryEligible:
-        entity.requiresModule ? industryModules.has(entity.requiresModule) : true,
+        (!entity.importPermission || granted.has(entity.importPermission)),
+      industryEligible: targetInputs[index].industryEligible,
+      access: decisions[index],
     })),
     selectedApps,
   );
 
-  // The catalogue handed to the shared ImportSection: only types that are both
-  // available in this wizard and permitted for this member. The screen renders
-  // what comes back, so it can never offer an import its route would refuse.
-  const availableKeys = new Set(
-    candidates.filter((candidate) => candidate.available).map((candidate) => candidate.key),
+  // The catalogue handed to the shared ImportSection: types that may be
+  // applied now, plus types whose only blocker is a temporary service state
+  // (they can be staged and previewed; the engine refuses the queue).
+  const writableKeys = new Set(
+    candidates
+      .filter((candidate) => candidate.available || candidate.stagingAllowed)
+      .map((candidate) => candidate.key),
   );
   const entities: CatalogueEntity[] = definitions
-    .filter((entity) => availableKeys.has(entity.key))
+    .filter((entity) => writableKeys.has(entity.key))
     .map((entity) => ({
       key: entity.key,
       module: entity.module,
