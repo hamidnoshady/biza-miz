@@ -290,3 +290,161 @@ transport change cannot create a second schema or a different active set.
 Not run here: `npm run test:db` (needs Postgres) and `npm run test:visual`.
 Live p50/p95, real alias verification and Fast TTFT remain **blocked** on gateway
 credentials, as in §4; no number is claimed for them.
+
+## 9. Phase 3 — runtime-mode routing verification and authorized-route benchmark
+
+**Pre-check.** Phase 1 (PR #1548, merge `1bceebdca`) and Phase 2 (PR #1596,
+merge `03dc39ac6`, follow-up `959e53a3c`) are merged; their reports above were
+re-read before this phase started, not assumed.
+
+### 9.1 Effective routing table (verified from code, seeds and proxy config)
+
+The chain a representative `/api/ai/chat` turn follows, in order:
+
+1. `getPlatformAiMode(runtimeMode)` reads `platform_ai_modes` **once**;
+2. `modeAvailability` gates the offer and the refusal (picker and route share
+   the one decision);
+3. `resolveAiConfigFor` resolves the gateway/branch/business config;
+4. `applyRuntimeModeAlias` **replaces** `config.model` with the row's
+   `model_alias` when non-blank (the mode wins over a branch model override);
+5. `callProvider` puts `config.model` into the `/v1/chat/completions` body.
+   Which *deployment* serves that alias is decided proxy-side
+   (`routing_strategy: simple-shuffle`) and is not visible to the app.
+
+Seed state (migrations `0203` + `0256`) and the bundled proxy template
+(`docker/litellm/config.yaml`):
+
+| Mode | `platform_ai_modes` seed | Availability | Outgoing `model` on a fresh deployment | Proxy deployment |
+| --- | --- | --- | --- | --- |
+| Auto (`auto`) | alias `''`, active | available | gateway default: `platform_ai_gateway.chat_model` → `LITELLM_CHAT_MODEL` → `gpt-4o-mini` | `pos-chat` → `openai/gpt-4o-mini` (rpm 60) per the template; default fallback `pos-cheap` → `openai/gpt-4.1-nano` (rpm 120) |
+| Fast (`instant`) | alias `''`, active | **unavailable** — `fast_alias_not_configured` | **none**: `409 mode_unavailable` before any gateway resolve or provider call | n/a |
+| Thinking (`thinking`) | alias `''`, active | available | same gateway default as Auto (no distinct route) | same as Auto |
+| Deep Research | alias `''`, inactive | never offered (`410 research_retired` if requested) | n/a | n/a |
+
+Proxy policy (LiteLLM-owned, unchanged by this issue): `simple-shuffle`,
+`num_retries: 3`, `request_timeout: 120`, `allowed_fails: 3`, `cooldown_time:
+30`, `fallbacks: pos-chat → pos-cheap`, `default_fallbacks: [pos-cheap]`.
+
+**Provider-configuration finding.** The bundled `model_list` defines no
+`pos-instant` or `pos-thinking` group. A console alias that is not in the
+proxy's `model_list` is rejected by LiteLLM with `Invalid model name` at request
+time; the platform's own gateway probe (`probeGateway`, stage `model_alias`
+against `/model/info`) catches that at configuration time. Making Fast routable
+therefore requires adding a fast model group **in the LiteLLM config first**
+(the approved configuration path), then setting the `instant` alias — never an
+app-side model or a second client.
+
+### 9.2 Configured / enabled / reachable
+
+| Question | Answer | How verified |
+| --- | --- | --- |
+| Configured (repo defaults) | All three chat modes seeded with a **blank** alias; `is_active = true`; `deep_research` inactive | Migrations `0203`, `0256` re-read this phase |
+| Configured (staging deployment) | **Unknown — blocked.** The staging `platform_ai_modes` rows cannot be read from this workspace | Unblock: run `SELECT mode_key, model_alias, is_active FROM platform_ai_modes;` on the deployment DB, or open `/platform/ai/modes`, or `GET /api/ai/modes` (returns availability only, deliberately no alias) |
+| Enabled | Per-row `is_active`, enforced identically by the picker (`GET /api/ai/modes`) and the chat route (both call `modeAvailability`) | `modeAvailability` unit + route tests (§9.4) |
+| Reachable | **No.** Sanitized probes from this workspace: `staging.eshobe.com` resolves (`45.94.213.43`), TCP :443 connects, then the TLS handshake is cut by the sandbox egress policy (`SSL_ERROR_SYSCALL`); plain HTTP :80 gets an empty reply; `litellm:4000` does not resolve (compose-network only); `127.0.0.1:4000`/`:3000` have nothing listening | `curl` probes recorded in the Phase 3 tracker comment; no credential was used or printed |
+
+No `LITELLM_*` or `AI_BENCH_*` value exists in this workspace's environment or
+files, no local proxy runs, and Docker is unavailable — so **zero** provider
+routes are both authorized *and* reachable from here.
+
+### 9.3 Model selected for representative requests; Fast vs Thinking
+
+Verified with the real `getPlatformAiMode`, `modeAvailability` and
+`applyRuntimeModeAlias` at the route level (§9.4): with the seeded blank rows,
+an Auto or Thinking turn sends the gateway default (`pos-chat` in the test's
+resolved config) and a Fast turn is refused **before** `resolveAiConfigFor` is
+called, so no Fast request can reach the provider. Configured rows replace the
+model exactly (`pos-instant`, `pos-thinking`); a console-disabled mode is
+refused with `disabled`.
+
+**Does Fast use a faster route than Thinking? No — on this configuration Fast
+uses no route at all.** Fast is refused as unavailable while Thinking rides the
+gateway default; the product no longer serves the reasoning/default model under
+a faster-sounding label. Fast becomes routable only after a fast deployment
+exists in LiteLLM *and* the `instant` alias names it — at which point
+`probeGateway`'s `model_alias` stage and a benchmark run are the verification.
+Even if the alias were pointed at `pos-cheap`, that shares the same upstream
+credentials as `pos-chat`, so it is a cheaper model on the **same** capacity,
+not independent capacity.
+
+### 9.4 What was executed (product behaviour + suites)
+
+New route-level tests in `src/app/api/ai/chat/route.test.ts` (real mode read,
+real availability, real alias application; only the gateway resolve and the
+provider loop are replaced, so the assertion lands on the exact `model` that
+would go into the request body):
+
+| Test | Asserts |
+| --- | --- |
+| Fast, blank alias | `409` / `mode_unavailable` / `fast_alias_not_configured`; `resolveAiConfigFor` and `runAgentTurn` **not** called |
+| Fast, configured alias | `200` and `runAgentTurn` config carries `pos-instant` |
+| Auto, blank alias | `200` and config carries the gateway default |
+| Thinking, blank then configured | gateway default first, then `pos-thinking` replaces it |
+| Thinking, console-disabled | `409` / `disabled`, no provider call |
+
+Checks run for this phase:
+
+| Check | Result |
+| --- | --- |
+| `node --max-old-space-size=6144 node_modules/typescript/lib/tsc.js --noEmit` | pass, exit 0 |
+| `npm run lint` (and `npx eslint` on the touched file) | pass, exit 0 |
+| Focused suites (`ai-runtime-mode-aliases`, `ai-runtime-modes-shared`, `api/ai/modes/route`, `ai-runtime-readiness`, `ai-gateway-probe`, `ai-latency`, `api/ai/chat/route`, `ai-service`, `ai-tool-selection`, `ai-sdk-adapter`) | pass — the chat route suite is **10 tests**, including the 5 new Phase 3 ones |
+| `npm run test:design` | pass, 5 files / **47 tests** |
+| `npm test` (full suite) | **1685 files passed, 1 skipped; 20,397 tests passed, 8 skipped; 0 failures** |
+| `npm run build` | pass, exit 0 (route table generated). The sandbox's 3.72 GiB cgroup killed the first attempts with SIGKILL; an 8 GiB swapfile let it finish — an environment fix, not a code change |
+| `npm run bench:ai-latency` | exit 2 by design: no gateway configured, nothing measured (§9.5) |
+
+Not run here: `npm run test:db` (needs Postgres) and `npm run test:visual`.
+
+### 9.5 Benchmark — sanitized method and result
+
+**Result: not executed; zero calls made.** No authorized route is reachable
+from this workspace (§9.2), and the harness refuses to invent numbers:
+
+```
+$ npm run bench:ai-latency
+ai-latency-benchmark: no gateway configured, nothing was measured.
+Required environment: AI_BENCH_BASE_URL, AI_BENCH_API_KEY, AI_BENCH_MODEL
+exit code 2
+```
+
+**Method, ready to run the moment an approved endpoint exists** (staging only,
+existing credentials only, no production traffic, no new provider):
+
+```bash
+AI_BENCH_BASE_URL=https://<staging-litellm>/v1 \
+AI_BENCH_API_KEY=<existing staging virtual key> \
+AI_BENCH_MODEL=<alias under test> \
+AI_BENCH_RUNS=5 AI_BENCH_OUT=phase3-<alias>.json \
+npm run bench:ai-latency
+```
+
+- Three representative prompts — simple (no tools), app-focused (one tool
+  round), multi-tool (forces several rounds) — the same cases the Phase 1
+  baseline used.
+- Concurrency: **1 in flight** (the harness runs sequentially); `AI_BENCH_RUNS`
+  samples per case (default 5).
+- Measures per call: time-to-first-token, generation time (total − TTFT), total
+  time, input/output tokens (gateway-reported usage), failures, answered-rate
+  as an output-quality smoke check, and cost from `x-litellm-response-cost`.
+  Reports p50/p95 (nearest-rank) per case and writes a JSON report.
+- Same prompt set and procedure for any candidate route; a route counts as
+  independent capacity only with its own upstream capacity **and** credentials.
+
+**Candidate route: none provisioned.** Nothing in this repository, GitHub
+#1546/ESH-219, or the tracker history shows a separately provisioned candidate
+with independent upstream capacity, so the current-vs-candidate comparison is
+**not applicable** rather than failed. A duplicate `model_list` entry pointing
+at the same shared endpoint would not qualify as capacity.
+
+### 9.6 Provider-configuration blockers (this phase)
+
+| Blocker | Unblocks |
+| --- | --- |
+| No gateway credential and no reachable gateway from this workspace (staging TLS cut by egress policy; no `LITELLM_*`/`AI_BENCH_*` values; no Docker) | Any live probe: `probeGateway` (health → `/model/info` → minimal completion), live p50/p95 benchmark, live `model_id`/`api_base` per alias |
+| Staging `platform_ai_modes` rows unreadable from here | The exact per-deployment alias/enabled table in §9.1 — one DB read or `/platform/ai/modes` |
+| Bundled proxy template has no fast model group | Fast staying truthful: either add an approved fast deployment to LiteLLM's `model_list` and set the `instant` alias, or keep Fast reported unavailable (current behaviour) |
+| No candidate route with independent capacity/credentials | The independent-capacity comparison in §4 |
+
+Timeout reconciliation, progress-UI polish and the final end-to-end verification
+remain open on #1546 / ESH-219.
