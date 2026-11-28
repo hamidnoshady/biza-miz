@@ -69,6 +69,9 @@ export const ROUTE_SEGMENT_BILLING: Record<string, RouteClass> = {
   industry: keys("accounting.settings"),
   setup: keys("accounting.settings"),
   crm: keys("crm.workspace"),
+  // Issue #1590 playbooks: ready-to-run templates; no billing capability of its
+  // own (CRM-native tasks + existing canonical Growth services; never charges).
+  playbooks: keys("crm.workspace"),
   loyalty: keys("growth.loyalty"),
   promotions: keys("growth.loyalty"),
   commission: keys("growth.loyalty"),

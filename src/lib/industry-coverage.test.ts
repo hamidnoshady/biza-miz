@@ -112,6 +112,13 @@ const SOURCE_SCAN_ALLOWLIST: ReadonlyMap<string, string> = new Map([
     "src/lib/ai-autopilot-service.ts",
     "waste detection is an F&B-only job and skips other trades explicitly",
   ],
+  // Issue #1590 playbook catalog: per-template supportedIndustries/industryBoost
+  // targeting subsets are NOT a restatement of the industry registry; each key
+  // is validated against INDUSTRIES in playbooks/catalog.test.ts.
+  [
+    "src/lib/playbooks/catalog.ts",
+    "per-template industry targeting subsets; validated against INDUSTRIES in playbooks/catalog.test.ts",
+  ],
 ]);
 
 /**
