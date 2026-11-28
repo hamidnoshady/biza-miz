@@ -157,6 +157,7 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/accounting/vat", "گزارش مالیات"],
     ["/accounting/tax-invoices", "صورتحساب مؤدیان"],
     ["/accounting/fixed-assets", "دارایی‌های ثابت"],
+    ["/accounting/intangible-assets", "دارایی‌های نامشهود"],
     ["/accounting/financial-reports", "گزارش‌های مالی"],
     ["/accounting/growth", "رشد در حسابداری"],
     ["/accounting/settings", "تنظیمات حسابداری"],

@@ -15,6 +15,7 @@ export function accountingSectionNeedsAccountList(section: AccountingSectionKey)
     section === "recurring-vouchers" ||
     section === "expenses" ||
     section === "fixed-assets" ||
+    section === "intangible-assets" ||
     section === "shareholders" ||
     section === "multicurrency" ||
     section === "opening-balances"

@@ -462,7 +462,7 @@ describe("the ledger tool divisions", () => {
     const expected = [
       "trial-balance", "entries", "vouchers", "manual", "recurring-vouchers", "multicurrency", "chart-of-accounts", "dimensions",
       "receivables", "payables", "installments", "cheques",
-      "receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets",
+      "receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets", "intangible-assets",
       "shareholders", "fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll",
     ];
     const placed = LEDGER_WORKSPACE_SUBGROUPS.flatMap((subGroup) => subGroup.keys);
@@ -474,7 +474,7 @@ describe("the ledger tool divisions", () => {
     expect(LEDGER_WORKSPACE_SUBGROUPS.map((subGroup) => subGroup.keys)).toEqual([
       ["trial-balance", "entries", "vouchers", "manual", "recurring-vouchers", "multicurrency", "chart-of-accounts", "dimensions"],
       ["receivables", "payables", "installments", "cheques"],
-      ["receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets"],
+      ["receipts", "financial-accounts", "transfers", "expenses", "reconciliation", "fixed-assets", "intangible-assets"],
       ["shareholders"],
       ["fiscal-periods", "opening-balances", "vat", "tax-invoices", "payroll"],
     ]);

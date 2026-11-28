@@ -135,6 +135,10 @@ const FixedAssetsSection = dynamic(
   () => import("./fixed-assets-section").then((mod) => mod.FixedAssetsSection),
   { loading: () => <SectionCardSkeleton rows={4} /> },
 );
+const IntangibleAssetsSection = dynamic(
+  () => import("./intangible-assets-section").then((mod) => mod.IntangibleAssetsSection),
+  { loading: () => <SectionCardSkeleton rows={4} /> },
+);
 const ShareholdersSection = dynamic(
   () => import("./shareholders-section").then((mod) => mod.ShareholdersSection),
   { loading: () => <SectionCardSkeleton rows={4} /> },
@@ -674,6 +678,14 @@ export function AccountingManager({
           {section === "vat" ? <VatReportSection refreshKey={refreshKey} /> : null}
           {section === "fixed-assets" ? (
             <FixedAssetsSection
+              busy={busy}
+              refreshKey={refreshKey}
+              canManage={canManageFixedAssets}
+              accounts={accounts ?? []}
+            />
+          ) : null}
+          {section === "intangible-assets" ? (
+            <IntangibleAssetsSection
               busy={busy}
               refreshKey={refreshKey}
               canManage={canManageFixedAssets}

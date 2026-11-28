@@ -101,6 +101,7 @@ export const ACCOUNTING_SECTIONS: readonly AccountingSectionDef[] = [
   // asks for its own capability.
   { key: "tax-invoices", label: "صورتحساب مؤدیان", permission: PERMISSIONS.taxView },
   { key: "fixed-assets", label: "دارایی‌های ثابت" },
+  { key: "intangible-assets", label: "دارایی‌های نامشهود" },
   { key: "shareholders", label: "سهام‌داران", permission: PERMISSIONS.shareholdersView },
   { key: "financial-reports", label: "گزارش‌های مالی", permission: PERMISSIONS.reportsView },
   { key: "growth", label: "رشد و بازاریابی" },
