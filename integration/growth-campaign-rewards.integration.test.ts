@@ -18,7 +18,9 @@
  *  - spending a reward at the till neither earns more reward nor can be
  *    replayed into a second spend;
  *  - a return gives the reward back to the wallet (Dr 4400 / Cr 2445) instead
- *    of refunding it as cash, and restores it only once.
+ *    of refunding it as cash, and restores it only once;
+ *  - the liability summary counts a restore, and agrees with the wallet and
+ *    with the 2445 balance after a tender and its full refund.
  *
  * Every journal assertion reads the lines that were actually posted, so a rule
  * that posted nothing (or the wrong account) fails rather than passing on the
@@ -206,6 +208,77 @@ async function postedLines(sourceType: string) {
   return rows;
 }
 
+/** An open bill at the till, ready to be settled. */
+async function openOrder(customerId: string, amountRial: number): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `INSERT INTO orders (location_id, order_number, status, customer_id, subtotal, tax, total, opened_at)
+     VALUES ($1, (SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE location_id = $1),
+             'open', $2, $3, 0, $3, now())
+     RETURNING id`,
+    [biz.locationId, customerId, amountRial],
+  );
+  return rows[0].id;
+}
+
+/**
+ * Settles a bill the way checkout does: the reward slice first, then the sale's
+ * own payment entry for the whole total. `rewardRial` of it is the tender.
+ */
+async function payBillWithReward(
+  customerId: string,
+  billRial: number,
+  rewardRial: number,
+): Promise<{ orderId: string; entryId: string | null }> {
+  const orderId = await openOrder(customerId, billRial);
+  return dbLib.withTenantTransaction(biz.id, async (client) => {
+    await rewards.applyCampaignRewardTender(client, {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      orderId,
+      customerId,
+      amountRial: rewardRial,
+    });
+    // Exactly what the route writes: one `payments` row per slice, each with
+    // its own settlement sequence (0092's unique index is per order+seq).
+    await client.query(
+      `INSERT INTO payments (location_id, order_id, method, amount, reference, settlement_seq)
+       VALUES ($1, $2, 'cashback', $3, 'campaign-reward', 1)`,
+      [biz.locationId, orderId, String(rewardRial)],
+    );
+    await client.query(
+      `INSERT INTO payments (location_id, order_id, method, amount, settlement_seq)
+       VALUES ($1, $2, 'cash', $3, 2)`,
+      [biz.locationId, orderId, String(billRial - rewardRial)],
+    );
+    const { rows: events } = await client.query<{ id: string }>(
+      `INSERT INTO inventory_events
+         (business_id, location_id, event_type, source_type, source_id, idempotency_key, costing_version)
+       VALUES ($1, $2, 'sale_consumption', 'order', $3::uuid, 'order-payment:' || $3::text, 2)
+       RETURNING id`,
+      [biz.id, biz.locationId, orderId],
+    );
+    const entryId = await ledger.postExactOrderPaymentEntry(client, {
+      businessId: biz.id,
+      locationId: biz.locationId,
+      orderId,
+      createdBy: null,
+      tenders: [
+        { settlement: "cash", amount: rialText(String(billRial - rewardRial)) },
+        { settlement: "cashback", amount: rialText(String(rewardRial)) },
+      ],
+      amount: rialText(String(billRial)),
+      tax: rialText("0"),
+      inventoryEventId: events[0].id,
+      orderChannel: "dine_in",
+    });
+    await client.query(
+      `UPDATE orders SET status = 'completed', closed_at = now() WHERE id = $1`,
+      [orderId],
+    );
+    return { orderId, entryId };
+  });
+}
+
 describe("granting a reward", () => {
   it("grants once for a settled sale and never again on replay", async () => {
     const campaign = await activeCampaign();
@@ -391,77 +464,6 @@ describe("refund and expiry", () => {
 });
 
 describe("paying a bill with the reward", () => {
-  /** An open bill at the till, ready to be settled. */
-  async function openOrder(customerId: string, amountRial: number): Promise<string> {
-    const { rows } = await db.query<{ id: string }>(
-      `INSERT INTO orders (location_id, order_number, status, customer_id, subtotal, tax, total, opened_at)
-       VALUES ($1, (SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE location_id = $1),
-               'open', $2, $3, 0, $3, now())
-       RETURNING id`,
-      [biz.locationId, customerId, amountRial],
-    );
-    return rows[0].id;
-  }
-
-  /**
-   * Settles a bill the way checkout does: the reward slice first, then the sale's
-   * own payment entry for the whole total. `rewardRial` of it is the tender.
-   */
-  async function payBillWithReward(
-    customerId: string,
-    billRial: number,
-    rewardRial: number,
-  ): Promise<{ orderId: string; entryId: string | null }> {
-    const orderId = await openOrder(customerId, billRial);
-    return dbLib.withTenantTransaction(biz.id, async (client) => {
-      await rewards.applyCampaignRewardTender(client, {
-        businessId: biz.id,
-        locationId: biz.locationId,
-        orderId,
-        customerId,
-        amountRial: rewardRial,
-      });
-      // Exactly what the route writes: one `payments` row per slice, each with
-      // its own settlement sequence (0092's unique index is per order+seq).
-      await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference, settlement_seq)
-         VALUES ($1, $2, 'cashback', $3, 'campaign-reward', 1)`,
-        [biz.locationId, orderId, String(rewardRial)],
-      );
-      await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, settlement_seq)
-         VALUES ($1, $2, 'cash', $3, 2)`,
-        [biz.locationId, orderId, String(billRial - rewardRial)],
-      );
-      const { rows: events } = await client.query<{ id: string }>(
-        `INSERT INTO inventory_events
-           (business_id, location_id, event_type, source_type, source_id, idempotency_key, costing_version)
-         VALUES ($1, $2, 'sale_consumption', 'order', $3::uuid, 'order-payment:' || $3::text, 2)
-         RETURNING id`,
-        [biz.id, biz.locationId, orderId],
-      );
-      const entryId = await ledger.postExactOrderPaymentEntry(client, {
-        businessId: biz.id,
-        locationId: biz.locationId,
-        orderId,
-        createdBy: null,
-        tenders: [
-          { settlement: "cash", amount: rialText(String(billRial - rewardRial)) },
-          { settlement: "cashback", amount: rialText(String(rewardRial)) },
-        ],
-        amount: rialText(String(billRial)),
-        tax: rialText("0"),
-        inventoryEventId: events[0].id,
-        orderChannel: "dine_in",
-      });
-      await client.query(
-        `UPDATE orders SET status = 'completed', closed_at = now() WHERE id = $1`,
-        [orderId],
-      );
-      return { orderId, entryId };
-    });
-  }
-
   it("spends part of a bill from the wallet and debits 2445 through the sale", async () => {
     const campaign = await activeCampaign();
     const customerId = await customer();
@@ -597,29 +599,9 @@ describe("refunding a bill paid with the reward", () => {
     const campaign = await activeCampaign();
     await settledOrder(customerId, 1_000_000);
     await rewards.sweepCampaignRewards(biz.id, campaign.id);
-    const { rows } = await db.query<{ id: string }>(
-      `INSERT INTO orders (location_id, order_number, status, customer_id, subtotal, tax, total, opened_at)
-       VALUES ($1, (SELECT COALESCE(MAX(order_number), 0) + 1 FROM orders WHERE location_id = $1),
-               'open', $2, 400000, 0, 400000, now())
-       RETURNING id`,
-      [biz.locationId, customerId],
-    );
-    const orderId = rows[0].id;
-    await dbLib.withTenantTransaction(biz.id, async (client) => {
-      await rewards.applyCampaignRewardTender(client, {
-        businessId: biz.id, locationId: biz.locationId, orderId, customerId, amountRial: 100_000,
-      });
-      await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, reference, settlement_seq)
-         VALUES ($1, $2, 'cashback', 100000, 'campaign-reward', 1)`,
-        [biz.locationId, orderId],
-      );
-      await client.query(
-        `INSERT INTO payments (location_id, order_id, method, amount, settlement_seq)
-         VALUES ($1, $2, 'cash', 300000, 2)`,
-        [biz.locationId, orderId],
-      );
-    });
+    // A 400 000 bill, 100 000 of it paid from the reward: the same path the
+    // checkout takes, including the sale entry that debits 2445.
+    const { orderId } = await payBillWithReward(customerId, 400_000, 100_000);
     return { campaign, orderId };
   }
 
@@ -661,6 +643,55 @@ describe("refunding a bill paid with the reward", () => {
     expect((await restore(orderId)).restoredRial).toBe(0);
     await rewards.sweepCampaignRewards(biz.id, campaign.id);
     expect(await postedLines("growth_cashback_tender")).toHaveLength(2);
+  });
+
+  it("keeps the liability summary equal to the wallet and to the 2445 balance", async () => {
+    const customerId = await customer();
+    const { orderId } = await rewardPaidBill(customerId);
+
+    // Before the return the sale has already spent the reward: nothing is owed.
+    expect(await rewards.cashbackLiabilitySummary(biz.id)).toEqual({
+      earnedRial: 100_000,
+      redeemedRial: 100_000,
+      restoredRial: 0,
+      reversedRial: 0,
+      expiredRial: 0,
+      outstandingRial: 0,
+    });
+
+    // The customer returns the whole bill: 300 000 of money comes back, and the
+    // 100 000 of reward goes back to their wallet.
+    await db.query(
+      `INSERT INTO payments (location_id, order_id, method, amount, reference, settlement_seq)
+       VALUES ($1, $2, 'cash', -300000, 'customer-return:test', 3)`,
+      [biz.locationId, orderId],
+    );
+    expect((await restore(orderId)).restoredRial).toBe(100_000);
+
+    const summary = await rewards.cashbackLiabilitySummary(biz.id);
+    // The summary used to drop `restored`, so it reported 0 here while the
+    // wallet — correctly — held 100 000 the business still owes.
+    expect(summary).toEqual({
+      earnedRial: 100_000,
+      redeemedRial: 100_000,
+      restoredRial: 100_000,
+      reversedRial: 0,
+      expiredRial: 0,
+      outstandingRial: 100_000,
+    });
+
+    const wallet = await rewards.campaignRewardWallet(biz.id, customerId);
+    expect(summary.outstandingRial).toBe(wallet.spendableRial + wallet.pendingRial);
+
+    // …and that is the balance the books actually carry on the liability.
+    const { rows: account } = await db.query<{ balance: string }>(
+      `SELECT (COALESCE(SUM(jl.credit), 0) - COALESCE(SUM(jl.debit), 0))::text AS balance
+         FROM journal_lines jl
+         JOIN accounts a ON a.id = jl.account_id
+        WHERE a.business_id = $1 AND a.code = '2445'`,
+      [biz.id],
+    );
+    expect(Number(account[0].balance)).toBe(summary.outstandingRial);
   });
 
   it("leaves the reward portion out of the cash a return may refund", async () => {

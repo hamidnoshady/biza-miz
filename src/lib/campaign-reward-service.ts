@@ -1359,13 +1359,34 @@ export async function campaignRewardReport(businessId: string): Promise<Campaign
   });
 }
 
-/** The financial effect of the reward ledger as the books hold it, per phase. */
+/**
+ * The financial effect of the reward ledger as the books hold it, per phase.
+ *
+ * Every event type has to appear here, because `outstandingRial` is a SUM over
+ * them and a missing one silently misstates the liability. `restored` is the
+ * one that used to be missing: a refunded till tender gives the value back to
+ * the customer's wallet, which *reduces* `redeemed_rial` on the position, so
+ * leaving it out understated what the business still owes by exactly the
+ * refunded amount. The identity this function now holds is the same one the
+ * wallet and the 2445 account hold:
+ *
+ *   outstanding = earned − redeemed + restored − reversed − expired
+ */
 export async function cashbackLiabilitySummary(
   businessId: string,
-): Promise<{ earnedRial: number; redeemedRial: number; reversedRial: number; expiredRial: number; outstandingRial: number }> {
+): Promise<{
+  earnedRial: number;
+  redeemedRial: number;
+  /** Value a refunded till tender gave back to the wallet. */
+  restoredRial: number;
+  reversedRial: number;
+  expiredRial: number;
+  outstandingRial: number;
+}> {
   const { rows } = await query<Record<string, string>>(
     `SELECT COALESCE(SUM(CASE WHEN event_type = 'earned' THEN amount_rial ELSE 0 END), 0)::text AS earned,
             COALESCE(SUM(CASE WHEN event_type = 'redeemed' THEN amount_rial ELSE 0 END), 0)::text AS redeemed,
+            COALESCE(SUM(CASE WHEN event_type = 'restored' THEN amount_rial ELSE 0 END), 0)::text AS restored,
             COALESCE(SUM(CASE WHEN event_type = 'reversed' THEN amount_rial ELSE 0 END), 0)::text AS reversed,
             COALESCE(SUM(CASE WHEN event_type = 'expired' THEN amount_rial ELSE 0 END), 0)::text AS expired
        FROM growth_reward_events WHERE business_id = $1`,
@@ -1374,14 +1395,16 @@ export async function cashbackLiabilitySummary(
   const row = rows[0] ?? {};
   const earnedRial = Number(row.earned ?? 0);
   const redeemedRial = Number(row.redeemed ?? 0);
+  const restoredRial = Number(row.restored ?? 0);
   const reversedRial = Number(row.reversed ?? 0);
   const expiredRial = Number(row.expired ?? 0);
   return {
     earnedRial,
     redeemedRial,
+    restoredRial,
     reversedRial,
     expiredRial,
-    outstandingRial: Math.max(0, earnedRial - redeemedRial - reversedRial - expiredRial),
+    outstandingRial: Math.max(0, earnedRial - redeemedRial + restoredRial - reversedRial - expiredRial),
   };
 }
 

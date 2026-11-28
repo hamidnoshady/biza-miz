@@ -8,9 +8,10 @@ import { campaignRewardReport, cashbackLiabilitySummary } from "@/lib/campaign-r
  *
  * Every figure is derived from the reward position and event tables, so the
  * screen cannot disagree with the ledger. `outstandingRial` is the liability
- * the books carry on account 2440 (earned − redeemed − reversed − expired);
- * it is deliberately not called "budget remaining", which is a different
- * question (what the campaign may still promise).
+ * the books carry on account 2445 (earned − redeemed + restored − reversed −
+ * expired, where `restored` is a refunded till tender given back to the
+ * wallet); it is deliberately not called "budget remaining", which is a
+ * different question (what the campaign may still promise).
  */
 export const GET = withTenantScope(async () => {
   const { session, error } = await requirePermission(PERMISSIONS.campaignsView);
