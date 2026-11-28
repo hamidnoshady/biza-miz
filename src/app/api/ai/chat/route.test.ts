@@ -1,7 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { POST } from "./route";
-import { AiError } from "@/lib/ai-service";
+import { AiError, runAgentTurn } from "@/lib/ai-service";
+import { resolveAiConfigFor } from "@/lib/ai-runtime";
+
+// Issue #1546 Phase 3 — the `platform_ai_modes` rows this turn reads. Hoisted
+// so the db mock below can route the modes SELECT here while every other query
+// keeps the canned answer the rest of the suite relies on. Empty means "table
+// has never been written", which the real read resolves to the seeded defaults.
+const { modeRows } = vi.hoisted(() => ({
+  modeRows: [] as Array<Record<string, unknown>>,
+}));
 
 vi.mock("@/lib/auth", () => ({
   withTenantScope: (fn: (req: NextRequest) => Promise<Response>) => {
@@ -28,7 +37,14 @@ vi.mock("@/lib/setup-state", () => ({
 }));
 
 vi.mock("@/lib/db", () => ({
-  query: vi.fn(async () => ({ rows: [{ name: "کافه تست" }] })),
+  query: vi.fn(async (sql: unknown) => {
+    // Phase 3: the mode read is real, so it must see the rows a test sets.
+    // Everything else keeps the canned business-name answer from before.
+    if (typeof sql === "string" && sql.includes("platform_ai_modes")) {
+      return { rows: modeRows };
+    }
+    return { rows: [{ name: "کافه تست" }] };
+  }),
   withTenantScope: vi.fn(async (_scope: string, fn: () => Promise<unknown>) => fn()),
   withoutTenantScope: vi.fn(async (_scope: string, fn: () => Promise<unknown>) => fn()),
 }));
@@ -50,22 +66,26 @@ vi.mock("@/lib/app-availability-service", () => ({
   })),
 }));
 
-vi.mock("@/lib/ai-runtime", () => ({
-  resolveAiConfigFor: vi.fn(async () => ({
-    enabled: true,
-    provider: "litellm",
-    model: "pos-chat",
-    baseUrl: "http://litellm:4000/v1",
-    apiKey: "sk-tenant-12345",
-    maxOutputTokens: 1000,
-    temperature: 0.3,
-    ready: true,
-  })),
-  // Issue #812 §3/§7 — the mode's alias. Passed through unchanged here so the
-  // tests below keep asserting the chat behaviour rather than alias resolution;
-  // `ai-runtime-mode-aliases.test.ts` pins what the real one does.
-  applyRuntimeModeAlias: vi.fn((config: { model: string }) => config),
-}));
+vi.mock("@/lib/ai-runtime", async (importOriginal) => {
+  // Phase 3 keeps `applyRuntimeModeAlias` REAL so a turn's outgoing `model` is
+  // the actual alias application, not a pass-through mock; only the DB-reaching
+  // resolve is replaced. The pure alias behaviour itself is pinned in
+  // `ai-runtime-mode-aliases.test.ts`.
+  const actual = await importOriginal<typeof import("@/lib/ai-runtime")>();
+  return {
+    ...actual,
+    resolveAiConfigFor: vi.fn(async () => ({
+      enabled: true,
+      provider: "litellm",
+      model: "pos-chat",
+      baseUrl: "http://litellm:4000/v1",
+      apiKey: "sk-tenant-12345",
+      maxOutputTokens: 1000,
+      temperature: 0.3,
+      ready: true,
+    })),
+  };
+});
 
 vi.mock("@/lib/ai-config", () => ({
   isPlatformAiConfigured: vi.fn(() => true),
@@ -249,5 +269,145 @@ describe("POST /api/ai/chat streaming error handling", () => {
     expect(vi.mocked(runAgentTurn)).toHaveBeenCalledWith(
       expect.objectContaining({ appFocus: null }),
     );
+  });
+});
+
+/**
+ * Issue #1546 Phase 3 — the mode a member picks decides which LiteLLM alias the
+ * turn asks for, and Fast must never silently ride the default/reasoning route.
+ *
+ * The rows below are what `platform_ai_modes` holds (seeded blank by migrations
+ * 0203/0256); `getPlatformAiMode`, `modeAvailability` and
+ * `applyRuntimeModeAlias` are all the real implementations. Only the gateway
+ * resolve (`resolveAiConfigFor`) and the provider loop (`runAgentTurn`) are
+ * replaced, so the assertion lands on the exact `model` that would go into the
+ * `/v1/chat/completions` body.
+ */
+describe("POST /api/ai/chat — runtime-mode routing (issue #1546 Phase 3)", () => {
+  const modeRow = (mode: string, overrides: Record<string, unknown> = {}) => ({
+    mode_key: mode,
+    model_alias: "",
+    is_active: true,
+    temperature: null,
+    max_output_tokens: null,
+    prompt_scope_key: `mode:${mode}`,
+    ...overrides,
+  });
+
+  const setModeRows = (...rows: Array<Record<string, unknown>>) => {
+    modeRows.length = 0;
+    modeRows.push(...rows);
+  };
+
+  const postTurn = (runtimeMode?: string) =>
+    POST(
+      new NextRequest("http://localhost:3000/api/ai/chat", {
+        method: "POST",
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "سلام" }],
+          ...(runtimeMode ? { runtimeMode } : {}),
+        }),
+      }),
+    );
+
+  beforeEach(() => {
+    setModeRows(modeRow("auto"), modeRow("instant"), modeRow("thinking"));
+    vi.mocked(runAgentTurn).mockClear();
+    vi.mocked(resolveAiConfigFor).mockClear();
+  });
+
+  it("refuses Fast when its alias is blank instead of routing it to the default model", async () => {
+    const res = await postTurn("instant");
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual(
+      expect.objectContaining({
+        error: "mode_unavailable",
+        mode: "instant",
+        reason: "fast_alias_not_configured",
+      }),
+    );
+    // The refusal happens before any gateway resolve or provider loop, so an
+    // unavailable Fast cannot have quietly used the Auto/Thinking deployment.
+    expect(resolveAiConfigFor).not.toHaveBeenCalled();
+    expect(runAgentTurn).not.toHaveBeenCalled();
+  });
+
+  it("sends Fast's own configured alias as the model once it exists", async () => {
+    setModeRows(
+      modeRow("auto"),
+      modeRow("instant", { model_alias: "pos-instant" }),
+      modeRow("thinking"),
+    );
+
+    const res = await postTurn("instant");
+    expect(res.status).toBe(200);
+    await readStreamText(res);
+
+    expect(runAgentTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({ model: "pos-instant" }),
+      }),
+    );
+  });
+
+  it("keeps Auto on the gateway default when its alias is blank", async () => {
+    const res = await postTurn();
+    expect(res.status).toBe(200);
+    await readStreamText(res);
+
+    expect(runAgentTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({ model: "pos-chat" }),
+      }),
+    );
+  });
+
+  it("routes Thinking to its own alias when configured, else to the gateway default", async () => {
+    // Blank Thinking alias — supported state: the gateway default, same as Auto.
+    let res = await postTurn("thinking");
+    expect(res.status).toBe(200);
+    await readStreamText(res);
+    expect(runAgentTurn).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({ model: "pos-chat" }),
+      }),
+    );
+
+    // Configured Thinking alias replaces the default for that turn.
+    setModeRows(
+      modeRow("auto"),
+      modeRow("instant"),
+      modeRow("thinking", { model_alias: "pos-thinking" }),
+    );
+    res = await postTurn("thinking");
+    expect(res.status).toBe(200);
+    await readStreamText(res);
+    expect(runAgentTurn).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({ model: "pos-thinking" }),
+      }),
+    );
+  });
+
+  it("does not offer a console-disabled mode as a routable turn", async () => {
+    setModeRows(
+      modeRow("auto"),
+      modeRow("instant", { model_alias: "pos-instant" }),
+      modeRow("thinking", { is_active: false }),
+    );
+
+    const res = await postTurn("thinking");
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual(
+      expect.objectContaining({
+        error: "mode_unavailable",
+        mode: "thinking",
+        reason: "disabled",
+      }),
+    );
+    expect(runAgentTurn).not.toHaveBeenCalled();
   });
 });
