@@ -18,19 +18,25 @@
  * the last one in the full sequence.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { ENABLED_INDUSTRIES, type Industry } from "@/lib/industries";
 import {
   OPTIONAL_STEPS,
+  SETUP_MENU_IMPORT_HREF,
   WIZARD_STEPS,
   wizardStepsForIndustry,
 } from "@/lib/wizard-steps";
 import { STEPS, nextPath, prevPath, skipToPath, stepsFor } from "./steps";
 
 describe("the step metadata table", () => {
-  it("describes every step, once, with a unique /setup path", () => {
+  it("describes every visible step, once, with a unique /setup path", () => {
     // A step in WIZARD_STEPS with no row here would render `undefined` as the
-    // page title; a duplicate path would make two steps the same URL.
-    expect(STEPS.map((s) => s.id)).toEqual([...WIZARD_STEPS]);
+    // page title; a duplicate path would make two steps the same URL. `menu`
+    // is the one legacy id without a page (#1580).
+    expect(STEPS.map((s) => s.id)).toEqual(
+      WIZARD_STEPS.filter((step) => step !== "menu"),
+    );
     const paths = STEPS.map((s) => s.path);
     expect(new Set(paths).size).toBe(paths.length);
     for (const step of STEPS) {
@@ -75,7 +81,10 @@ describe("stepsFor — the sequence one business walks", () => {
     expect(none).toContain("apps");
 
     const accounting = stepsFor("food_service", ["accounting"]).map((s) => s.id);
-    expect(accounting).toEqual(expect.arrayContaining(["accounts", "costing", "tax", "menu"]));
+    expect(accounting).toEqual(expect.arrayContaining(["accounts", "costing", "tax"]));
+    // #1580 — the menu is entered inside `import`, so it is never a page of its
+    // own, whatever the selection is.
+    expect(accounting).not.toContain("menu");
 
     expect(stepsFor("food_service", null).map((s) => s.id)).toEqual(
       stepsFor("food_service").map((s) => s.id),
@@ -84,7 +93,7 @@ describe("stepsFor — the sequence one business walks", () => {
 });
 
 describe("nextPath — forward by saving", () => {
-  it("walks a food-service business through all nine steps and out to Finish", () => {
+  it("walks a food-service business through every visible step and out to Finish", () => {
     const steps = stepsFor("food_service");
     for (let i = 0; i < steps.length - 1; i++) {
       expect(nextPath(steps[i].id, steps)).toBe(steps[i + 1].path);
@@ -180,8 +189,29 @@ describe("skipToPath — direct links and stale tabs", () => {
     // (issue #799) the same way `food_service` does.
     const steps = stepsFor("unknown_trade" as Industry);
     expect(steps.map((s) => s.id)).toEqual(
-      WIZARD_STEPS.filter((step) => step !== "aec_profile"),
+      WIZARD_STEPS.filter((step) => step !== "aec_profile" && step !== "menu"),
     );
     expect(skipToPath("business", [])).toBe("/setup/finish");
+  });
+});
+
+describe("legacy /setup/menu compatibility (#1580)", () => {
+  it("redirects the old URL to the unified step's manual menu section", () => {
+    expect(SETUP_MENU_IMPORT_HREF).toBe("/setup/import?source=manual&section=menu");
+    const page = readFileSync(
+      join(process.cwd(), "src/app/setup/menu/page.tsx"),
+      "utf8",
+    );
+    // A server redirect, not a second importer or a second editor.
+    expect(page).toContain("redirect(SETUP_MENU_IMPORT_HREF)");
+    expect(page).not.toContain("/api/setup/menu/import");
+    expect(page).not.toContain("next/document");
+  });
+
+  it("keeps the menu id in the vocabulary for stored markers and the domain API — but no page", () => {
+    expect(WIZARD_STEPS).toContain("menu");
+    expect(STEPS.map((step) => step.id)).not.toContain("menu");
+    // The legacy URL still resolves to the step that followed it.
+    expect(skipToPath("menu", stepsFor("food_service"))).toBe("/setup/hardware");
   });
 });

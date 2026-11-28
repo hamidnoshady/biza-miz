@@ -20,7 +20,7 @@ import {
 } from "./desktop-enrollment-readiness";
 import { isFeatureEnabled } from "./features";
 import { businessLocations, computeSetupState } from "./setup-state";
-import { wizardStepsForIndustry } from "./wizard-steps";
+import { industryNeedsSellableMenu } from "./wizard-steps";
 
 export interface EnrollmentReadinessRequest {
   businessId: string;
@@ -52,7 +52,7 @@ export async function readEnrollmentFacts(request: EnrollmentReadinessRequest): 
     ]);
     const business = businessRows[0] ?? null;
     const industry = setup.business?.industry ?? null;
-    const hasMenuStep = industry !== null && wizardStepsForIndustry(industry).includes("menu");
+    const hasMenuStep = industry !== null && industryNeedsSellableMenu(industry);
 
     let sellableMenuItemsByLocation: Record<string, number> | null = null;
     if (hasMenuStep) {

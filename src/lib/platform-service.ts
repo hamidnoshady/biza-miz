@@ -24,7 +24,7 @@ import { SETTING_KEYS } from "./settings";
 import { setupReadiness } from "./setup-readiness";
 import type { Industry } from "./industries";
 import { industryProfile } from "./industry-profile";
-import { wizardStepsForIndustry } from "./wizard-steps";
+import { industryNeedsSellableMenu } from "./wizard-steps";
 import { clearLearningRecommendationCache } from "./learning-recommendation-service";
 import { isWorkspaceEligibleIndustry } from "./workspace-eligibility";
 import { applyWorkspaceEligibilityToRuntime } from "./service-activation/activation-service";
@@ -712,7 +712,7 @@ export async function changeBusinessIndustry(
       // costing prerequisites. Re-open its canonical setup marker when those
       // requirements are introduced; the normal setup-state read then reconciles
       // step markers from the same readiness contract the Finish API uses.
-      if (previous[0].industry !== industry && wizardStepsForIndustry(industry).includes("menu")) {
+      if (previous[0].industry !== industry && industryNeedsSellableMenu(industry)) {
         const readiness = await setupReadinessForIndustryChange(client, businessId, industry);
         if (!readiness.ready) {
           await client.query(

@@ -30,11 +30,18 @@
  */
 
 /**
- * The workspace routes the guard owns. `/settings`, `/knowledge`, `/support`
- * and `/media` are deliberately absent: they are the recovery/help surfaces an
- * owner may genuinely need mid-setup, and they carry their own permission
- * gates. `/dashboard` is the one landing page every login and `?next=` target
- * points at.
+ * The workspace routes the guard owns. `/knowledge`, `/support` and `/media`
+ * are deliberately absent: they are the recovery/help surfaces an owner may
+ * genuinely need mid-setup, and they carry their own permission gates.
+ * `/dashboard` is the one landing page every login and `?next=` target points
+ * at.
+ *
+ * GitHub #1580 adds `/settings` and `/petty-cash`: before onboarding finishes,
+ * the internal settings area (data transfer, tax/users configuration, the
+ * technical connection hub's non-recovery pages) and the petty-cash workspace
+ * are ordinary operational screens, not onboarding surfaces. The narrow
+ * `/settings/*` exceptions below stay reachable — an owner still has to be able
+ * to pay, secure the account, recover a provider connection or read help.
  */
 const GUARDED_PREFIXES = [
   "/dashboard",
@@ -45,6 +52,8 @@ const GUARDED_PREFIXES = [
   "/workspace",
   "/ai",
   "/overview",
+  "/settings",
+  "/petty-cash",
 ] as const;
 
 /** Reachable during first-run setup, even though they sit under `/settings`. */

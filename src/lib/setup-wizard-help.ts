@@ -111,10 +111,13 @@ export const SETUP_STEP_HELP: Record<WizardStep, SetupInlineHelp> = {
     ],
   },
   menu: {
-    pageKey: "page:/setup/menu",
-    marker: "ورود منو",
+    // GitHub #1580 — the menu is edited inside «ورود اطلاعات» now. The help
+    // entry stays (stored guidance and the AI action map reference the step id)
+    // but points at the page that actually owns it.
+    pageKey: "page:/setup/import",
+    marker: "منوی کافه و رستوران",
     lines: [
-      "دسته‌ها و اقلام قابل فروش را بسازید یا فایل منو را وارد کنید.",
+      "دسته‌ها و اقلام قابل فروش را در بخش «ورود دستی» همین مرحله بسازید یا فایل منو را وارد کنید.",
       "برای فروش در صندوق دست‌کم یک قلم فعال لازم است؛ بعداً هم قابل ویرایش است.",
     ],
   },

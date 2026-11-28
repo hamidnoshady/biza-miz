@@ -28,6 +28,19 @@ vi.mock("../member-access", () => ({
 }));
 vi.mock("../service-activation/app-gate-service", () => ({
   serviceActivationState: vi.fn().mockResolvedValue({ state: "active" }),
+  appServiceActivationState: vi.fn().mockResolvedValue("active"),
+}));
+// #1580 — the effective-import gate reads these canonical axes. This suite is
+// about reconciliation decisions, so it states the access facts explicitly:
+// a legacy tenant (no gallery selection) with an active service.
+vi.mock("../setup-apps-service", () => ({
+  getSelectedSetupApps: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../complimentary-grant-service", () => ({
+  readActiveComplimentaryGrant: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("../app-availability-service", () => ({
+  effectiveAppAvailability: vi.fn().mockResolvedValue({}),
 }));
 vi.mock("./entities", () => ({
   ensureAdaptersRegistered: vi.fn(),
