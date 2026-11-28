@@ -44,6 +44,7 @@ export type DuplicateVerdict =
   | "same_remote_mapped_twice"
   | "race_orphan"
   | "historical_duplicate_candidate"
+  | "historical_variant_orphan"
   | "unmapped_duplicate"
   | "distinct_remote_records"
   | "per_branch_copies"
@@ -54,6 +55,8 @@ export const DUPLICATE_VERDICT_LABEL: Record<DuplicateVerdict, string> = {
   race_orphan: "creation race: one item is mapped, its twin is an unmapped orphan",
   historical_duplicate_candidate:
     "historical duplicate: an unmapped row and a mapped row of the same product, created weeks apart",
+  historical_variant_orphan:
+    "historical variant orphan: an unmapped simple row shadowing a mapped variable product of the same name",
   unmapped_duplicate: "unmapped duplicate (no integration owns at least one row)",
   distinct_remote_records: "different remote records share this SKU (fix the SKU at the source)",
   per_branch_copies: "one copy per branch (items are per location)",
@@ -64,6 +67,33 @@ export const DUPLICATE_VERDICT_LABEL: Record<DuplicateVerdict, string> = {
 export function verdictNeedsAction(verdict: DuplicateVerdict): boolean {
   return verdict !== "variant_family" && verdict !== "per_branch_copies";
 }
+
+/**
+ * What the review screen must distinguish once the plan and the recorded
+ * decisions are combined. `archived_elsewhere` exists so a row a person
+ * archived for an unrelated reason is never presented as "safely archived" by
+ * this workflow.
+ */
+export type DuplicateResolutionState =
+  | "pending_review"
+  | "safely_archived"
+  | "blocked_stock"
+  | "blocked_history"
+  | "kept_separate"
+  | "history_retained"
+  | "restored"
+  | "archived_elsewhere"
+  | "blocked_other"
+  | "not_a_duplicate";
+
+/** States in which the duplicate no longer needs an operator's decision. */
+export const RESOLVED_DUPLICATE_STATES: ReadonlySet<DuplicateResolutionState> = new Set([
+  "safely_archived",
+  "archived_elsewhere",
+  "kept_separate",
+  "history_retained",
+  "not_a_duplicate",
+]);
 
 /**
  * Two creations this close together, one mapped and one not, are the race's
@@ -144,6 +174,51 @@ export function historicalTwinsOf(
   );
 }
 
+function hasProductMapping(member: DuplicateItemMember): boolean {
+  return member.mappings.some((mapping) => mapping.entityType === "product");
+}
+
+/**
+ * The mapped variable product an unmapped simple row is an older flat copy of.
+ *
+ * The September re-import turned some August simple products into variable
+ * products. The August row is a `simple` item with no parent; the September
+ * family is a mapped `variant_parent` plus its mapped children, in the same
+ * branch, with the same SKU and the same name. That shape is the same
+ * historical duplication as {@link historicalTwinsOf}, but the kind differs, so
+ * it needs its own fingerprint — and it must not swallow a legitimate family:
+ * exactly one mapped parent, at least one mapped child, no second unmapped
+ * family member, and the orphan itself must not be a parent or a child.
+ */
+export function variantFamilyTwinOf(
+  orphan: DuplicateItemMember,
+  members: readonly DuplicateItemMember[],
+): DuplicateItemMember | null {
+  if (orphan.kind !== "simple" || orphan.parentItemId !== null) return null;
+  const orphanName = normaliseName(orphan.name);
+  if (!orphanName) return null;
+  const parents = members.filter(
+    (member) =>
+      member.kind === "variant_parent" &&
+      member.parentItemId === null &&
+      member.locationId === orphan.locationId &&
+      hasProductMapping(member) &&
+      normaliseName(member.name) === orphanName,
+  );
+  // Two mapped parents with this name are ambiguous: a person decides.
+  if (parents.length !== 1) return null;
+  const parent = parents[0];
+  const children = members.filter(
+    (member) =>
+      member.kind === "variant_child" &&
+      member.parentItemId === parent.itemId &&
+      member.locationId === orphan.locationId &&
+      hasProductMapping(member),
+  );
+  // A "family" without mapped children is not a family this rule can prove.
+  return children.length > 0 ? parent : null;
+}
+
 /** True when the unmapped row and the mapped row carry the same product name. */
 export function namesMatch(a: DuplicateItemMember, b: DuplicateItemMember): boolean {
   const left = normaliseName(a.name);
@@ -197,14 +272,21 @@ export function classifyDuplicateGroup(members: DuplicateItemMember[]): Duplicat
     if (historicalTwinsOf(orphan, mapped).length > 0) return "historical_duplicate_candidate";
   }
 
-  // 5. Rows that no integration owns.
+  // 5. An unmapped *simple* row beside a mapped variable family of the same
+  //    name (the August flat copy of a September variable product). Checked
+  //    after the legitimate-family rule, which requires no extra simple row.
+  for (const orphan of unmapped) {
+    if (variantFamilyTwinOf(orphan, members)) return "historical_variant_orphan";
+  }
+
+  // 6. Rows that no integration owns.
   if (unmapped.length > 0) {
     const branches = new Set(members.map((m) => m.locationId));
     if (branches.size === members.length && mapped.length === 0) return "per_branch_copies";
     return "unmapped_duplicate";
   }
 
-  // 6. Everything is mapped, to different remote records.
+  // 7. Everything is mapped, to different remote records.
   const branches = new Set(members.map((m) => m.locationId));
   if (branches.size === members.length) return "per_branch_copies";
   return "distinct_remote_records";

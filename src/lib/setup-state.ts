@@ -45,6 +45,7 @@ export {
 } from "./wizard-steps";
 import {
   requiredStepsForIndustry,
+  industryNeedsSellableMenu,
   wizardStepsForIndustry,
   type WizardStep,
 } from "./wizard-steps";
@@ -103,6 +104,11 @@ export async function requireSetupStepForIndustry(
 ): Promise<NextResponse | null> {
   const industry = await getBusinessIndustry(businessId);
   if (!industry) return null;
+  // #1580 — the F&B menu is no longer a visible step, but its manual editor and
+  // its canonical import live inside «ورود اطلاعات». The industry gate that
+  // protected `menu_categories`/`menu_items` stays exactly as strict: only the
+  // industries whose shape still requires a sellable menu may write them.
+  if (step === "menu" && industryNeedsSellableMenu(industry)) return null;
   if (wizardStepsForIndustry(industry).includes(step)) return null;
   return NextResponse.json({ error: "step_not_in_industry" }, { status: 403 });
 }

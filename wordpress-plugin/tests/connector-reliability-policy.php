@@ -352,10 +352,70 @@ check( ! POS_Connector_Queue::unchanged_state_already_queued( $row( 'dead', 'abc
 check( ! POS_Connector_Queue::unchanged_state_already_queued( $row( 'sent', 'abc' ), 'def', false ), 'a changed state is never skipped' );
 check( ! POS_Connector_Queue::unchanged_state_already_queued( $row( 'sent', '' ), '', false ), 'a topic without a fingerprint is never skipped' );
 check( false !== strpos( $queue, 'self::unchanged_state_already_queued( $existing, $fingerprint, $financial )' ), 'enqueue decides the skip through the tested helper' );
+
+// --- #1550 follow-up: a sweep re-reading an unchanged state is not a new event ---
+//
+// The producer used to write a fresh `order.updated` row every five minutes for
+// every order in the lookback window, even when the app had already accepted the
+// identical snapshot: 100 orders produced 435 identical rows each in 40 hours.
+// The sweep now reconciles against the newest row instead.
+if ( ! function_exists( 'wp_json_encode' ) ) {
+	function wp_json_encode( $value ) { return json_encode( $value ); }
+}
+$order_payload = array( 'id' => 7, 'status' => 'completed', 'date_modified' => '2026-11-27T10:00:00+00:00', 'total' => '1000' );
+$order_fp      = POS_Connector_Queue::fingerprint_for( 'order.updated', $order_payload );
+same( $order_fp, POS_Connector_Queue::fingerprint_for( 'order.updated', $order_payload ), 'the same order state has the same fingerprint' );
+check( $order_fp !== POS_Connector_Queue::fingerprint_for( 'order.updated', array_merge( $order_payload, array( 'status' => 'cancelled' ) ) ), 'a changed order state has a different fingerprint' );
+$product_payload = array( 'id' => 7, 'name' => 'A', 'date_modified' => '2026-11-27T10:00:00+00:00' );
+same(
+	POS_Connector_Queue::fingerprint_for( 'product.updated', $product_payload ),
+	POS_Connector_Queue::fingerprint_for( 'product.updated', array_merge( $product_payload, array( 'date_modified' => '2026-11-27T11:00:00+00:00' ) ) ),
+	'a product save timestamp alone does not change the fingerprint'
+);
+same( '', POS_Connector_Queue::fingerprint_for( 'order.created', $order_payload ), 'topics without state identity are never swept-deduplicated' );
+
+$now = 1_800_000_000;
+same( 'enqueue', POS_Connector_Queue::swept_state_decision( 'sent', 'old', 'new', $now, $now ), 'a changed state is enqueued by a sweep' );
+same( 'skip', POS_Connector_Queue::swept_state_decision( 'pending', 'abc', 'abc', $now, $now ), 'a pending identical state is not written twice' );
+same( 'skip', POS_Connector_Queue::swept_state_decision( 'sent', 'abc', 'abc', $now, $now ), 'a delivered identical financial state is not re-created by a sweep' );
+same( 'skip', POS_Connector_Queue::swept_state_decision( 'failed', 'abc', 'abc', $now - 60, $now ), 'a recently failed identical state waits for its cooldown' );
+same( 'requeue', POS_Connector_Queue::swept_state_decision( 'failed', 'abc', 'abc', $now - POS_Connector_Queue::SWEEP_FAILED_RETRY_SECONDS, $now ), 'a failed identical state is retried in place after the cooldown' );
+same( 'enqueue', POS_Connector_Queue::swept_state_decision( 'failed', 'old', 'new', $now - 3600, $now ), 'a changed failed state is enqueued normally' );
+check( false !== strpos( $queue, 'self::reconcile_swept_state(' ) || false !== strpos( $queue, 'function reconcile_swept_state(' ), 'the sweep reconciles against the newest queued state' );
+check( false !== strpos( $queue, "WHERE id = %d AND status = 'failed'" ), 'a swept failed row is requeued in place, keeping its delivery id' );
+$sync = file_get_contents( dirname( __DIR__ ) . '/pos-accounting-connector/includes/class-pos-sync.php' );
+check( 2 === substr_count( $sync, 'reconcile_swept_state(' ), 'both order-sweep walks reconcile before enqueueing' );
+check( 2 === substr_count( $sync, "'type'          => 'shop_order'," ), 'both order-sweep walks exclude refund rows from wc_get_orders' );
+check( false !== strpos( $sync, "'shop_order' !== \$order->get_type()" ), 'a refund never enters the order enqueue path' );
+check( false !== strpos( $sync, 'public static function export_orders( $days = 7, $force = false )' ), 'an explicit export can still force a re-send' );
 check( false !== strpos( $queue, "SET payload = '' WHERE status = 'sent'" ), 'housekeeping clears delivered bodies left by the old schema' );
 check( false !== strpos( $queue, "topic NOT IN ('order.created', 'order.updated', 'refund.created', 'content.deleted', 'customer.deleted')" ), 'non-financial, non-tombstone failed rows expire; financial rows and deletions do not' );
 $cli = file_get_contents( dirname( __DIR__ ) . '/pos-accounting-connector/includes/class-pos-cli.php' );
 check( false !== strpos( $cli, "'tableStorageBytes'" ), 'doctor reports the physical queue-table size, not only live payload bytes' );
+// WP-CLI rewrites `--json` to `--format=json` before dispatch; a command that
+// only declares `--json` fails with "unknown --format parameter".
+check( false !== strpos( $cli, '[--format=<format>]' ), 'doctor declares the format WP-CLI rewrites --json into' );
+check( false !== strpos( $cli, "\$json   = 'json' === \$format" ), 'doctor accepts both --json and --format=json' );
 check( false !== strpos( $queue, 'information_schema.tables' ), 'and that measurement reads the table size from information_schema' );
+
+// --- #1206 UX-04: the queue screen is bounded, filtered and payload-free ---------
+//
+// The WordPress «صف و خطاها» screen used to render a count card and nothing
+// else. It now asks for one bounded page; these pins keep that page from
+// becoming an unbounded scan or a payload/PII leak, and keep the notice detail
+// that handlers store from being dropped again.
+$admin_source = file_get_contents( $plugin_dir . 'includes/class-pos-admin.php' );
+same( 'open', POS_Connector_Queue::normalize_page_filters( 'DROP TABLE', '' )['status'], 'an unknown queue filter falls back to the open rows' );
+same( 'failed', POS_Connector_Queue::normalize_page_filters( 'failed', '' )['status'], 'a known queue filter survives' );
+same( 'searched', POS_Connector_Queue::normalize_page_filters( 'all', '  searched  ' )['search'], 'the queue search is trimmed' );
+same( 80, mb_strlen( POS_Connector_Queue::normalize_page_filters( 'all', str_repeat( 'x', 200 ) )['search'], 'UTF-8' ), 'the queue search is bounded to eighty characters' );
+check( false !== strpos( $queue_source, '$wpdb->esc_like( $search )' ), 'the queue search is escaped for LIKE' );
+check( false !== strpos( $queue_source, "implode( ' AND ', \$where )" ), 'the queue page composes only validated clauses' );
+check( false === strpos( $queue_source, 'payload LIKE' ), 'the queue search never reads the payload' );
+check( false !== strpos( $queue_source, 'LIMIT %d' ), 'a queue page is always limited' );
+check( false !== strpos( $admin_source, 'POS_Connector_Queue::page( $after, 20, $status, $search )' ), 'the screen asks for one bounded server-side page' );
+check( false !== strpos( $admin_source, 'aria-current="page"' ), 'the active tab is announced as the current page' );
+check( 1 === preg_match( '/\$detail\s*=\s*\$notice \? self::take_notice_detail\(\)/', $admin_source ), 'a notice detail is assigned before it is printed' );
+check( false !== strpos( $admin_source, 'pos-queue-scroll' ), 'the queue table has an explicit narrow-screen scroll affordance' );
 
 echo $assertions . " reliability-policy assertions passed\n";

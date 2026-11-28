@@ -11,7 +11,7 @@
 // Type-only, so the value dependency stays one-way: ai-autopilot.ts imports
 // ACTION_CATALOG from here, never the reverse.
 import type { Industry } from "./industries";
-import { catalogueHrefFor, wizardStepsForIndustry } from "./wizard-steps";
+import { catalogueHrefFor, industryNeedsSellableMenu, wizardStepsForIndustry } from "./wizard-steps";
 import type { AutopilotCategory } from "./ai-autopilot";
 // Type-only: the runtime-mode union lives with its resolver in
 // `ai-runtime-modes.ts`, which imports `AiConfig` from here. Erased at build
@@ -3648,6 +3648,10 @@ export function wizardActionTypesForIndustry(
 ): ActionType[] {
   if (!industry) return types;
   const steps = new Set<string>(wizardStepsForIndustry(industry));
+  // #1580 — the menu actions live inside the unified import step now, so keep
+  // the legacy `menu` id proposable for exactly the industries whose POS still
+  // requires a sellable menu. Any other trade must not see them.
+  if (industryNeedsSellableMenu(industry)) steps.add("menu");
   return types.filter((type) => {
     const step = ACTION_CATALOG[type]?.wizardStep;
     return !step || steps.has(step);
@@ -3754,11 +3758,17 @@ export interface PromptContext {
 
 const WIZARD_STEP_LABELS: Record<string, string> = {
   business: "اطلاعات کسب‌وکار",
+  aec_profile: "پروفایل کسب‌وکار",
+  apps: "انتخاب برنامه‌ها",
+  app_setup: "راه‌اندازی برنامه‌های انتخاب‌شده",
+  import: "ورود اطلاعات",
   accounts: "سرفصل حساب‌ها",
   costing: "روش قیمت‌گذاری موجودی",
   tax: "تنظیم مالیات",
   users: "نقش‌ها و کاربران",
-  menu: "ورود منو",
+  // #1580 — no longer a visible step; kept so a stored `currentStep` or a
+  // legacy AI action still resolves to a human label.
+  menu: "ورود منو (داخل ورود اطلاعات)",
   hardware: "اتصال سخت‌افزار",
   backup: "مقصد پشتیبان‌گیری",
   opening: "مانده‌های افتتاحیه",

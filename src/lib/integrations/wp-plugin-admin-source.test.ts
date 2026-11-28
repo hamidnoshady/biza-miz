@@ -318,3 +318,37 @@ describe("plugin export sweeps page by keyset cursor, not OFFSET", () => {
     expect(step).toContain("$state['deferred']");
   });
 });
+
+// Issue #1206 UX-04: the «صف و خطاها» screen used to be a count card and a
+// retry-all button. A 10,000-row queue has to stay paginated and searchable,
+// and the one-time detail a handler leaves for a notice has to reach the page.
+describe("WordPress local queue screen (issue #1206 UX-04)", () => {
+  it("asks the queue for one bounded, filtered server-side page", () => {
+    expect(admin).toContain("POS_Connector_Queue::page( $after, 20, $status, $search )");
+    expect(admin).toContain("'pos_queue_status'");
+    expect(admin).toContain("'pos_queue_search'");
+    expect(admin).toContain("'pos_queue_after'");
+    expect(queue).toContain("public static function normalize_page_filters(");
+    expect(queue).toContain("$wpdb->esc_like( $search )");
+    expect(queue).toContain("implode( ' AND ', $where )");
+    // No row bodies, tokens or customer payloads in the list query.
+    const page = queue.slice(queue.indexOf("public static function page("), queue.indexOf("private static function format_problem_row"));
+    expect(page).toContain("SELECT id, topic, remote_id, status, attempts, last_error, created_at, available_at");
+    expect(page).not.toContain("SELECT *");
+    expect(page).toContain("LIMIT %d");
+  });
+
+  it("prints the detail a handler stored instead of dropping it", () => {
+    expect(admin).toMatch(/\$detail\s*=\s*\$notice \? self::take_notice_detail\(\)/);
+    expect(admin).toContain("take_notice_detail()");
+  });
+
+  it("marks the active section for keyboard and screen-reader users", () => {
+    expect(admin).toContain('aria-current="page"');
+  });
+
+  it("does not compute queue counts on screens that never show them", () => {
+    expect(admin).toContain("self::render_dashboard( $settings, POS_Connector_Queue::counts() )");
+    expect(admin).not.toContain("self::render_queue( $counts )");
+  });
+});

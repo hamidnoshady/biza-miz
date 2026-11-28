@@ -12,6 +12,7 @@
  *    the gallery existed.
  */
 import { describe, expect, it } from "vitest";
+import { resolveImportAccess } from "./import-access";
 import {
   SETUP_IMPORT_MODULE_APP,
   isUnfinishedSetupImport,
@@ -137,6 +138,40 @@ describe("setupImportCandidates", () => {
       ["accounting"],
     );
     expect(candidates[0].reason).toBe("industry_module");
+  });
+
+  it("carries the effective service decision (#1580) and separates staging from applying", () => {
+    const access = (activationState: string | null) =>
+      resolveImportAccess({
+        appKey: "accounting",
+        selection: ["accounting"],
+        activationState,
+        permitted: true,
+        importable: true,
+        at: "2026-11-27T00:00:00.000Z",
+      });
+
+    const [active, pending, disabled] = setupImportCandidates(
+      [
+        { ...PRODUCTS, key: "a", access: access("active") },
+        { ...PRODUCTS, key: "b", access: access(null) },
+        { ...PRODUCTS, key: "c", access: access("disabled_retained") },
+      ],
+      ["accounting"],
+    );
+
+    expect(active).toMatchObject({ available: true, stagingAllowed: true, reason: null });
+    expect(pending).toMatchObject({
+      available: false,
+      stagingAllowed: true,
+      reason: "awaiting_activation",
+    });
+    expect(pending.reasonLabel).toContain("منتظر فعال‌سازی");
+    expect(disabled).toMatchObject({
+      available: false,
+      stagingAllowed: false,
+      reason: "service_disabled",
+    });
   });
 });
 

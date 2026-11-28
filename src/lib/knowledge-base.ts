@@ -241,7 +241,10 @@ export const KNOWLEDGE_PAGES: readonly KnowledgePage[] = [
     ["/setup/costing", "روش قیمت‌گذاری موجودی"],
     ["/setup/tax", "تنظیم مالیات"],
     ["/setup/users", "نقش‌ها و کاربران"],
-    ["/setup/menu", "ورود منو"],
+    // GitHub #1580 — `/setup/menu` is no longer its own step; the old URL
+    // redirects into the unified import step, and the alias keeps an old
+    // bookmark resolving to the right help topic instead of nothing.
+    ["/setup/menu", "ورود اطلاعات (منو)"],
     ["/setup/hardware", "اتصال سخت‌افزار"],
     ["/setup/backup", "مقصد پشتیبان‌گیری"],
     ["/setup/opening", "مانده‌های افتتاحیه"],

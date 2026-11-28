@@ -15,6 +15,7 @@ import {
   OPTIONAL_STEPS,
   WIZARD_STEPS,
   catalogueHrefFor,
+  industryNeedsSellableMenu,
   requiredStepsForIndustry,
   setupShapeForIndustry,
   wizardStepsForIndustry,
@@ -24,7 +25,10 @@ import {
  * The canonical F&B ordering the wizard is specified against.
  *
  * Issue #1239 / ESH-90 inserts the priced app gallery and the selected apps'
- * own setup between the profile and Accounting's steps.
+ * own setup between the profile and Accounting's steps. GitHub #1580 removes
+ * the duplicate `menu` step from the *visible* sequence: the menu is entered
+ * inside `import`, so it appears in `requiredStepsForIndustry` (POS readiness)
+ * but not here.
  */
 const FNB_ORDER = [
   "business",
@@ -35,7 +39,6 @@ const FNB_ORDER = [
   "costing",
   "tax",
   "users",
-  "menu",
   "hardware",
   "backup",
   "opening",
@@ -47,11 +50,25 @@ const FNB_ORDER = [
  * is chosen once the industry is known).
  */
 const AEC_ORDER = ["business", "aec_profile", ...FNB_ORDER.slice(1)].filter(
-  (step) => step !== "costing" && step !== "menu",
+  (step) => step !== "costing",
 );
 
-/** Every step id, in wizard order (the F&B pair plus AEC's own). */
-const ALL_STEPS = ["business", "aec_profile", ...FNB_ORDER.slice(1)];
+/** The step vocabulary, including the legacy `menu` id kept for old markers. */
+const ALL_STEPS = [
+  "business",
+  "aec_profile",
+  "apps",
+  "app_setup",
+  "import",
+  "accounts",
+  "costing",
+  "tax",
+  "users",
+  "menu",
+  "hardware",
+  "backup",
+  "opening",
+];
 
 describe("wizardStepsForIndustry", () => {
   it("is defined for every industry this build can create", () => {
@@ -69,10 +86,10 @@ describe("wizardStepsForIndustry", () => {
 
   it("walks F&B through every step in the documented order", () => {
     expect(wizardStepsForIndustry("food_service")).toEqual([...FNB_ORDER]);
-    // F&B does not walk AEC's operating-profile step: the two shapes differ by
-    // exactly that one step in this direction.
+    // F&B does not walk AEC's operating-profile step, and `menu` is no longer a
+    // page of its own (#1580) — it is part of the one import step.
     expect(wizardStepsForIndustry("food_service")).toEqual(
-      WIZARD_STEPS.filter((step) => step !== "aec_profile"),
+      WIZARD_STEPS.filter((step) => step !== "aec_profile" && step !== "menu"),
     );
   });
 
@@ -169,12 +186,17 @@ describe("wizardStepsForIndustry", () => {
     expect(OPTIONAL_STEPS).toContain("import");
   });
 
-  it("derives required steps as everything that is not optional", () => {
+  it("derives required steps as everything that is not optional, plus readiness-only prerequisites", () => {
     for (const industry of ENABLED_INDUSTRIES) {
       const steps = wizardStepsForIndustry(industry);
       const required = requiredStepsForIndustry(industry);
-      expect(required).toEqual(steps.filter((s) => !OPTIONAL_STEPS.includes(s)));
+      const visibleRequired = steps.filter((s) => !OPTIONAL_STEPS.includes(s));
+      const prerequisiteOnly = required.filter((s) => !visibleRequired.includes(s));
+      expect(required.filter((s) => visibleRequired.includes(s))).toEqual(visibleRequired);
       for (const optional of OPTIONAL_STEPS) expect(required).not.toContain(optional);
+      // #1580 — the F&B menu is required for POS readiness but has no page.
+      const expectsMenu = industryNeedsSellableMenu(industry);
+      expect(prerequisiteOnly, industry).toEqual(expectsMenu ? ["menu"] : []);
     }
     expect(requiredStepsForIndustry("food_service")).toEqual([
       "business",
@@ -183,6 +205,12 @@ describe("wizardStepsForIndustry", () => {
       "tax",
       "menu",
     ]);
+    expect(industryNeedsSellableMenu("food_service")).toBe(true);
+    expect(industryNeedsSellableMenu("jewelry")).toBe(false);
+    // The duplicate page is gone from every visible sequence.
+    for (const industry of INDUSTRIES) {
+      expect(wizardStepsForIndustry(industry), industry).not.toContain("menu");
+    }
     expect(requiredStepsForIndustry("jewelry")).toEqual(["business", "accounts", "tax"]);
     // AEC's own step is optional too: skipping it keeps the default operating
     // profile, which is a working state (issue #799 §2).

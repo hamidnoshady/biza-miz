@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Step «ورود اطلاعات اولیه» (issue #1535 / ESH-218).
+ * Step «ورود اطلاعات» (#1535 / ESH-218, unified by #1580).
  *
  * This screen composes the EXISTING Data Transfer engine — it does not parse,
  * map, validate, reconcile or apply anything itself. The engine's own screens,
@@ -9,19 +9,18 @@
  * page only decides what is relevant to this business *at onboarding time* and
  * surrounds it with the wizard's navigation.
  *
- * Three source paths are offered honestly:
+ * Three source paths are offered honestly, all inside this one step:
  *  - a file import, fully inline (CSV/XLSX/JSON/PDF through `ImportSection`);
- *  - a provider connection, which opens the canonical connection screen
- *    (Holoo transport, Woo/WP, Eshobe CMS) rather than pretending the wizard
- *    can connect a third-party system in a modal;
- *  - manual entry, which points at the owning workspace screen.
+ *  - an existing website/software connection, created and tested inline in a
+ *    right-side Sheet that composes the canonical provider services;
+ *  - manual entry, including the F&B menu editor the old duplicate «ورود منو»
+ *    step used to own.
  *
  * Nothing here activates an app, debits a wallet, posts a historical financial
  * document or silently merges a duplicate: those remain the engine's and the
  * domain services' decisions, behind their own approval screens.
  */
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckIcon,
@@ -52,37 +51,40 @@ import {
 import { api, ErrorBox, InfoBox, SetupDataSkeleton, StepShell } from "../ui";
 import { stepsFor } from "../steps";
 import { useSetupIndustry } from "../industry-context";
+import { SetupConnectionSheet } from "./connection-sheet";
+import { SetupMenuManualEditor } from "./menu-manual-editor";
 
 type SourceMode = "file" | "provider" | "manual";
+type Provider = "woocommerce" | "wordpress" | "eshobe";
 
 interface ImportsResponse extends SetupImportsData {
   entities: CatalogueEntity[];
   error?: string;
 }
 
-const PROVIDER_LINKS = [
+const PROVIDER_CHOICES: {
+  key: Provider;
+  title: string;
+  description: string;
+}[] = [
   {
-    key: "holoo",
-    title: "هلو (Holoo)",
+    key: "woocommerce",
+    title: "ووکامرس",
     description:
-      "انتقال کالا، طرف‌حساب، اسناد و مانده‌ها از هلو با پروفایل بررسی‌شده و مغایرت‌گیری. از تب «انتقال هلو» در ورود و خروج داده انجام می‌شود.",
-    href: "/settings/data-transfer",
+      "فروشگاه ووکامرس: محصولات، دسته‌ها، مشتریان و سفارش‌ها از همان اتصال.",
   },
   {
-    key: "woo",
-    title: "ووکامرس / وردپرس",
+    key: "wordpress",
+    title: "وردپرس",
     description:
-      "اتصال فروشگاه و همگام‌سازی کاتالوگ، قیمت و سفارش‌ها. اتصال از مدیریت وب‌سایت انجام می‌شود و ورود اولیه پس از آن در همین موتور قابل بازبینی است.",
-    href: "/websites/wp",
+      "سایت وردپرسی: نوشته‌ها و برگه‌ها با افزونهٔ وردپرس و بدون رمز فروشگاه.",
   },
   {
     key: "eshobe",
     title: "Eshobe CMS",
-    description:
-      "سایت‌ساز Eshobe و مدیریت محتوا و کاتالوگ سایت. اتصال و انتشار از مدیریت وب‌سایت انجام می‌شود.",
-    href: "/websites/cms",
+    description: "سایت ساخته‌شده روی Eshobe: محتوا و کاتالوگ سایت.",
   },
-] as const;
+];
 
 function sessionResult(session: SetupImportSession): string {
   if (session.state === "applied" || session.state === "partial") {
@@ -108,6 +110,8 @@ export default function ImportStepPage() {
   const [entityKey, setEntityKey] = useState("");
   const [resumeJobId, setResumeJobId] = useState<string | null>(null);
   const [reloading, setReloading] = useState(false);
+  const [provider, setProvider] = useState<Provider>("woocommerce");
+  const [sheetOpen, setSheetOpen] = useState(false);
   const engineRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async (quiet = false) => {
@@ -130,6 +134,18 @@ export default function ImportStepPage() {
     void load(true);
   }, [load]);
 
+  // The one legacy entry point left: `/setup/menu` redirects here with
+  // `?source=manual&section=menu`, and the desktop/help guidance links to the
+  // same URL. Reading it from the address bar (rather than `useSearchParams`)
+  // keeps this client page out of a Suspense boundary it does not need.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const source = params.get("source");
+    if (source === "manual" || source === "provider" || source === "file") {
+      setMode(source);
+    }
+  }, []);
+
   const steps = useMemo(
     () => stepsFor(industry, data?.selectedApps ?? null),
     [industry, data?.selectedApps],
@@ -146,39 +162,32 @@ export default function ImportStepPage() {
     return [...map.entries()];
   }, [data?.candidates]);
 
-  const manualLinks = useMemo(() => {
+  const manualDestinations = useMemo(() => {
     const catalogue = catalogueHrefFor(industry);
     return [
       {
-        href: "/accounting/directory",
         label: "مشتریان و تأمین‌کنندگان",
-        hint: "ثبت یکی‌یکی پرونده‌ها در دفتر طرف‌حساب‌ها",
+        hint: "دفتر طرف‌حساب‌ها؛ پس از پایان راه‌اندازی از همین مسیر باز می‌شود.",
       },
       ...(catalogue
         ? [
             {
-              href: catalogue,
               label: "کالاها و موجودی",
-              hint: "ثبت دستی اقلام و موجودی اولیه در پنل همین صنف",
-            },
-          ]
-        : []),
-      ...(industry === "food_service"
-        ? [
-            {
-              href: "/setup/menu",
-              label: "منوی غذا و نوشیدنی",
-              hint: "دسته‌ها و آیتم‌های منو در مرحلهٔ منو",
+              hint: "پنل کالای همین صنف؛ پس از پایان راه‌اندازی از همین مسیر باز می‌شود.",
             },
           ]
         : []),
       {
-        href: "/settings/data-transfer",
         label: "اسناد و سابقهٔ مالی",
-        hint: "ورود فاکتورهای فروش قبلی و تاریخچهٔ مالی",
+        hint: "ورود فاکتورهای فروش قبلی؛ پس از پایان راه‌اندازی از «انتقال داده» در تنظیمات.",
       },
     ];
   }, [industry]);
+
+  const selectedCandidate = useMemo(
+    () => data?.candidates.find((candidate) => candidate.key === entityKey) ?? null,
+    [data?.candidates, entityKey],
+  );
 
   function chooseType(key: string) {
     setMode("file");
@@ -198,6 +207,26 @@ export default function ImportStepPage() {
     }, 0);
   }
 
+  async function resumeParked(session: SetupImportSession) {
+    setError("");
+    const result = await api<{ error?: string; message?: string }>(
+      `/api/data/imports/${session.id}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "run" }),
+      },
+    );
+    if (!result.ok) {
+      setError(
+        typeof result.data?.message === "string"
+          ? result.data.message
+          : "از سرگیری ورود اطلاعات ممکن نشد؛ وضعیت دسترسی سرویس را بررسی کنید.",
+      );
+      return;
+    }
+    await load(true);
+  }
+
   if (!data) {
     return (
       <div>
@@ -215,7 +244,7 @@ export default function ImportStepPage() {
       steps={steps}
       showSkip
       showNext
-      description="اگر اطلاعات کسب‌وکارتان (مشتریان، کالاها، موجودی یا سابقهٔ مالی) از قبل در فایل یا نرم‌افزار دیگری است، همین‌جا وارد کنید. این مرحله اختیاری است: هر زمان می‌توانید رد شوید، بعداً ادامه دهید یا از داشبورد برگردید. هیچ ورودی‌ای برنامه‌ای را فعال یا مبلغی از کیف پول کم نمی‌کند."
+      description="اگر اطلاعات کسب‌وکارتان (مشتریان، کالاها، موجودی، منو یا سابقهٔ مالی) از قبل در فایل یا نرم‌افزار دیگری است، همین‌جا وارد کنید. این مرحله اختیاری است: هر زمان می‌توانید رد شوید، بعداً ادامه دهید یا از داشبورد برگردید. هیچ ورودی‌ای برنامه‌ای را فعال یا مبلغی از کیف پول کم نمی‌کند."
     >
       <ErrorBox>{error}</ErrorBox>
 
@@ -228,30 +257,30 @@ export default function ImportStepPage() {
 
       <SectionCard
         title="۱. منبع اطلاعات"
-        description="یکی از راه‌های زیر را انتخاب کنید. فقط فایل، ورود کامل داخل همین صفحه دارد؛ اتصال سرویس‌ها و ثبت دستی از صفحهٔ خودشان انجام می‌شود."
+        description="یکی از راه‌های زیر را انتخاب کنید. هر سه راه کامل داخل همین صفحه انجام می‌شوند؛ برای اتصال یا ثبت دستی به صفحهٔ دیگری نمی‌روید."
       >
         <div className="grid gap-3 md:grid-cols-3">
           {[
             {
               key: "file" as const,
               icon: FileUpIcon,
-              title: "فایل Excel، CSV یا JSON",
+              title: "بارگذاری فایل",
               description:
                 "جدول‌های XLSX، CSV و JSON؛ PDF فقط وقتی جدول آن قابل تشخیص باشد و همیشه با پیش‌نمایش اجباری.",
             },
             {
               key: "provider" as const,
               icon: Link2Icon,
-              title: "اتصال نرم‌افزار فعلی",
+              title: "اتصال به سیستم موجود",
               description:
-                "هلو، ووکامرس/وردپرس و Eshobe CMS؛ از صفحهٔ اتصال خودشان، با همان موتور و همان گزارش مغایرت.",
+                "ووکامرس، وردپرس و Eshobe CMS؛ ساخت، بررسی و استفاده از اتصال در همان صفحه.",
             },
             {
               key: "manual" as const,
               icon: PencilIcon,
-              title: "ثبت دستی",
+              title: "ورود دستی",
               description:
-                "برای وقتی داده کم است یا فایل آماده نیست؛ فرم‌های خود هر بخش.",
+                "برای وقتی داده کم است یا فایل آماده نیست؛ فرم‌ها و ثبت‌های همین بخش.",
             },
           ].map((source) => {
             const Icon = source.icon;
@@ -311,20 +340,21 @@ export default function ImportStepPage() {
                   </p>
                   <div className="grid gap-3 sm:grid-cols-2">
                     {candidates.map((candidate) => {
-                      const selected = candidate.available && entityKey === candidate.key;
+                      const usable = candidate.available || candidate.stagingAllowed;
+                      const selected = usable && entityKey === candidate.key;
                       return (
                         <button
                           key={candidate.key}
                           type="button"
                           aria-pressed={selected}
-                          aria-disabled={!candidate.available}
+                          aria-disabled={!usable}
                           onClick={() => {
-                            if (candidate.available) chooseType(candidate.key);
+                            if (usable) chooseType(candidate.key);
                           }}
                           className={`${cardClass} p-4 text-start transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none ${
                             selected
                               ? "ring-2 ring-primary"
-                              : candidate.available
+                              : usable
                                 ? "hover:bg-muted/40"
                                 : "opacity-75"
                           }`}
@@ -359,7 +389,15 @@ export default function ImportStepPage() {
         </SectionCard>
       ) : null}
 
-      {mode === "file" && data.canImport && entityKey ? (
+      {mode === "file" && entityKey && selectedCandidate?.stagingAllowed && !selectedCandidate.available ? (
+        <InfoBox>
+          {selectedCandidate.reasonLabel} می‌توانید فایل را همین حالا بارگذاری،
+          نگاشت و پیش‌نمایش کنید؛ جلسه ذخیره می‌ماند و بعد از فعال‌شدن سرویس، با
+          همان بازبینی تأیید و اجرا می‌شود.
+        </InfoBox>
+      ) : null}
+
+      {mode === "file" && selectedCandidate && (selectedCandidate.available || selectedCandidate.stagingAllowed) ? (
         <div ref={engineRef} id="setup-import-engine" className="scroll-mt-4">
           <SectionCard
             title="۳. فایل، نگاشت، پیش‌نمایش و تأیید"
@@ -377,33 +415,37 @@ export default function ImportStepPage() {
 
       {mode === "provider" ? (
         <SectionCard
-          title="۲. اتصال نرم‌افزار فعلی"
-          description="این اتصال‌ها از صفحهٔ تخصصی خودشان انجام می‌شوند؛ پس از اتصال، ورود اولیه در همان موتور بازبینی و تأیید می‌شود."
+          title="۲. اتصال سیستم موجود"
+          description="اتصال را همین‌جا بسازید یا اتصال موجود را دوباره بررسی کنید. پس از اتصال، ورود اولیه در همان موتور با نگاشت، پیش‌نمایش و تأیید انجام می‌شود."
         >
           <div className="grid gap-3 md:grid-cols-3">
-            {PROVIDER_LINKS.map((provider) => (
-              <Link
-                key={provider.key}
-                href={provider.href}
-                className={`${cardClass} block p-4 transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none`}
+            {PROVIDER_CHOICES.map((choice) => (
+              <button
+                key={choice.key}
+                type="button"
+                onClick={() => {
+                  setProvider(choice.key);
+                  setSheetOpen(true);
+                }}
+                className={`${cardClass} p-4 text-start transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none`}
               >
                 <span className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-foreground">{provider.title}</span>
+                  <span className="font-semibold text-foreground">{choice.title}</span>
                   <Link2Icon className="size-4 text-primary" aria-hidden="true" />
                 </span>
                 <span className="mt-2 block text-sm leading-6 text-muted-foreground">
-                  {provider.description}
+                  {choice.description}
                 </span>
                 <span className="mt-3 block text-xs font-medium text-primary">
-                  رفتن به صفحهٔ اتصال
+                  ساخت یا بررسی اتصال
                 </span>
-              </Link>
+              </button>
             ))}
           </div>
           <p className="mt-4 text-xs leading-5 text-muted-foreground">
-            اتصال یک سرویس، خودکار به معنای همگام‌سازی دوطرفه نیست؛ جهت و مالکیت
-            هر فیلد در همان صفحهٔ اتصال تعیین می‌شود. ورود اولیه همیشه پیش‌نمایش و
-            تأیید دارد.
+            اتصال یک سرویس، خودکار به معنای همگام‌سازی دوطرفه نیست؛ در ساخت اتصال
+            از این مرحله هیچ همگام‌سازی زمان‌بندی‌شده یا نوشتن روی سایت روشن
+            نمی‌شود. جهت و مالکیت هر فیلد بعداً و صریح تعیین می‌شود.
           </p>
         </SectionCard>
       ) : null}
@@ -413,24 +455,28 @@ export default function ImportStepPage() {
           title="۲. ثبت دستی"
           description="فرم‌های اصلی هر بخش؛ مناسب وقتی داده کم است یا فایل آماده ندارید."
         >
-          <ul className="divide-y divide-border rounded-xl border border-border">
-            {manualLinks.map((link) => (
-              <li key={link.href}>
-                <Link
-                  href={link.href}
-                  className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm transition-colors hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
-                >
-                  <span>
-                    <span className="font-medium text-foreground">{link.label}</span>
-                    <span className="mt-0.5 block text-xs text-muted-foreground">
-                      {link.hint}
-                    </span>
+          {industry === "food_service" ? <SetupMenuManualEditor /> : null}
+          <div className="mt-4 rounded-xl border border-border">
+            <p className="border-b border-border px-4 py-2 text-xs font-semibold text-muted-foreground">
+              بقیهٔ بخش‌ها
+            </p>
+            <ul className="divide-y divide-border">
+              {manualDestinations.map((entry) => (
+                <li key={entry.label} className="px-4 py-3 text-sm">
+                  <span className="font-medium text-foreground">{entry.label}</span>
+                  <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
+                    {entry.hint}
                   </span>
-                  <span className="text-xs text-primary">باز کردن</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <p className="mt-3 text-xs leading-5 text-muted-foreground">
+            تا پایان راه‌اندازی، صفحه‌های داخلی برنامه باز نمی‌شوند؛ بنابراین ثبت
+            دستی سنگین‌تر (کالا، طرف‌حساب، سند مالی) یا از همین فایل انجام می‌شود
+            یا بلافاصله بعد از پایان از مسیر نام‌برده در دسترس است. ثبت منو در
+            همین صفحه انجام می‌شود.
+          </p>
         </SectionCard>
       ) : null}
 
@@ -488,6 +534,15 @@ export default function ImportStepPage() {
                       ادامهٔ بازبینی
                     </button>
                   ) : null}
+                  {session.state === "failed" && session.failedRows === 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => void resumeParked(session)}
+                      className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+                    >
+                      از سرگیری پس از فعال‌سازی
+                    </button>
+                  ) : null}
                   {session.errorRows + session.failedRows > 0 ? (
                     <button
                       type="button"
@@ -499,12 +554,6 @@ export default function ImportStepPage() {
                       گزارش خطا
                     </button>
                   ) : null}
-                  <Link
-                    href="/settings/data-transfer"
-                    className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
-                  >
-                    صفحهٔ کامل انتقال داده
-                  </Link>
                 </div>
               </li>
             ))}
@@ -524,6 +573,17 @@ export default function ImportStepPage() {
         پایان راه‌اندازی به این مرحله وابسته نیست. اگر «مرحلهٔ بعد» را بزنید، هر
         جلسهٔ نیمه‌کاره ذخیره می‌ماند و از داشبورد هم قابل ادامه است.
       </p>
+
+      <SetupConnectionSheet
+        open={sheetOpen}
+        onOpenChange={setSheetOpen}
+        initialProvider={provider}
+        onConnected={() => {
+          setSheetOpen(false);
+          setMode("file");
+          void load(true);
+        }}
+      />
     </StepShell>
   );
 }

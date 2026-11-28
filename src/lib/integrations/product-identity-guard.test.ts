@@ -124,4 +124,59 @@ describe("findLocalSkuMatches / assertNoAmbiguousLocalIdentity", () => {
       ),
     ).resolves.toBeUndefined();
   });
+
+  it("matches a SKU-less top-level product by normalised name and stages a review", async () => {
+    const queries: Array<{ text: string; params: unknown[] }> = [];
+    const fake = {
+      query: vi.fn(async (text: string, params: unknown[]) => {
+        queries.push({ text: String(text), params });
+        if (String(text).includes("pg_advisory_xact_lock")) return { rows: [] };
+        if (String(text).includes("FROM items i")) {
+          return { rows: [{ item_id: "item-9", name: "کرم مرطوب‌کننده", kind: "simple", parent_item_id: null }] };
+        }
+        return { rows: [] };
+      }),
+    } as unknown as PoolClient;
+
+    await expect(
+      assertNoAmbiguousLocalIdentity(fake, {
+        businessId: "biz-1",
+        locationId: "loc-1",
+        connectionId: "conn-new",
+        sku: "",
+        name: "  کرم   مرطوب‌کننده ",
+        kind: "simple",
+      }),
+    ).rejects.toThrow(PRODUCT_IDENTITY_REVIEW_REQUIRED);
+
+    const select = queries.find((query) => query.text.includes("FROM items i"));
+    expect(select?.params.slice(0, 3)).toEqual(["biz-1", "loc-1", "کرم   مرطوب‌کننده"]);
+    expect(select?.text).toContain("regexp_replace");
+    expect(select?.params[3]).toBe("simple");
+  });
+
+  it("uses a barcode when the store sends one", async () => {
+    const fake = client([
+      [],
+    ]);
+    await findLocalSkuMatches(fake, { ...input, sku: "  ", barcode: " 0123456789012 ", kind: "simple" });
+    const call = (fake.query as unknown as { mock: { calls: Array<[string, unknown[]]> } }).mock.calls.at(-1);
+    expect(call?.[0]).toContain("i.barcode");
+    expect(call?.[1]).toEqual(["biz-1", "loc-1", "0123456789012"]);
+  });
+
+  it("never name-matches a variation or a child row (siblings share the parent's name)", async () => {
+    const query = vi.fn();
+    const fake = { query } as unknown as PoolClient;
+    await findLocalSkuMatches(fake, {
+      businessId: "biz-1",
+      locationId: "loc-1",
+      connectionId: "conn-new",
+      sku: null,
+      name: "کرم",
+      kind: "variant_child",
+      parentItemId: "parent-1",
+    });
+    expect(query).not.toHaveBeenCalled();
+  });
 });

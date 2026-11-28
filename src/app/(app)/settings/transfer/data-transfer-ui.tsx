@@ -180,6 +180,19 @@ const ERRORS: Record<string, string> = {
   forbidden: "برای این کار روی این نوع داده دسترسی ندارید.",
   unauthorized: "وارد نشده‌اید.",
   network_error: "ارتباط با سرور برقرار نشد.",
+  // GitHub #1580 — effective import access. Each refusal says what the owner
+  // can do next instead of surfacing a raw code; staging is explicitly
+  // preserved where the wizard allows it.
+  service_not_selected:
+    "برنامهٔ صاحب این داده در راه‌اندازی انتخاب نشده است؛ ابتدا آن را انتخاب و فعال کنید.",
+  service_not_activated:
+    "منتظر فعال‌سازی: فایل و پیش‌نمایش ذخیره شده است، اما اجرای ورود تا فعال‌شدن سرویس انجام نمی‌شود.",
+  service_grant_inactive:
+    "دورهٔ رایگان این سرویس به پایان رسیده یا لغو شده است؛ برای اجرای ورود، سرویس را دوباره فعال کنید.",
+  service_suspended:
+    "سرویس این داده متوقف است؛ پیش‌نمایش ممکن است اما ورود اطلاعات اجرا نمی‌شود.",
+  service_unavailable:
+    "این برنامه در حال حاضر در دسترس نیست؛ ورود اطلاعات تا فعال‌شدن آن انجام نمی‌شود.",
 };
 
 export function dataError(code: string | undefined): string {

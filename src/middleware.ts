@@ -440,6 +440,14 @@ const PUBLIC_PATHS = [
   // session. Both endpoints answer 404 while serving is disabled, so nothing is
   // exposed by letting them through the session gate; the handlers do the auth.
   "/api/peer/backup",
+  // The desktop release pipeline posts its Ed25519-signed manifest with the
+  // pipeline's own bearer token (`DESKTOP_RELEASE_PUBLISH_TOKEN`), verified with
+  // a constant-time comparison in the route itself. It has no tenant session by
+  // definition, so without this entry `handleTenantAuth` answers 401 before the
+  // handler runs — the pipeline's registration step then fails with 401 even
+  // though its token is correct. Listing it here only lifts the session gate;
+  // the route still refuses every caller that cannot present the token.
+  "/api/desktop-releases/promote",
   // Phase 19: third-party integrations authenticate each request with a
   // bearer API key inside api-auth.ts, not with a tenant session cookie.
   // Prefix matching keeps every /api/v1/* route reachable pre-session.

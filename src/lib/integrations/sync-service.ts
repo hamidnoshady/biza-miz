@@ -90,6 +90,26 @@ import { WooCommerceError, type WooCustomer, type WooProduct, type WooVariationA
 
 const PER_PAGE = 100;
 
+/**
+ * A GTIN/barcode a store attached to a product, used only as an identity hint
+ * for SKU-less products. Woo core exposes `global_unique_id`; several plugins
+ * put the same value in `meta_data`. Absent means "no extra hint", never an
+ * error.
+ */
+export function wooProductBarcode(product: WooProduct): string | null {
+  const direct = (product as unknown as { global_unique_id?: unknown }).global_unique_id;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  const keys = new Set(["barcode", "_barcode", "gtin", "_gtin", "global_unique_id", "_global_unique_id"]);
+  const meta = (product.meta_data ?? []).find(
+    (entry) =>
+      typeof entry.key === "string" &&
+      keys.has(entry.key) &&
+      typeof entry.value === "string" &&
+      entry.value.trim() !== "",
+  );
+  return meta ? String(meta.value).trim() : null;
+}
+
 async function resolveLocationId(businessId: string, locationId: string | null): Promise<string> {
   if (locationId) return locationId;
   const { rows } = await query<{ id: string }>(
@@ -495,6 +515,10 @@ async function upsertRetailProduct(
         locationId,
         connectionId: connection.id,
         sku: product.sku,
+        name,
+        barcode: wooProductBarcode(product),
+        kind: "variant_parent",
+        parentItemId: null,
       });
       await gateWooCatalogueCreate(client, businessId, locationId, product.sku);
       const { rows } = await client.query<{ id: string }>(
@@ -528,6 +552,10 @@ async function upsertRetailProduct(
       locationId,
       connectionId: connection.id,
       sku: product.sku,
+      name,
+      barcode: wooProductBarcode(product),
+      kind: shape.itemKind,
+      parentItemId,
     });
     await gateWooCatalogueCreate(client, businessId, locationId, product.sku);
     const { rows } = await client.query<{ id: string }>(
