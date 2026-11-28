@@ -97,6 +97,10 @@ export const PAYMENT_METHOD_LABELS: Record<string, string> = {
   online: "پرداخت آنلاین",
   credit: "نسیه",
   snappfood: "اسنپ‌فود",
+  // A bill part-paid from the customer's campaign reward (issue #901). It is a
+  // tender, so the receipt lists it with the money ones — the slice that the
+  // loyalty promise, not the customer's cash, settled.
+  cashback: "بازگشت وجه کمپین",
 };
 
 /**
